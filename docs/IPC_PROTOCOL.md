@@ -53,10 +53,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 2}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 4}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
+
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索。**它和 `protocol` 无关**：v4 只新增表和新增方法，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -218,6 +220,102 @@ POP3 结果：
 
 `html` 可能为空串；返回值**不包含**附件内容，也不包含原始 MIME。
 
+### `message.search`
+
+参数：`{"query": "季度报告", "limit": 50, "offset": 0}`
+
+结果：
+
+```json
+{"total": 3, "messages": [{
+  "id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
+  "subject": "季度报告", "fromAddr": "a@b.com", "toAddr": "me@b.com",
+  "date": "2026-11-04T09:12:00Z", "snippet": "…«季度报告»…", "seen": false
+}]}
+```
+
+- 检索**本地已同步的邮件**（`messages` 表），不联网：本地没有的邮件搜不到，先 `sync.run` 再搜。
+- 检索字段：`subject`、`body_text`（纯文本正文）、`from_addr`、`to_addr`。命中 HTML 里的文字不算命中——`body_text` 才是索引源。
+- `query` 必填，空串 / 全空白 → `BAD_REQUEST`。`limit` 缺省 50、上限 200（超过按 200 处理，小于 1 → `BAD_REQUEST`）；`offset` 缺省 0，负数 → `BAD_REQUEST`。
+- 字段与 `message.list` **完全一致**；`snippet` 换成命中的高亮片段（命中词用 `«` `»` 包住，最长约 12 个词，**不返回整篇正文**）。`total` 是命中的总数，与分页无关。
+- 按相关度（FTS5 `rank`）排序，不是按日期。
+- 查询按**空白切词、逐词加引号转义后 AND**：`合同 报表` = 同时含两个词。`*`、`-`、`OR`、`NEAR(...)`、引号、括号等 FTS5 语法字符都当普通文本处理，**不会**报语法错误；只由标点组成的词没有可检索的字，直接忽略（全都忽略时返回空数组而不是报错）。
+- 分词器是 FTS5 默认的 `unicode61`：**连续汉字算一个词**，所以 `季度报告` 能命中「季度报告」，但 `合同` 命中不了「合同确认书」（两个不同的词）。调用方要按用户输入原样传，别自己加通配符。
+- 索引由触发器维护，`sync.run` / `sync.reset` 增删的邮件自动进/出索引；v3 老库升级到 v4 时会重建一次索引，不需要重新同步。
+
+### `contact.list`
+
+参数：`{}`
+
+结果：
+
+```json
+{"contacts": [{
+  "id": "con_xxx", "name": "张三", "email": "zhang@example.com",
+  "phone": "13800000000", "company": "示例公司", "title": "经理",
+  "notes": "老客户", "createdAt": "2026-11-04T12:00:00Z",
+  "updatedAt": "2026-11-04T12:00:00Z"
+}]}
+```
+
+按 `name` 升序（同名的按 `id`）。通讯录**只存本地**，不同步到邮箱服务器。
+
+### `contact.add`
+
+参数：
+
+```json
+{"name": "张三", "email": "zhang@example.com", "phone": "13800000000",
+ "company": "示例公司", "title": "经理", "notes": "老客户"}
+```
+
+结果：`{"id": "con_xxx"}`
+
+- `name` 必填且不能是空串 / 全空白，否则 `BAD_REQUEST`；其余字段可省略，缺省是空串。
+- 不校验邮箱格式（`email` 可以是空串或多个地址），也不去重。
+
+### `contact.update`
+
+参数：`{"id": "con_xxx", "email": "new@example.com", "title": "总监"}`
+
+结果：`{"updated": true}`
+
+- 只改传了的字段，其余保持原值；`updatedAt` 每次都会刷新。
+- `id` 不存在 → `NOT_FOUND`；`name` 传了但为空 → `BAD_REQUEST`；字段类型不是字符串 → `BAD_REQUEST`。
+- 未知字段忽略。
+
+### `contact.remove`
+
+参数：`{"id": "con_xxx"}` → 结果 `{"removed": true}`；`id` 不存在 → `NOT_FOUND`。
+
+### `template.list`
+
+参数：`{}`
+
+结果：
+
+```json
+{"templates": [{
+  "id": "tpl_xxx", "name": "报价", "subject": "报价单 - {{客户}}",
+  "body": "您好，报价见附件。",
+  "createdAt": "2026-11-04T12:00:00Z", "updatedAt": "2026-11-04T12:00:00Z"
+}]}
+```
+
+按 `createdAt` 升序。模板是**纯本地数据**，不和任何邮箱同步；`{{客户}}` 之类的占位符原样保存，替换由调用方完成。
+
+### `template.add`
+
+参数：`{"name": "报价", "subject": "报价单 - {{客户}}", "body": "您好，报价见附件。"}`
+
+结果：`{"id": "tpl_xxx"}`
+
+- `name` 必填且不能为空串 / 全空白，否则 `BAD_REQUEST`；`subject` / `body` 可省略，缺省空串。
+
+### `template.remove`
+
+参数：`{"id": "tpl_xxx"}` → 结果 `{"removed": true}`；`id` 不存在 → `NOT_FOUND`（与 `account.remove` 一致）。
+
 ### `shutdown`
 
 参数：`{}` → 结果 `{"ok": true}`，随后进程自行退出。
@@ -234,3 +332,4 @@ POP3 结果：
 
 - `protocol` 变化才需要双方同时升级；`version` 仅用于展示。
 - 新增方法不做破坏性变更；删除或改签名的旧方法必须提升 `protocol`。
+- 数据库 `schemaVersion` 独立于 `protocol`：v4 只**新增** `contacts`、`templates` 和 `messages_fts`（FTS5 external content 表 + 三个同步触发器），不改旧表；老库（v1~v3）启动时自动逐级迁移，v4 迁移会把已有 `messages` 全量重建进索引，不需要重新同步。

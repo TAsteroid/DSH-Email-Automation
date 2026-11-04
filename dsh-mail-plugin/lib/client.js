@@ -107,6 +107,39 @@ window.__ModuleLoader__.load({
         earlierMail: '更早的邮件',
         clickToExpand: '点击展开',
         clickToCollapse: '点击收起',
+        deleted: '已删除',
+        junk: '垃圾邮件',
+        historyMail: '历史邮件',
+        templates: '模板',
+        contacts: '通讯录',
+        searchPlaceholder: '搜索联系人 / 主题 / 邮件内容',
+        searchResults: '搜索结果',
+        searchEmpty: '没有匹配的邮件',
+        folderMissing: '没找到对应文件夹，先到设置里点一次「测试连接」把文件夹列表拉下来。',
+        templateNew: '新建模板',
+        templateName: '模板名称',
+        templateSubject: '默认主题',
+        templateBody: '正文',
+        templateSave: '保存',
+        templateDelete: '删除',
+        templateSaved: '已保存',
+        templatesEmpty: '还没有模板',
+        contactNew: '新建联系人',
+        contactName: '姓名',
+        contactEmail: '邮箱',
+        contactPhone: '电话',
+        contactCompany: '公司',
+        contactTitle: '职位',
+        contactNotes: '备注',
+        contactSave: '保存',
+        contactDelete: '删除',
+        contactSaved: '已保存',
+        contactsEmpty: '还没有联系人',
+        contactChatTitle: '让 Agent 处理这个联系人',
+        contactChatPlaceholder: '例如：给这个人起草一封回复邮件，语气正式一些…',
+        contactChatCopy: '复制提示词',
+        contactChatCopied: '已复制到剪贴板',
+        contactChatHint: 'DSH 目前没有向运行中的 Agent 注入消息的公开接口，这里生成一段带联系人上下文的提示词，复制到对话里发出。',
         todo: '待跟进',
         ai: 'AI 工作台',
         drafts: '草稿箱',
@@ -224,6 +257,39 @@ window.__ModuleLoader__.load({
         earlierMail: 'Earlier message',
         clickToExpand: 'Click to expand',
         clickToCollapse: 'Click to collapse',
+        deleted: 'Deleted',
+        junk: 'Junk',
+        historyMail: 'Archive',
+        templates: 'Templates',
+        contacts: 'Contacts',
+        searchPlaceholder: 'Search contacts, subjects, mail bodies',
+        searchResults: 'Search results',
+        searchEmpty: 'No matching mail',
+        folderMissing: 'Folder not found. Run "Test connection" in Settings once to load the folder list.',
+        templateNew: 'New template',
+        templateName: 'Template name',
+        templateSubject: 'Default subject',
+        templateBody: 'Body',
+        templateSave: 'Save',
+        templateDelete: 'Delete',
+        templateSaved: 'Saved',
+        templatesEmpty: 'No templates yet',
+        contactNew: 'New contact',
+        contactName: 'Name',
+        contactEmail: 'Email',
+        contactPhone: 'Phone',
+        contactCompany: 'Company',
+        contactTitle: 'Title',
+        contactNotes: 'Notes',
+        contactSave: 'Save',
+        contactDelete: 'Delete',
+        contactSaved: 'Saved',
+        contactsEmpty: 'No contacts yet',
+        contactChatTitle: 'Ask the Agent about this contact',
+        contactChatPlaceholder: 'e.g. Draft a formal reply to this person…',
+        contactChatCopy: 'Copy prompt',
+        contactChatCopied: 'Copied to clipboard',
+        contactChatHint: 'DSH exposes no public API to inject a message into a running Agent, so this composes a prompt with the contact context for you to paste into the conversation.',
         todo: 'Follow-ups',
         ai: 'AI workspace',
         drafts: 'Drafts',
@@ -337,8 +403,13 @@ window.__ModuleLoader__.load({
       ['inbox', 'inbox'],
       ['todo', 'todo'],
       ['sent', 'sent'],
+      ['draftsMail', 'drafts'],
+      ['deleted', 'deleted'],
+      ['junk', 'junk'],
+      ['historyMail', 'historyMail'],
+      ['templates', 'templates'],
+      ['contacts', 'contacts'],
       ['ai', 'ai'],
-      ['drafts', 'drafts'],
       ['knowledge', 'knowledge'],
       ['settings', 'settings'],
     ]
@@ -674,6 +745,57 @@ window.__ModuleLoader__.load({
         fontSize: 12,
       },
       settingsBox: { maxWidth: 720, margin: '0 auto' },
+      navScroll: {
+        flex: 'none',
+        display: 'flex',
+        gap: 2,
+        padding: '0 20px',
+        borderBottom: '1px solid var(--dsw-alias-border-l2)',
+        overflowX: 'auto',
+        overflowY: 'hidden',
+      },
+      searchWrap: {
+        flex: '0 1 420px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        minWidth: 160,
+        padding: '3px 10px',
+        borderRadius: 999,
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'var(--dsw-alias-bg-layer-2)',
+      },
+      searchInput: {
+        flex: 1,
+        minWidth: 0,
+        border: 'none',
+        outline: 'none',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 12,
+        fontFamily: 'inherit',
+      },
+      formRow: { display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 },
+      textArea: {
+        background: 'transparent',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-sm)',
+        padding: '8px 10px',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 13,
+        fontFamily: 'inherit',
+        minHeight: 72,
+        resize: 'vertical',
+      },
+      formActions: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 },
+      chatBox: {
+        marginTop: 18,
+        borderTop: '1px solid var(--dsw-alias-border-l2)',
+        paddingTop: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      },
       railPanel: {
         width: 280,
         flex: 'none',
@@ -1419,8 +1541,8 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** 发件箱：左侧已发送邮件标题，右侧正文；文件夹名从服务器解码结果里找。 */
-    function SentView({ t, status }) {
+    /** 通用文件夹视图：左侧邮件标题，右侧正文；文件夹名从服务器解码结果里按模式找。 */
+    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey }) {
       const accounts = (status && status.accounts) || []
       const account = accounts.length > 0 ? accounts[0] : null
       const [folder, setFolder] = React.useState(null)
@@ -1449,15 +1571,15 @@ window.__ModuleLoader__.load({
         let cancelled = false
         async function boot() {
           if (!account) {
-            setNote(t('sentFolderMissing'))
+            setNote(t('folderMissing'))
             return
           }
           try {
             const value = await call('/folders', { accountId: account.id })
-            const found = (value.folders || []).find((item) => /sent|已发送/i.test(item.name || ''))
+            const found = (value.folders || []).find((item) => folderPattern.test(item.name || ''))
             if (cancelled) return
             if (!found) {
-              setNote(t('sentFolderMissing'))
+              setNote(t('folderMissing'))
               return
             }
             setNote(null)
@@ -1504,10 +1626,10 @@ window.__ModuleLoader__.load({
         title: message.subject || t('noSubject'),
         meta: `${message.toAddr || ''} · ${message.date || ''}`,
       }))
-      const groups = [{ id: 'sent', title: folder || t('sent'), items }]
+      const groups = [{ id: storageKey, title: folder || t(titleKey), items }]
 
       return h(SplitPane, {
-        storageKey: 'sent',
+        storageKey,
         spec: PANE_SPEC,
         label: t('resize'),
         left: h(GroupList, {
@@ -1531,6 +1653,458 @@ window.__ModuleLoader__.load({
         right: note
           ? h('div', { style: styles.detail }, h('p', { style: styles.muted }, note))
           : h(MessageDetail, { t, message: detail, accountAddress }),
+      })
+    }
+
+    function SentView({ t, status }) {
+      return h(MailFolderView, {
+        t,
+        status,
+        storageKey: 'sent',
+        folderPattern: /sent|已发送/i,
+        titleKey: 'sent',
+        emptyHintKey: 'sentEmptyHint',
+      })
+    }
+
+    function DraftsMailView({ t, status }) {
+      return h(MailFolderView, {
+        t,
+        status,
+        storageKey: 'draftsMail',
+        folderPattern: /draft|草稿/i,
+        titleKey: 'drafts',
+        emptyHintKey: 'sentEmptyHint',
+      })
+    }
+
+    function DeletedView({ t, status }) {
+      return h(MailFolderView, {
+        t,
+        status,
+        storageKey: 'deleted',
+        folderPattern: /deleted|trash|已删除|废纸/i,
+        titleKey: 'deleted',
+        emptyHintKey: 'sentEmptyHint',
+      })
+    }
+
+    function JunkView({ t, status }) {
+      return h(MailFolderView, {
+        t,
+        status,
+        storageKey: 'junk',
+        folderPattern: /junk|spam|垃圾/i,
+        titleKey: 'junk',
+        emptyHintKey: 'sentEmptyHint',
+      })
+    }
+
+    function HistoryMailView({ t, status }) {
+      return h(MailFolderView, {
+        t,
+        status,
+        storageKey: 'historyMail',
+        folderPattern: /archive|history|历史/i,
+        titleKey: 'historyMail',
+        emptyHintKey: 'sentEmptyHint',
+      })
+    }
+
+    /** 模板：纯本地保存，不和邮箱同步。 */
+    function TemplatesView({ t }) {
+      const [templates, setTemplates] = React.useState([])
+      const [selectedId, setSelectedId] = React.useState(null)
+      const [draft, setDraft] = React.useState({ name: '', subject: '', body: '' })
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      const load = React.useCallback(async () => {
+        try {
+          const value = await call('/templates', {})
+          setTemplates((value && value.templates) || [])
+        } catch (error) {
+          setNote(error.message)
+        }
+      }, [])
+
+      React.useEffect(() => {
+        void load()
+      }, [load])
+
+      const select = (id) => {
+        const found = templates.find((item) => item.id === id)
+        setSelectedId(id)
+        setDraft(found ? { name: found.name, subject: found.subject, body: found.body } : { name: '', subject: '', body: '' })
+        setNote(null)
+      }
+
+      const startNew = () => {
+        setSelectedId(null)
+        setDraft({ name: '', subject: '', body: '' })
+        setNote(null)
+      }
+
+      const save = async (event) => {
+        event.preventDefault()
+        if (busy) return
+        setBusy(true)
+        try {
+          await call('/templates/add', draft)
+          await load()
+          setNote(t('templateSaved'))
+          setDraft({ name: '', subject: '', body: '' })
+          setSelectedId(null)
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const remove = async () => {
+        if (!selectedId || busy) return
+        setBusy(true)
+        try {
+          await call('/templates/remove', { id: selectedId })
+          setSelectedId(null)
+          setDraft({ name: '', subject: '', body: '' })
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const groups = [
+        {
+          id: 'templates',
+          title: t('templates'),
+          items: templates.map((item) => ({ id: item.id, title: item.name, meta: item.subject || '' })),
+        },
+      ]
+
+      return h(SplitPane, {
+        storageKey: 'templates',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, {
+          t,
+          groups,
+          selectedId,
+          onSelect: select,
+          headerActions: h(
+            'button',
+            { type: 'button', style: styles.iconBtn, title: t('templateNew'), onClick: startNew },
+            '＋',
+          ),
+        }),
+        right: h(
+          'form',
+          { style: styles.detail, onSubmit: save },
+          h('p', { style: styles.sectionTitle }, selectedId ? draft.name || t('templates') : t('templateNew')),
+          h(
+            'label',
+            { style: styles.formRow },
+            h('span', { style: styles.label }, t('templateName')),
+            h('input', {
+              style: styles.textInput,
+              value: draft.name,
+              onChange: (event) => setDraft((prev) => ({ ...prev, name: event.target.value })),
+            }),
+          ),
+          h(
+            'label',
+            { style: styles.formRow },
+            h('span', { style: styles.label }, t('templateSubject')),
+            h('input', {
+              style: styles.textInput,
+              value: draft.subject,
+              onChange: (event) => setDraft((prev) => ({ ...prev, subject: event.target.value })),
+            }),
+          ),
+          h(
+            'label',
+            { style: styles.formRow },
+            h('span', { style: styles.label }, t('templateBody')),
+            h('textarea', {
+              style: styles.textArea,
+              value: draft.body,
+              onChange: (event) => setDraft((prev) => ({ ...prev, body: event.target.value })),
+            }),
+          ),
+          h(
+            'div',
+            { style: styles.formActions },
+            h('button', { type: 'submit', style: styles.btn, disabled: busy }, t('templateSave')),
+            selectedId ? h('button', { type: 'button', style: styles.dangerBtn, onClick: remove, disabled: busy }, t('templateDelete')) : null,
+            note ? h('span', { style: styles.muted }, note) : null,
+          ),
+          templates.length === 0 ? h('p', { style: styles.muted }, t('templatesEmpty')) : null,
+        ),
+      })
+    }
+
+    /** 通讯录：左列表 / 右详情 + Agent 提示词生成。 */
+    function ContactsView({ t }) {
+      const blank = { name: '', email: '', phone: '', company: '', title: '', notes: '' }
+      const [contacts, setContacts] = React.useState([])
+      const [selectedId, setSelectedId] = React.useState(null)
+      const [draft, setDraft] = React.useState(blank)
+      const [note, setNote] = React.useState(null)
+      const [prompt, setPrompt] = React.useState('')
+      const [copied, setCopied] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+
+      const load = React.useCallback(async () => {
+        try {
+          const value = await call('/contacts', {})
+          setContacts((value && value.contacts) || [])
+        } catch (error) {
+          setNote(error.message)
+        }
+      }, [])
+
+      React.useEffect(() => {
+        void load()
+      }, [load])
+
+      const select = (id) => {
+        const found = contacts.find((item) => item.id === id)
+        setSelectedId(id)
+        setDraft(
+          found
+            ? {
+                name: found.name || '',
+                email: found.email || '',
+                phone: found.phone || '',
+                company: found.company || '',
+                title: found.title || '',
+                notes: found.notes || '',
+              }
+            : blank,
+        )
+        setPrompt('')
+        setNote(null)
+      }
+
+      const field = (labelKey, key, extra) =>
+        h(
+          'label',
+          { style: styles.formRow },
+          h('span', { style: styles.label }, t(labelKey)),
+          h('input', {
+            style: styles.textInput,
+            value: draft[key],
+            onChange: (event) => setDraft((prev) => ({ ...prev, [key]: event.target.value })),
+            ...extra,
+          }),
+        )
+
+      const save = async (event) => {
+        event.preventDefault()
+        if (busy) return
+        setBusy(true)
+        try {
+          await call('/contacts/add', draft)
+          setDraft(blank)
+          setSelectedId(null)
+          setNote(t('contactSaved'))
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const remove = async () => {
+        if (!selectedId || busy) return
+        setBusy(true)
+        try {
+          await call('/contacts/remove', { id: selectedId })
+          setSelectedId(null)
+          setDraft(blank)
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const composePrompt = () => {
+        const who = [draft.name, draft.company, draft.title].filter(Boolean).join(' / ')
+        const lines = [`联系人：${who || draft.email || '(未命名)'}`]
+        if (draft.email) lines.push(`邮箱：${draft.email}`)
+        if (draft.phone) lines.push(`电话：${draft.phone}`)
+        if (draft.notes) lines.push(`备注：${draft.notes}`)
+        lines.push('', prompt.trim() || '请根据以上联系人信息帮我处理相关邮件。')
+        return lines.join('\n')
+      }
+
+      const copyPrompt = async () => {
+        const text = composePrompt()
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard) {
+            await navigator.clipboard.writeText(text)
+          }
+          setCopied(true)
+        } catch {
+          setNote(text)
+        }
+      }
+
+      const groups = [
+        {
+          id: 'contacts',
+          title: t('contacts'),
+          items: contacts.map((item) => ({
+            id: item.id,
+            title: item.name || item.email || '(未命名)',
+            meta: [item.company, item.email].filter(Boolean).join(' · '),
+          })),
+        },
+      ]
+
+      return h(SplitPane, {
+        storageKey: 'contacts',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, {
+          t,
+          groups,
+          selectedId,
+          onSelect: select,
+          headerActions: h(
+            'button',
+            {
+              type: 'button',
+              style: styles.iconBtn,
+              title: t('contactNew'),
+              onClick: () => {
+                setSelectedId(null)
+                setDraft(blank)
+                setPrompt('')
+                setNote(null)
+              },
+            },
+            '＋',
+          ),
+        }),
+        right: h(
+          'form',
+          { style: styles.detail, onSubmit: save },
+          h('p', { style: styles.sectionTitle }, selectedId ? draft.name || t('contacts') : t('contactNew')),
+          h('div', { style: styles.formGrid }, field('contactName', 'name'), field('contactEmail', 'email', { type: 'email' })),
+          h('div', { style: styles.formGrid }, field('contactPhone', 'phone'), field('contactCompany', 'company')),
+          h('div', { style: styles.formGrid }, field('contactTitle', 'title')),
+          h(
+            'label',
+            { style: styles.formRow },
+            h('span', { style: styles.label }, t('contactNotes')),
+            h('textarea', {
+              style: styles.textArea,
+              value: draft.notes,
+              onChange: (event) => setDraft((prev) => ({ ...prev, notes: event.target.value })),
+            }),
+          ),
+          h(
+            'div',
+            { style: styles.formActions },
+            h('button', { type: 'submit', style: styles.btn, disabled: busy }, t('contactSave')),
+            selectedId ? h('button', { type: 'button', style: styles.dangerBtn, onClick: remove, disabled: busy }, t('contactDelete')) : null,
+            note ? h('span', { style: styles.muted }, note) : null,
+          ),
+          contacts.length === 0 ? h('p', { style: styles.muted }, t('contactsEmpty')) : null,
+          h(
+            'div',
+            { style: styles.chatBox },
+            h('p', { style: styles.sectionTitle }, t('contactChatTitle')),
+            h('textarea', {
+              style: styles.textArea,
+              value: prompt,
+              placeholder: t('contactChatPlaceholder'),
+              onChange: (event) => {
+                setPrompt(event.target.value)
+                setCopied(false)
+              },
+            }),
+            h(
+              'div',
+              { style: styles.formActions },
+              h('button', { type: 'button', style: styles.btn, onClick: copyPrompt }, t('contactChatCopy')),
+              copied ? h('span', { style: styles.muted }, t('contactChatCopied')) : null,
+            ),
+            h('p', { style: styles.muted }, t('contactChatHint')),
+          ),
+        ),
+      })
+    }
+
+    /** 搜索结果：查询非空时接管主区域。 */
+    function SearchView({ t, query, status }) {
+      const accounts = (status && status.accounts) || []
+      const accountAddress = accounts.length > 0 ? accounts[0].address : ''
+      const [messages, setMessages] = React.useState([])
+      const [selectedId, setSelectedId] = React.useState(null)
+      const [detail, setDetail] = React.useState(null)
+      const [total, setTotal] = React.useState(0)
+      const [note, setNote] = React.useState(null)
+
+      React.useEffect(() => {
+        let cancelled = false
+        async function search() {
+          try {
+            const value = await call('/search', { query, limit: 100 })
+            if (cancelled) return
+            setMessages((value && value.messages) || [])
+            setTotal((value && value.total) || 0)
+            setNote(null)
+          } catch (error) {
+            if (!cancelled) setNote(error.message)
+          }
+        }
+        void search()
+        return () => {
+          cancelled = true
+        }
+      }, [query])
+
+      const select = async (id) => {
+        setSelectedId(id)
+        setDetail(null)
+        try {
+          setDetail(await call('/message', { id }))
+        } catch {
+          setDetail(null)
+        }
+      }
+
+      const groups = [
+        {
+          id: 'search',
+          title: `${t('searchResults')} · ${total}`,
+          items: messages.map((message) => ({
+            id: message.id,
+            title: message.subject || t('noSubject'),
+            meta: `${message.fromAddr || ''} · ${message.date || ''}`,
+          })),
+        },
+      ]
+
+      return h(SplitPane, {
+        storageKey: 'search',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, { t, groups, selectedId, onSelect: select }),
+        right:
+          note !== null
+            ? h('div', { style: styles.detail }, h('p', { style: styles.muted }, note))
+            : messages.length === 0
+              ? h('div', { style: styles.detail }, h('p', { style: styles.muted }, t('searchEmpty')))
+              : h(MessageDetail, { t, message: detail, accountAddress }),
       })
     }
 
@@ -1953,7 +2527,7 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 顶栏 --------------------------------------------------------------
-    function TopBar({ t, status, onRefresh }) {
+    function TopBar({ t, status, onRefresh, query, onQueryChange }) {
       const core = (status && status.core) || null
       const ok = Boolean(core && core.state === 'ready')
       const pending = (status && status.counters && status.counters.pendingAi) || 0
@@ -1968,6 +2542,32 @@ window.__ModuleLoader__.load({
         { style: styles.topbar },
         h('h1', { style: styles.title }, t('title')),
         h('span', { style: styles.spacer }),
+        h(
+          'div',
+          { style: styles.searchWrap },
+          h(
+            'svg',
+            {
+              width: 13,
+              height: 13,
+              viewBox: '0 0 16 16',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 1.4,
+              strokeLinecap: 'round',
+              'aria-hidden': true,
+            },
+            h('circle', { cx: 7, cy: 7, r: 4.2 }),
+            h('path', { d: 'M10.2 10.2L13.5 13.5' }),
+          ),
+          h('input', {
+            style: styles.searchInput,
+            value: query,
+            placeholder: t('searchPlaceholder'),
+            'aria-label': t('searchPlaceholder'),
+            onChange: (event) => onQueryChange(event.target.value),
+          }),
+        ),
         h('span', { style: styles.badge(pending > 0), title: t('pendingAi') }, `${t('pendingAi')} ${pending}`),
         h('span', { style: styles.pill(ok), title }, h('span', { style: styles.dot(ok) }), label),
         h(
@@ -1983,6 +2583,7 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = React.useState('inbox')
       const [status, setStatus] = React.useState(null)
       const [error, setError] = React.useState(null)
+      const [query, setQuery] = React.useState('')
 
       const load = React.useCallback(
         (signal) =>
@@ -2006,11 +2607,17 @@ window.__ModuleLoader__.load({
       const refresh = () => load(new AbortController().signal)
 
       let content
-      if (tab === 'inbox') content = h(InboxView, { t, status })
+      if (query.trim().length > 0) content = h(SearchView, { t, query: query.trim(), status })
+      else if (tab === 'inbox') content = h(InboxView, { t, status })
       else if (tab === 'todo') content = h(TodoView, { t, status })
       else if (tab === 'sent') content = h(SentView, { t, status })
+      else if (tab === 'draftsMail') content = h(DraftsMailView, { t, status })
+      else if (tab === 'deleted') content = h(DeletedView, { t, status })
+      else if (tab === 'junk') content = h(JunkView, { t, status })
+      else if (tab === 'historyMail') content = h(HistoryMailView, { t, status })
+      else if (tab === 'templates') content = h(TemplatesView, { t })
+      else if (tab === 'contacts') content = h(ContactsView, { t })
       else if (tab === 'ai') content = h(AiWorkbench, { t, status })
-      else if (tab === 'drafts') content = h(DraftsView, { t, status })
       else if (tab === 'knowledge') content = h(KnowledgeView, { t, status })
       else content = h(SettingsView, { t, status, onRefresh: refresh })
 
@@ -2018,10 +2625,10 @@ window.__ModuleLoader__.load({
         'div',
         { style: styles.panel },
         h('style', { dangerouslySetInnerHTML: { __html: SELECT_CSS } }),
-        h(TopBar, { t, status, onRefresh: refresh }),
+        h(TopBar, { t, status, onRefresh: refresh, query, onQueryChange: setQuery }),
         h(
           'nav',
-          { style: styles.nav, role: 'tablist', 'aria-label': t('title') },
+          { style: styles.navScroll, role: 'tablist', 'aria-label': t('title') },
           TABS.map(([id, key]) =>
             h(
               'button',
@@ -2101,6 +2708,14 @@ window.__ModuleLoader__.load({
         MailPanel,
         InboxView,
         SentView,
+        DraftsMailView,
+        DeletedView,
+        JunkView,
+        HistoryMailView,
+        MailFolderView,
+        TemplatesView,
+        ContactsView,
+        SearchView,
         MessageList,
         MessageDetail,
         ThreadBubbles,

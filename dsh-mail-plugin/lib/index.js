@@ -581,6 +581,104 @@ export function apply(ctx, config) {
     'mail: register mail_message tool',
   )
 
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_search',
+        description:
+          'Full-text search over the locally indexed mail (subject, body, sender, recipient). Returns the newest matches with a highlighted snippet. Read-only.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            query: { type: 'string', description: 'Keywords; whitespace separated, all must match' },
+            limit: { type: 'number' },
+            offset: { type: 'number' },
+          },
+          required: ['query'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              total: { type: 'number' },
+              messages: { type: 'array', items: { type: 'object' } },
+            },
+            required: ['available', 'total', 'messages'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `search failed: ${value.reason ?? 'unknown'}` }]
+            if (value.messages.length === 0) return [{ type: 'text', text: 'no matches' }]
+            const lines = value.messages.map(
+              (message) =>
+                `- [${message.date || '?'}] ${message.fromAddr || '?'} · ${message.subject || '(no subject)'} (${message.id})`,
+            )
+            return [{ type: 'text', text: `${value.total} match(es):\n${lines.join('\n')}` }]
+          },
+        },
+        timeoutMs: 30_000,
+        isConcurrencySafe: () => true,
+        async execute(args) {
+          const result = await callCore('message.search', {
+            query: args.query,
+            limit: args.limit,
+            offset: args.offset,
+          })
+          if (!result.available) return { available: false, reason: result.reason.message, total: 0, messages: [] }
+          return { available: true, reason: '', total: result.value?.total ?? 0, messages: result.value?.messages ?? [] }
+        },
+      }),
+    'mail: register mail_search tool',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_contacts',
+        description:
+          'List saved contacts (name, email, phone, company, title, notes). Use it to resolve a person before acting on their mail. Read-only.',
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              contacts: { type: 'array', items: { type: 'object' } },
+            },
+            required: ['available', 'contacts'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `cannot list contacts: ${value.reason ?? 'unknown'}` }]
+            if (value.contacts.length === 0) return [{ type: 'text', text: 'no contacts saved' }]
+            const lines = value.contacts.map((contact) =>
+              [
+                contact.name || '(no name)',
+                contact.email,
+                contact.company,
+                contact.phone,
+              ]
+                .filter(Boolean)
+                .join(' · '),
+            )
+            return [{ type: 'text', text: lines.join('\n') }]
+          },
+        },
+        timeoutMs: 20_000,
+        isConcurrencySafe: () => true,
+        async execute() {
+          const result = await callCore('contact.list', {})
+          if (!result.available) return { available: false, reason: result.reason.message, contacts: [] }
+          return { available: true, reason: '', contacts: result.value?.contacts ?? [] }
+        },
+      }),
+    'mail: register mail_contacts tool',
+  )
+
   // 3) 本机 HTTP 通道
   ctx.effect(() => {
     const disposers = []
@@ -673,6 +771,51 @@ export function apply(ctx, config) {
     route('/folders', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')
       return requireCoreResult(await callCore('folder.list', { accountId }))
+    })
+
+    route('/search', async (body) => {
+      const query = requireText(body.query, 'query')
+      const limit = body.limit === undefined ? 50 : Number(body.limit)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('limit must be 1..200')
+      return requireCoreResult(await callCore('message.search', { query, limit }))
+    })
+
+    route('/contacts', async () => requireCoreResult(await callCore('contact.list', {})))
+
+    route('/contacts/add', async (body) => {
+      const name = requireText(body.name, 'name')
+      const params = {
+        name,
+        email: typeof body.email === 'string' ? body.email.trim() : '',
+        phone: typeof body.phone === 'string' ? body.phone.trim() : '',
+        company: typeof body.company === 'string' ? body.company.trim() : '',
+        title: typeof body.title === 'string' ? body.title.trim() : '',
+        notes: typeof body.notes === 'string' ? body.notes.trim() : '',
+      }
+      return requireCoreResult(await callCore('contact.add', params))
+    })
+
+    route('/contacts/remove', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('contact.remove', { id }))
+    })
+
+    route('/templates', async () => requireCoreResult(await callCore('template.list', {})))
+
+    route('/templates/add', async (body) => {
+      const name = requireText(body.name, 'name')
+      return requireCoreResult(
+        await callCore('template.add', {
+          name,
+          subject: typeof body.subject === 'string' ? body.subject.trim() : '',
+          body: typeof body.body === 'string' ? body.body : '',
+        }),
+      )
+    })
+
+    route('/templates/remove', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('template.remove', { id }))
     })
 
     route('/messages', async (body) => {

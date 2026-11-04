@@ -117,6 +117,22 @@ function handleMethod(method, params) {
   if (method === 'sync.reset') {
     return { accountId: params.accountId, folder: params.folder ?? 'INBOX', removed: 3 }
   }
+  if (method === 'folder.list') {
+    return { folders: [{ name: '已发送', delimiter: '/', flags: [] }] }
+  }
+  if (method === 'message.search') {
+    return { total: 1, messages: [{ id: 'msg_1', subject: '合同确认', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', snippet: '…«合同»…' }] }
+  }
+  if (method === 'contact.list') {
+    return { contacts: [{ id: 'con_1', name: '张三', email: 'z@b.com', phone: '', company: 'CBE', title: '', notes: '' }] }
+  }
+  if (method === 'contact.add') return { id: 'con_new' }
+  if (method === 'contact.remove') return { removed: true }
+  if (method === 'template.list') {
+    return { templates: [{ id: 'tpl_1', name: '报价回复', subject: 'Re', body: '你好' }] }
+  }
+  if (method === 'template.add') return { id: 'tpl_new' }
+  if (method === 'template.remove') return { removed: true }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -464,6 +480,55 @@ const resetThenSync = await invoke('/api/dsh-mail/sync', {
   body: JSON.stringify({ accountId: 'acc_1', reset: true }),
 })
 check(resetThenSync && resetThenSync.status === 200, `reset 后同步应 200，实际 ${resetThenSync && resetThenSync.status}`)
+
+// ---- 搜索 / 通讯录 / 模板路由 ---------------------------------------------
+const searchRoute = await invoke('/api/dsh-mail/search', {
+  method: 'POST',
+  body: JSON.stringify({ query: '合同' }),
+})
+check(searchRoute && searchRoute.status === 200, `search 应 200，实际 ${searchRoute && searchRoute.status}`)
+if (searchRoute && searchRoute.body) {
+  const parsed = JSON.parse(searchRoute.body)
+  check(parsed.value.total === 1 && parsed.value.messages.length === 1, 'search 应透传 Core 结果')
+  check(parsed.value.messages[0].snippet.includes('«'), 'search 结果应带高亮片段')
+}
+
+const searchEmptyQuery = await invoke('/api/dsh-mail/search', { method: 'POST', body: JSON.stringify({ query: '  ' }) })
+check(searchEmptyQuery && searchEmptyQuery.status === 400, `空 query 应 400，实际 ${searchEmptyQuery && searchEmptyQuery.status}`)
+
+const contactsRoute = await invoke('/api/dsh-mail/contacts', { method: 'POST', body: '{}' })
+check(contactsRoute && contactsRoute.status === 200, `contacts 应 200，实际 ${contactsRoute && contactsRoute.status}`)
+if (contactsRoute && contactsRoute.body) {
+  const parsed = JSON.parse(contactsRoute.body)
+  check(parsed.value.contacts.length === 1 && parsed.value.contacts[0].name === '张三', 'contacts 应返回联系人')
+}
+
+const contactAddNoName = await invoke('/api/dsh-mail/contacts/add', {
+  method: 'POST',
+  body: JSON.stringify({ email: 'a@b.com' }),
+})
+check(contactAddNoName && contactAddNoName.status === 400, `缺姓名应 400，实际 ${contactAddNoName && contactAddNoName.status}`)
+
+const contactAdd = await invoke('/api/dsh-mail/contacts/add', {
+  method: 'POST',
+  body: JSON.stringify({ name: '李四', email: 'l@b.com', company: 'CBE' }),
+})
+check(contactAdd && contactAdd.status === 200, `新增联系人应 200，实际 ${contactAdd && contactAdd.status}`)
+
+const templatesRoute = await invoke('/api/dsh-mail/templates', { method: 'POST', body: '{}' })
+check(templatesRoute && templatesRoute.status === 200, `templates 应 200，实际 ${templatesRoute && templatesRoute.status}`)
+
+const templateAddNoName = await invoke('/api/dsh-mail/templates/add', {
+  method: 'POST',
+  body: JSON.stringify({ subject: 'x' }),
+})
+check(templateAddNoName && templateAddNoName.status === 400, `模板缺名称应 400，实际 ${templateAddNoName && templateAddNoName.status}`)
+
+const foldersRoute = await invoke('/api/dsh-mail/folders', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1' }),
+})
+check(foldersRoute && foldersRoute.status === 200, `folders 应 200，实际 ${foldersRoute && foldersRoute.status}`)
 
 const syncRoute = await invoke('/api/dsh-mail/sync', {
   method: 'POST',

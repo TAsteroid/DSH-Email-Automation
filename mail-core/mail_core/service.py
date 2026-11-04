@@ -26,7 +26,7 @@ from .protocol import (
     MailCoreError,
     bad_request,
 )
-from .store import Store
+from .store import CONTACT_FIELDS, Store
 
 SECURITY_MODES = imap_client.SECURITY_MODES
 PROTOCOLS = ("imap", "pop3")
@@ -156,6 +156,14 @@ class Service:
             "sync.reset": self._sync_reset,
             "message.list": self._message_list,
             "message.get": self._message_get,
+            "message.search": self._message_search,
+            "contact.list": self._contact_list,
+            "contact.add": self._contact_add,
+            "contact.update": self._contact_update,
+            "contact.remove": self._contact_remove,
+            "template.list": self._template_list,
+            "template.add": self._template_add,
+            "template.remove": self._template_remove,
             "shutdown": self._shutdown,
         }
 
@@ -411,6 +419,86 @@ class Service:
         if message is None:
             raise MailCoreError(NOT_FOUND, "message not found")
         return message
+
+    def _message_search(self, params: dict) -> dict:
+        """Full-text search over the local index (see ``message.search``).
+
+        ``query`` is free text: the store quotes every whitespace-separated
+        term so FTS5 operators in the input are literal text, never syntax.
+        """
+        query = params.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise bad_request("field query must be a non-empty string")
+        limit = _optional_int(params, "limit", 50, minimum=1, maximum=200)
+        offset = _optional_int(params, "offset", 0, minimum=0)
+
+        total, messages = self.store.search_messages(
+            query.strip(), limit=limit, offset=offset
+        )
+        return {"total": total, "messages": messages}
+
+    # -- contacts ----------------------------------------------------------
+
+    def _contact_list(self, _params: dict) -> dict:
+        return {"contacts": self.store.list_contacts()}
+
+    def _contact_add(self, params: dict) -> dict:
+        name = _require_str(params, "name")
+        contact_id = f"con_{uuid.uuid4().hex}"
+        self.store.add_contact(
+            contact_id=contact_id,
+            name=name,
+            email=_optional_str(params, "email", ""),
+            phone=_optional_str(params, "phone", ""),
+            company=_optional_str(params, "company", ""),
+            title=_optional_str(params, "title", ""),
+            notes=_optional_str(params, "notes", ""),
+        )
+        return {"id": contact_id}
+
+    def _contact_update(self, params: dict) -> dict:
+        contact_id = _require_str(params, "id")
+        changes: dict[str, str] = {}
+        for field in CONTACT_FIELDS:
+            if field not in params or params[field] is None:
+                continue
+            value = params[field]
+            if not isinstance(value, str):
+                raise bad_request(f"field {field} must be a string")
+            if field == "name" and not value.strip():
+                raise bad_request("field name must be a non-empty string")
+            changes[field] = value
+        if not self.store.update_contact(contact_id, changes):
+            raise MailCoreError(NOT_FOUND, "contact not found")
+        return {"updated": True}
+
+    def _contact_remove(self, params: dict) -> dict:
+        contact_id = _require_str(params, "id")
+        if not self.store.remove_contact(contact_id):
+            raise MailCoreError(NOT_FOUND, "contact not found")
+        return {"removed": True}
+
+    # -- templates ---------------------------------------------------------
+
+    def _template_list(self, _params: dict) -> dict:
+        return {"templates": self.store.list_templates()}
+
+    def _template_add(self, params: dict) -> dict:
+        name = _require_str(params, "name")
+        template_id = f"tpl_{uuid.uuid4().hex}"
+        self.store.add_template(
+            template_id=template_id,
+            name=name,
+            subject=_optional_str(params, "subject", ""),
+            body=_optional_str(params, "body", ""),
+        )
+        return {"id": template_id}
+
+    def _template_remove(self, params: dict) -> dict:
+        template_id = _require_str(params, "id")
+        if not self.store.remove_template(template_id):
+            raise MailCoreError(NOT_FOUND, "template not found")
+        return {"removed": True}
 
     # -- lifecycle ---------------------------------------------------------
 

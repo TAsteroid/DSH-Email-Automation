@@ -62,8 +62,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(reopened.schema_version, SCHEMA_VERSION)
         self.assertEqual(len(reopened.list_accounts()), 1)
 
-    def test_v1_database_upgrades_to_v3_and_keeps_accounts(self):
-        """An existing v1 database walks v2 -> v3 and keeps its accounts."""
+    def test_v1_database_upgrades_to_v4_and_keeps_accounts(self):
+        """An existing v1 database walks v2 -> v3 -> v4 and keeps its accounts."""
         v1_path = Path(self._tmp.name) / "legacy.db"
         connection = sqlite3.connect(str(v1_path))
         try:
@@ -89,7 +89,7 @@ class StoreTests(unittest.TestCase):
         store = Store(v1_path)
         self.addCleanup(store.close)
 
-        self.assertEqual(store.schema_version, 3)
+        self.assertEqual(store.schema_version, SCHEMA_VERSION)
         account = store.get_account("acc_old")
         self.assertIsNotNone(account)
         self.assertEqual(account["protocol"], "imap")
@@ -114,11 +114,12 @@ class StoreTests(unittest.TestCase):
         )
 
         # Re-running the upgrade (and each older step) must not raise.
-        self.assertEqual(store.migrate(), 3)
+        self.assertEqual(store.migrate(), SCHEMA_VERSION)
         MIGRATIONS[2](store._conn)
         store._conn.executescript(MIGRATIONS[3])
+        store._conn.executescript(MIGRATIONS[4])
         self.assertEqual(store.get_account("acc_old")["protocol"], "imap")
-        self.assertEqual(store.schema_version, 3)
+        self.assertEqual(store.schema_version, SCHEMA_VERSION)
 
     def test_add_and_list_account_without_exposing_secret(self):
         self.store.add_account(**_account(password_blob="ZHVtbXktYmxvYg=="))

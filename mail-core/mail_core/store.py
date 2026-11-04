@@ -9,18 +9,24 @@ Schema v2 added ``accounts.protocol`` (``imap`` | ``pop3``, default
 ``imap``) so an existing v1 database upgrades without losing its accounts.
 Schema v3 adds the ``messages`` table (synced mail, one row per
 account/folder/UIDVALIDITY/UID) with indexes for the list view.
+Schema v4 adds the local address book (``contacts``), message templates
+(``templates``, deliberately never synced to a mail server) and
+``messages_fts``, an FTS5 external-content index over ``messages`` kept in
+sync by triggers; the migration rebuilds it from the rows already on disk,
+so a v3 mailbox becomes searchable without resyncing mail.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -111,11 +117,172 @@ CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages (account_id, message_i
 """
 
 
+# Schema v4: local address book, templates and full-text search.
+#
+# ``messages_fts`` is an FTS5 *external content* table: the indexed columns
+# are read straight from ``messages`` (``content='messages'``,
+# ``content_rowid='rowid'``) instead of being copied, so there is one source
+# of truth and no duplicated body text on disk.  The three triggers keep the
+# index in step for rows written, updated or deleted by the sync layer; the
+# final ``rebuild`` re-indexes everything already present (an upgrade from v3
+# has messages on disk but no index yet).  The default ``unicode61``
+# tokenizer treats a run of CJK characters as one token, which is why the
+# service layer quotes every term of a search instead of passing the raw
+# string to the FTS parser.
+#
+# Because the index is joined to ``messages`` by ``rowid``, those rowids must
+# never be renumbered: ``VACUUM`` may reassign the rowid of a table whose
+# primary key is not an ``INTEGER PRIMARY KEY`` (``messages.id`` is TEXT).
+# If a VACUUM ever runs, follow it with
+# ``INSERT INTO messages_fts(messages_fts) VALUES('rebuild')``.
+_MIGRATION_4 = """
+CREATE TABLE IF NOT EXISTS contacts (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    email      TEXT NOT NULL DEFAULT '',
+    phone      TEXT NOT NULL DEFAULT '',
+    company    TEXT NOT NULL DEFAULT '',
+    title      TEXT NOT NULL DEFAULT '',
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts (name);
+
+CREATE TABLE IF NOT EXISTS templates (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    subject    TEXT NOT NULL DEFAULT '',
+    body       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    subject,
+    body_text,
+    from_addr,
+    to_addr,
+    content='messages',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts (rowid, subject, body_text, from_addr, to_addr)
+    VALUES (new.rowid, new.subject, new.body_text, new.from_addr, new.to_addr);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts (messages_fts, rowid, subject, body_text, from_addr, to_addr)
+    VALUES ('delete', old.rowid, old.subject, old.body_text, old.from_addr, old.to_addr);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts (messages_fts, rowid, subject, body_text, from_addr, to_addr)
+    VALUES ('delete', old.rowid, old.subject, old.body_text, old.from_addr, old.to_addr);
+    INSERT INTO messages_fts (rowid, subject, body_text, from_addr, to_addr)
+    VALUES (new.rowid, new.subject, new.body_text, new.from_addr, new.to_addr);
+END;
+
+INSERT INTO messages_fts (messages_fts) VALUES ('rebuild');
+"""
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
     3: _MIGRATION_3,
+    4: _MIGRATION_4,
 }
+
+
+# Columns of ``contacts`` a caller may change through ``contact.update``;
+# iterating this tuple (instead of trusting request keys) keeps the SQL free
+# of caller-controlled identifiers.
+CONTACT_FIELDS = ("name", "email", "phone", "company", "title", "notes")
+
+# ``snippet()`` arguments shared by every search: highlight the matched term,
+# elide with ``…`` and keep the excerpt short (12 tokens) so a hit never
+# returns a whole body.
+_FTS_SNIPPET = "snippet(messages_fts, -1, '«', '»', '…', 12)"
+
+
+def _fts_query(query: str) -> str:
+    """Turn free user input into a safe FTS5 ``AND`` query.
+
+    FTS5 has its own query grammar (``*``, ``-``, ``OR``, ``NEAR(...)``,
+    quotes, parentheses) and raises ``OperationalError`` on input that does
+    not parse.  Splitting on whitespace and wrapping every term in a quoted
+    string, with embedded quotes doubled, makes any input a literal phrase:
+    ``合同 报表`` becomes ``"合同" "报表"`` (implicit AND).  Terms with no
+    letter or digit carry no token for the tokenizer and are dropped; an
+    input made only of punctuation therefore yields an empty query, which
+    callers treat as "no hits" rather than sending ``MATCH ''``.
+    """
+    terms: list[str] = []
+    for raw in _search_terms(query):
+        terms.append('"' + raw.replace('"', '""') + '"')
+    return " ".join(terms)
+
+
+# FTS5's unicode61 tokenizer treats a run of CJK characters as ONE token, so
+# searching 合同 never matches 合同确认书 — useless for Chinese mail.  Queries
+# containing CJK therefore take a substring (LIKE) path; ASCII queries keep the
+# faster FTS index.
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+
+
+def _search_terms(query: str) -> list[str]:
+    """Whitespace terms that carry a character to match on.
+
+    Surrounding quotes/parentheses are FTS syntax for users, not content, so
+    they are stripped before either search path sees the term.
+    """
+    terms: list[str] = []
+    for raw in str(query).split():
+        cleaned = raw.strip('"\'()（）「」『』')
+        if any(character.isalnum() for character in cleaned):
+            terms.append(cleaned)
+    return terms
+
+
+def _like_pattern(term: str) -> str:
+    """LIKE pattern with user wildcards escaped (paired with ``ESCAPE '\\'``)."""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _highlight(text: str, term: str, width: int = 40) -> str:
+    """Substring excerpt with the hit wrapped in ``«»`` (matches the FTS path)."""
+    source = text or ""
+    index = source.lower().find(term.lower())
+    if index < 0:
+        return source[: width * 2]
+    start = max(0, index - width)
+    end = min(len(source), index + len(term) + width)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(source) else ""
+    return (
+        f"{prefix}{source[start:index]}"
+        f"«{source[index:index + len(term)]}»"
+        f"{source[index + len(term):end]}{suffix}"
+    )
+
+
+def _snippet_for(row, term: str) -> str:
+    """Highlight the term in whichever field actually contains it."""
+    for field in ("subject", "body_text", "from_addr", "to_addr"):
+        try:
+            text = row[field] or ""
+        except (IndexError, KeyError):
+            continue
+        if term.lower() in text.lower():
+            return _highlight(text, term)
+    try:
+        return (row["body_text"] or row["subject"] or "")[:80]
+    except (IndexError, KeyError):
+        return ""
 
 
 def _utc_now() -> str:
@@ -537,6 +704,240 @@ class Store:
             "SELECT COUNT(*) AS n FROM messages WHERE seen = 0"
         ).fetchone()
         return int(row["n"])
+
+    # -- contacts ----------------------------------------------------------
+
+    @staticmethod
+    def _contact_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "email": row["email"],
+            "phone": row["phone"],
+            "company": row["company"],
+            "title": row["title"],
+            "notes": row["notes"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def list_contacts(self) -> list[dict]:
+        """Address book entries ordered by ``name`` (then id, for stability)."""
+        rows = self._conn.execute(
+            "SELECT * FROM contacts ORDER BY name ASC, id ASC"
+        ).fetchall()
+        return [self._contact_to_dict(row) for row in rows]
+
+    def get_contact(self, contact_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM contacts WHERE id = ?", (contact_id,)
+        ).fetchone()
+        return self._contact_to_dict(row) if row is not None else None
+
+    def add_contact(
+        self,
+        *,
+        name: str,
+        contact_id: Optional[str] = None,
+        email: str = "",
+        phone: str = "",
+        company: str = "",
+        title: str = "",
+        notes: str = "",
+        created_at: Optional[str] = None,
+    ) -> str:
+        timestamp = created_at or _utc_now()
+        contact_id = contact_id or f"con_{uuid.uuid4().hex}"
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO contacts (
+                    id, name, email, phone, company, title, notes,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    contact_id,
+                    name,
+                    email,
+                    phone,
+                    company,
+                    title,
+                    notes,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return contact_id
+
+    def update_contact(self, contact_id: str, changes: dict) -> bool:
+        """Apply the given ``CONTACT_FIELDS``; ``False`` when the id is unknown."""
+        assignments: list[str] = []
+        args: list = []
+        for field in CONTACT_FIELDS:
+            if field not in changes:
+                continue
+            assignments.append(f"{field} = ?")
+            args.append(str(changes[field]))
+        assignments.append("updated_at = ?")
+        args.extend([_utc_now(), contact_id])
+        with self._conn:
+            cursor = self._conn.execute(
+                f"UPDATE contacts SET {', '.join(assignments)} WHERE id = ?", args
+            )
+        return cursor.rowcount > 0
+
+    def remove_contact(self, contact_id: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM contacts WHERE id = ?", (contact_id,)
+            )
+        return cursor.rowcount > 0
+
+    def count_contacts(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM contacts").fetchone()
+        return int(row["n"])
+
+    # -- templates ---------------------------------------------------------
+
+    @staticmethod
+    def _template_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "subject": row["subject"],
+            "body": row["body"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def list_templates(self) -> list[dict]:
+        """Local templates, oldest first like ``account.list``."""
+        rows = self._conn.execute(
+            "SELECT * FROM templates ORDER BY created_at ASC, id ASC"
+        ).fetchall()
+        return [self._template_to_dict(row) for row in rows]
+
+    def get_template(self, template_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM templates WHERE id = ?", (template_id,)
+        ).fetchone()
+        return self._template_to_dict(row) if row is not None else None
+
+    def add_template(
+        self,
+        *,
+        name: str,
+        subject: str = "",
+        body: str = "",
+        template_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> str:
+        timestamp = created_at or _utc_now()
+        template_id = template_id or f"tpl_{uuid.uuid4().hex}"
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO templates (id, name, subject, body, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (template_id, name, subject, body, timestamp, timestamp),
+            )
+        return template_id
+
+    def remove_template(self, template_id: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM templates WHERE id = ?", (template_id,)
+            )
+        return cursor.rowcount > 0
+
+    def count_templates(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM templates").fetchone()
+        return int(row["n"])
+
+    # -- search ------------------------------------------------------------
+
+    def search_messages(
+        self,
+        query: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        """Full-text search over subject / body / from / to.
+
+        Returns ``(total, page)`` exactly like :meth:`list_messages`, with
+        the row's own ``snippet`` replaced by an FTS5 excerpt that marks the
+        matched term with ``«`` ``»``.  Rows are ordered by ``rank`` (best
+        match first), never by the query string's column order.
+        """
+        match = _fts_query(query)
+        if not match:
+            return 0, []
+
+        terms = _search_terms(query)
+        if any(_CJK_RE.search(term) for term in terms):
+            return self._search_substring(terms, limit=limit, offset=offset)
+
+        total_row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH ?",
+            (match,),
+        ).fetchone()
+        total = int(total_row["n"])
+
+        # ``rowid`` breaks rank ties so consecutive pages stay stable.
+        rows = self._conn.execute(
+            f"""
+            SELECT messages.*, {_FTS_SNIPPET} AS hit_snippet
+            FROM messages_fts
+            JOIN messages ON messages.rowid = messages_fts.rowid
+            WHERE messages_fts MATCH ?
+            ORDER BY rank, messages.rowid
+            LIMIT ? OFFSET ?
+            """,
+            (match, int(limit), int(offset)),
+        ).fetchall()
+
+        messages = []
+        for row in rows:
+            summary = self._message_summary(row)
+            summary["snippet"] = row["hit_snippet"]
+            messages.append(summary)
+        return total, messages
+
+    def _search_substring(self, terms: list[str], *, limit: int, offset: int) -> tuple[int, list[dict]]:
+        """CJK queries: AND over ``LIKE '%term%'`` on the same four columns."""
+        clauses = []
+        params: list[object] = []
+        for term in terms:
+            pattern = _like_pattern(term)
+            clauses.append(
+                "(subject LIKE ? ESCAPE '\\' OR body_text LIKE ? ESCAPE '\\' "
+                "OR from_addr LIKE ? ESCAPE '\\' OR to_addr LIKE ? ESCAPE '\\')"
+            )
+            params.extend([pattern, pattern, pattern, pattern])
+        where = " AND ".join(clauses)
+
+        total_row = self._conn.execute(f"SELECT COUNT(*) AS n FROM messages WHERE {where}", params).fetchone()
+        total = int(total_row["n"])
+
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM messages
+            WHERE {where}
+            ORDER BY date DESC, rowid
+            LIMIT ? OFFSET ?
+            """,
+            [*params, int(limit), int(offset)],
+        ).fetchall()
+
+        messages = []
+        for row in rows:
+            summary = self._message_summary(row)
+            summary["snippet"] = _snippet_for(row, terms[0])
+            messages.append(summary)
+        return total, messages
 
     # -- meta --------------------------------------------------------------
 

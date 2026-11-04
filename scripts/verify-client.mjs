@@ -439,6 +439,33 @@ function runRealReactPass() {
     const sentMarkup = renderToStaticMarkup(h(views.SentView, { t, status: statusPayload }))
     check(sentMarkup.includes('t:mail.sent'), '[真实渲染] 发件箱页应渲染')
 
+    // 新增页签与顺序
+    check(pageMarkup.includes('t:mail.searchPlaceholder'), '[真实渲染] 顶栏应有搜索框')
+    const orderKeys = ['t:mail.sent', 't:mail.deleted', 't:mail.junk', 't:mail.historyMail', 't:mail.templates', 't:mail.contacts', 't:mail.ai']
+    const positions = orderKeys.map((key) => pageMarkup.indexOf(key))
+    check(
+      positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])),
+      '[真实渲染] 页签顺序应为 发件箱 < 已删除 < 垃圾邮件 < 历史邮件 < 模板 < 通讯录 < AI 工作台',
+    )
+
+    // 通讯录：字段 + Agent 提示词区
+    const contactsMarkup = renderToStaticMarkup(h(views.ContactsView, { t }))
+    for (const key of ['contactName', 'contactEmail', 'contactPhone', 'contactCompany', 'contactTitle', 'contactNotes']) {
+      check(contactsMarkup.includes(`t:mail.${key}`), `[真实渲染] 通讯录缺少字段 ${key}`)
+    }
+    check(contactsMarkup.includes('t:mail.contactChatTitle'), '[真实渲染] 通讯录应有 Agent 区')
+    check(contactsMarkup.includes('t:mail.contactChatCopy'), '[真实渲染] 应有复制提示词按钮')
+
+    // 模板：本地保存
+    const templatesMarkup = renderToStaticMarkup(h(views.TemplatesView, { t }))
+    check(templatesMarkup.includes('t:mail.templateName'), '[真实渲染] 模板页应有名称字段')
+    check(templatesMarkup.includes('t:mail.templateSave'), '[真实渲染] 模板页应有保存按钮')
+
+    // 搜索结果空态
+    const searchMarkup = renderToStaticMarkup(h(views.SearchView, { t, query: '合同', status: statusPayload }))
+    check(searchMarkup.includes('t:mail.searchResults'), '[真实渲染] 搜索页应有结果标题')
+    check(searchMarkup.includes('t:mail.searchEmpty'), '[真实渲染] 无结果时应有空态')
+
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
     for (const key of ['kbContacts', 'kbCompanies', 'kbProjects', 'kbFiles']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)
