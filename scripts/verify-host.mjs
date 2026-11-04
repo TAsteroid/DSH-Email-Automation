@@ -612,8 +612,13 @@ check(syncAllRoute && syncAllRoute.status === 200, `sync/all 应 200，实际 ${
 if (syncAllRoute && syncAllRoute.body) {
   const parsed = JSON.parse(syncAllRoute.body)
   check(parsed.value.skipped === false, 'sync/all 应真正执行')
-  check(parsed.value.accounts.length === 1, 'sync/all 应对每个启用账号返回结果')
-  check(parsed.value.accounts[0].stored === 2, 'sync/all 应透传 stored 计数')
+  check(parsed.value.accounts.length === 2, 'sync/all 应同步 INBOX 与已发送两个文件夹')
+  const foldersSynced = parsed.value.accounts.map((entry) => entry.folder)
+  check(
+    foldersSynced.includes('INBOX') && foldersSynced.includes('已发送'),
+    `sync/all 应覆盖 INBOX 与已发送，实际 ${JSON.stringify(foldersSynced)}`,
+  )
+  check(parsed.value.accounts.every((entry) => entry.stored === 2), 'sync/all 应透传 stored 计数')
 }
 
 const syncBadLimit = await invoke('/api/dsh-mail/sync', {

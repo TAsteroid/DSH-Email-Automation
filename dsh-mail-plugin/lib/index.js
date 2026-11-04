@@ -216,6 +216,37 @@ export function apply(ctx, config) {
 
   let syncing = false
 
+  /** 找到账号的「已发送」文件夹名（服务器返回的是解码后的名字）。 */
+  async function findSentFolder(accountId) {
+    try {
+      const folders = await core.request('folder.list', { accountId })
+      const list = folders?.folders ?? []
+      const found = list.find((folder) => /sent|已发送/i.test(folder.name || ''))
+      return found ? found.name : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 发送成功后把「已发送」补同步一次，否则界面上看不到刚发出的信。 */
+  async function syncSentFolders() {
+    try {
+      const list = await core.request('account.list', {})
+      for (const account of list?.accounts ?? []) {
+        if (account.enabled === false) continue
+        const folder = await findSentFolder(account.id)
+        if (!folder) continue
+        await core.request(
+          'sync.run',
+          { accountId: account.id, folder, limit: 50 },
+          { timeoutMs: SYNC_TIMEOUT_MS },
+        )
+      }
+    } catch (error) {
+      log(`sent folder sync skipped: ${error?.message ?? error}`)
+    }
+  }
+
   /** 同步所有启用账号的 INBOX；已经在跑时直接跳过（界面按钮与心跳共用）。 */
   async function syncAllAccounts() {
     if (syncing) return { skipped: true, accounts: [] }
@@ -232,21 +263,33 @@ export function apply(ctx, config) {
       const list = await core.request('account.list', {})
       for (const account of list?.accounts ?? []) {
         if (account.enabled === false) continue
-        try {
-          const value = await core.request(
-            'sync.run',
-            { accountId: account.id, folder: 'INBOX', limit: 50 },
-            { timeoutMs: SYNC_TIMEOUT_MS },
-          )
-          results.push({
-            accountId: account.id,
-            address: account.address,
-            fetched: value?.fetched ?? 0,
-            stored: value?.stored ?? 0,
-          })
-        } catch (error) {
-          results.push({ accountId: account.id, address: account.address, error: error?.message ?? String(error) })
-          log(`sync failed for ${account.address}: ${error?.message ?? error}`)
+        // 收件箱 + 已发送：发件箱页签也要跟着更新，否则刚发出的信看不到
+        const targets = ['INBOX']
+        const sent = await findSentFolder(account.id)
+        if (sent && !targets.includes(sent)) targets.push(sent)
+        for (const folder of targets) {
+          try {
+            const value = await core.request(
+              'sync.run',
+              { accountId: account.id, folder, limit: 50 },
+              { timeoutMs: SYNC_TIMEOUT_MS },
+            )
+            results.push({
+              accountId: account.id,
+              address: account.address,
+              folder,
+              fetched: value?.fetched ?? 0,
+              stored: value?.stored ?? 0,
+            })
+          } catch (error) {
+            results.push({
+              accountId: account.id,
+              address: account.address,
+              folder,
+              error: error?.message ?? String(error),
+            })
+            log(`sync failed for ${account.address}/${folder}: ${error?.message ?? error}`)
+          }
         }
       }
     } catch (error) {
@@ -1071,10 +1114,13 @@ export function apply(ctx, config) {
     route('/actions/execute', async (body) => {
       const approvalId = requireText(body.approvalId, 'approvalId')
       const params = { approvalId }
-      if (typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()) {
+      if (body.idempotencyKey !== undefined && typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()) {
         params.idempotencyKey = body.idempotencyKey.trim()
       }
-      return requireCoreResult(await callCore('action.execute', params, { timeoutMs: 120_000 }))
+      const value = requireCoreResult(await callCore('action.execute', params, { timeoutMs: 120_000 }))
+      // 发完立刻补同步「已发送」，否则用户切到发件箱看不到这封信
+      await syncSentFolders()
+      return value
     })
 
     route('/messages', async (body) => {
