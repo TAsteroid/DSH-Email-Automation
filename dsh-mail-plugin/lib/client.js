@@ -178,6 +178,7 @@ window.__ModuleLoader__.load({
         smtpSecurity: 'SMTP 加密',
         smtpOptionalHint: '可以留空：不填就只能收信、不能发信。',
         accountUsername: '用户名',
+        usernameHint: '默认与邮箱地址相同；服务器要求别的登录名时再改（如 域\\账号）。',
         accountPassword: '密码 / 应用专用密码',
         passwordHint: '保存时用 Windows DPAPI 加密，插件进程拿不到明文。',
         accountSubmit: '保存账户',
@@ -287,6 +288,7 @@ window.__ModuleLoader__.load({
         smtpSecurity: 'SMTP encryption',
         smtpOptionalHint: 'Optional: leave it empty to read mail without sending.',
         accountUsername: 'Username',
+        usernameHint: 'Defaults to the address; change it only if the server expects another login name.',
         accountPassword: 'Password / app password',
         passwordHint: 'Encrypted with Windows DPAPI before storage; the plugin process never sees the plaintext.',
         accountSubmit: 'Save account',
@@ -1508,11 +1510,17 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState(null)
       const [saved, setSaved] = React.useState(false)
+      // 用户名默认跟随邮箱地址；用户自己改过之后就不再覆盖
+      const usernameTouched = React.useRef(false)
 
       const update = (key) => (event) => {
         const value = event.target.value
+        if (key === 'username') usernameTouched.current = value.trim().length > 0
         setDraft((prev) => {
           const next = { ...prev, [key]: value }
+          if (key === 'address' && !usernameTouched.current) {
+            next.username = value
+          }
           if (key === 'protocol' && isDefaultPort(prev.protocol, prev.imapPort)) {
             next.imapPort = defaultPort(value, prev.imapSecurity)
           }
@@ -1534,10 +1542,12 @@ window.__ModuleLoader__.load({
         try {
           await call('/accounts/add', {
             ...draft,
+            username: draft.username.trim() || draft.address.trim(),
             imapPort: Number(draft.imapPort),
             smtpPort: Number(draft.smtpPort),
           })
           setDraft(blank)
+          usernameTouched.current = false
           setSaved(true)
           if (onSaved) onSaved()
         } catch (e) {
@@ -1592,9 +1602,10 @@ window.__ModuleLoader__.load({
           }),
           field('accountImapPort', 'imapPort', { type: 'number', min: 1, max: 65535 }),
           selectField('accountSecurity', 'imapSecurity', SECURITY_OPTIONS),
-          field('accountUsername', 'username', { required: true, autoComplete: 'off' }),
+          field('accountUsername', 'username', { autoComplete: 'off', placeholder: 'me@example.com' }),
           field('accountPassword', 'password', { type: 'password', required: true, autoComplete: 'new-password' }),
         ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('usernameHint')),
         h('p', { style: { ...styles.muted, margin: 0 } }, t('passwordHint')),
         h('p', { style: styles.formSubhead }, t('smtpSection')),
         h(

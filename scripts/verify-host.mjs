@@ -386,6 +386,18 @@ check(pop3Request && pop3Request.params.protocol === 'pop3', 'POP3 账号应带�
 check(pop3Request && pop3Request.params.imapPort === 995, `POP3 ssl 端口应推断为 995，实际 ${pop3Request && pop3Request.params.imapPort}`)
 check(pop3Request && pop3Request.params.smtpPort === 465, `SMTP ssl 端口应推断为 465，实际 ${pop3Request && pop3Request.params.smtpPort}`)
 
+// 不填用户名时，默认用邮箱地址当登录名
+const noUsername = await invoke('/api/dsh-mail/accounts/add', {
+  method: 'POST',
+  body: JSON.stringify({ address: 'no-user@b.com', imapHost: 'imap.b.com', password: 'x' }),
+})
+check(noUsername && noUsername.status === 200, `缺用户名应仍可添加，实际 ${noUsername && noUsername.status}`)
+const noUsernameRequest = received.filter((request) => request.method === 'account.add').at(-1)
+check(
+  noUsernameRequest && noUsernameRequest.params.username === 'no-user@b.com',
+  `用户名应回落到邮箱地址，实际 ${noUsernameRequest && noUsernameRequest.params.username}`,
+)
+
 const badProtocol = await invoke('/api/dsh-mail/accounts/add', {
   method: 'POST',
   body: JSON.stringify({

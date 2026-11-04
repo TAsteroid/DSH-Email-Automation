@@ -288,6 +288,7 @@ function runRealReactPass() {
     check(settings.includes('t:mail.protocolPop3'), '[真实渲染] 协议应有 POP3 选项')
     check(settings.includes('t:mail.smtpSection'), '[真实渲染] 应有 SMTP 发信分组')
     check(settings.includes('t:mail.smtpHost'), '[真实渲染] 应有 SMTP 服务器输入')
+    check(settings.includes('t:mail.usernameHint'), '[真实渲染] 应说明用户名默认等于邮箱地址')
     check(settings.includes('t:mail.smtpSecurity'), '[真实渲染] 应有 SMTP 加密选择')
 
     const withAccountSettings = renderToStaticMarkup(

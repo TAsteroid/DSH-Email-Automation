@@ -618,17 +618,21 @@ export function apply(ctx, config) {
 
     route('/accounts/add', async (body) => {
       const password = requireText(body.password, 'password')
+      const address = requireText(body.address, 'address')
+      // 用户名默认与邮箱地址相同；服务器要求别的登录名时才单独给
+      const username =
+        typeof body.username === 'string' && body.username.trim().length > 0 ? body.username.trim() : address
       const protocol = normalizeProtocol(body.protocol)
       const imapSecurity = normalizeSecurity(body.imapSecurity, 'ssl')
       const smtpSecurity = normalizeSecurity(body.smtpSecurity, 'ssl')
       const params = {
-        address: requireText(body.address, 'address'),
+        address,
         displayName: typeof body.displayName === 'string' ? body.displayName.trim() : '',
         protocol,
         imapHost: requireText(body.imapHost, 'imapHost'),
         imapPort: requirePort(body.imapPort, 'imapPort', PORT_DEFAULTS[protocol][imapSecurity]),
         imapSecurity,
-        username: requireText(body.username, 'username'),
+        username,
         password,
         smtpHost: typeof body.smtpHost === 'string' ? body.smtpHost.trim() : '',
         smtpPort: requirePort(body.smtpPort, 'smtpPort', PORT_DEFAULTS.smtp[smtpSecurity]),
