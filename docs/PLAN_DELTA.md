@@ -48,7 +48,7 @@
 | §4.4 | AI 自动流水线 | **未实现** | 无 Agent 调用通道 |
 | §5.1 | 13 个工具 | 实际 8 个：`mail_status` `mail_accounts` `mail_folders` `mail_sync` `mail_messages` `mail_message` `mail_search` `mail_contacts` | 其余依赖 AI/草稿/审批阶段 |
 | §5.3 | 6 个 DSH 事件 | **不实现** | 宿主无插件→Agent 事件通道 |
-| §6.1 | 9 个一级页面 | **12 个页签**：待跟进/收件箱/发件箱/草稿箱/已删除/垃圾邮件/历史邮件/模板/通讯录/AI 工作台/知识库/设置 | 用户评审后的实际形态 |
+| §6.1 | 9 个一级页面 | **10 个页签**：待跟进（含 AI 卡片工作台）/收件箱/发件箱/草稿箱/已删除/垃圾邮件/模板/通讯录/知识库/设置 | 用户评审后的实际形态；AI 工作台已并入待跟进 |
 | §6.2 | 三栏阅读 | 三栏 + **对话气泡**（最新在上，历史引用折叠） | 用户评审后的实际形态 |
 | §7.1 | FastAPI + SQLAlchemy + Alembic | **纯标准库**：`sqlite3` 手写迁移 + stdio JSON-RPC | 决策 D6；避免第三方依赖 |
 | §7.2 | 18 张表 | 实际 schema v4：`meta` `accounts` `folders` `messages` `sync_state` `contacts` `templates` `messages_fts` | 按阶段演进 |

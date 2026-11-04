@@ -341,10 +341,9 @@ function runRealReactPass() {
 
     // 各页骨架：能渲染、且恰好一条分隔条
     const viewCases = [
-      ['待跟进', views.TodoView, 't:mail.todoDetailTitle', 2],
+      ['待跟进', views.TodoView, 't:mail.aiEmptyTitle', 2],
       ['草稿箱', views.DraftsView, 't:mail.draftDetailTitle', 1],
       ['知识库', views.KnowledgeView, 't:mail.kbContacts', 1],
-      ['AI 工作台', views.AiWorkbench, 't:mail.aiEmptyTitle', 1],
     ]
     for (const [label, View, needle, expectedSplitters] of viewCases) {
       const markup = renderToStaticMarkup(h(View, { t, status: statusPayload }))
@@ -521,11 +520,14 @@ function runRealReactPass() {
       '[气泡] 最新一封应排在最上方',
     )
 
-    // 发件箱页签位置：待跟进 < 发件箱 < AI 工作台
+    // 发件箱页签位置：待跟进 < 发件箱 < 草稿箱
     const todoAt = pageMarkup.indexOf('t:mail.todo')
     const sentAt = pageMarkup.indexOf('t:mail.sent')
-    const aiAt = pageMarkup.indexOf('t:mail.ai')
-    check(todoAt >= 0 && sentAt > todoAt && aiAt > sentAt, '[真实渲染] 发件箱应位于待跟进与 AI 工作台之间')
+    const draftsAt = pageMarkup.indexOf('t:mail.drafts')
+    check(
+      todoAt >= 0 && sentAt > todoAt && draftsAt > sentAt,
+      '[真实渲染] 页签顺序应为 待跟进 < 发件箱 < 草稿箱',
+    )
 
     const sentMarkup = renderToStaticMarkup(h(views.SentView, { t, status: statusPayload }))
     check(sentMarkup.includes('t:mail.sent'), '[真实渲染] 发件箱页应渲染')
@@ -535,12 +537,13 @@ function runRealReactPass() {
     const todoTabAt = pageMarkup.indexOf('t:mail.todo')
     check(todoTabAt >= 0 && inboxTabAt > todoTabAt, '[真实渲染] 待跟进应排在收件箱之前')
     check(pageMarkup.includes('t:mail.searchPlaceholder'), '[真实渲染] 顶栏应有搜索框')
-    const orderKeys = ['t:mail.sent', 't:mail.deleted', 't:mail.junk', 't:mail.templates', 't:mail.contacts', 't:mail.ai']
+    const orderKeys = ['t:mail.sent', 't:mail.deleted', 't:mail.junk', 't:mail.templates', 't:mail.contacts', 't:mail.knowledge']
     const positions = orderKeys.map((key) => pageMarkup.indexOf(key))
     check(pageMarkup.indexOf('t:mail.historyMail') < 0, '[真实渲染] 历史邮件页签已移除')
+    check(pageMarkup.indexOf('t:mail.ai') < 0, '[真实渲染] AI 工作台页签已并入待跟进')
     check(
       positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])),
-      '[真实渲染] 页签顺序应为 发件箱 < 已删除 < 垃圾邮件 < 模板 < 通讯录 < AI 工作台',
+      '[真实渲染] 页签顺序应为 发件箱 < 已删除 < 垃圾邮件 < 模板 < 通讯录 < 知识库',
     )
 
     // 账户显示名优先；待跟进按账户分组

@@ -458,7 +458,6 @@ window.__ModuleLoader__.load({
       ['junk', 'junk'],
       ['templates', 'templates'],
       ['contacts', 'contacts'],
-      ['ai', 'ai'],
       ['knowledge', 'knowledge'],
       ['settings', 'settings'],
     ]
@@ -751,6 +750,14 @@ window.__ModuleLoader__.load({
         overflowY: 'hidden',
         padding: '16px 20px',
         scrollSnapType: 'x mandatory',
+      },
+      cardHost: {
+        flex: 1,
+        minHeight: 0,
+        minWidth: 0,
+        display: 'flex',
+        padding: '16px 20px',
+        overflow: 'hidden',
       },
       aiCard: {
         width: CARD_WIDTH,
@@ -1947,14 +1954,49 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
-    /** 待跟进：左账户栏 + 按账户分组的待办列表 + 详情。 */
+    /** 待跟进：账户栏 + 待处理/已处理列表 + 右侧卡片工作台（原 AI 工作台）。 */
     function TodoView({ t, status, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
-      const [selected, setSelected] = React.useState(null)
+      const ai = (status && status.ai) || { pending: [], done: [] }
+      const [items, setItems] = React.useState({ pending: ai.pending || [], done: ai.done || [] })
+      const [selectedId, setSelectedId] = React.useState(null)
+
+      // status 刷新后同步一次（AI 结果目前是内存态，Phase 4 接后端后会改成持久化）
+      React.useEffect(() => {
+        setItems({ pending: ai.pending || [], done: ai.done || [] })
+      }, [status])
 
       const label = (account) => (account.displayName ? account.displayName : account.address)
       const visible = accountId === null ? accounts : accounts.filter((account) => account.id === accountId)
-      const groups = visible.map((account) => ({ id: account.id, title: label(account), items: [] }))
+      const toItem = (item) => ({
+        id: item.id,
+        title: item.title || item.subject || t('noSubject'),
+        meta: item.accountId ? item.accountId : '',
+      })
+
+      const groups = [
+        ...visible.map((account) => ({
+          id: `${account.id}-pending`,
+          title: `${label(account)} · ${t('aiQueue')}`,
+          items: (items.pending || [])
+            .filter((item) => !item.accountId || item.accountId === account.id)
+            .map(toItem),
+        })),
+        { id: 'done', title: t('aiDone'), items: (items.done || []).map(toItem) },
+      ]
+
+      const selected = [...(items.pending || []), ...(items.done || [])].find((item) => item.id === selectedId) || null
+
+      const act = (action, item) => {
+        setItems((previous) => {
+          const pending = (previous.pending || []).filter((entry) => entry.id !== item.id)
+          if (action === 'done') return { pending, done: [{ ...item, status: 'done' }, ...(previous.done || [])] }
+          if (action === 'delete') return { pending, done: previous.done || [] }
+          if (action === 'later') return { pending: [...pending, item], done: previous.done || [] }
+          return previous
+        })
+        if (action !== 'later') setSelectedId(null)
+      }
 
       return h(SplitPane, {
         storageKey: 'todoAccounts',
@@ -1965,8 +2007,10 @@ window.__ModuleLoader__.load({
           storageKey: 'todo',
           spec: PANE_SPEC,
           label: t('resize'),
-          left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
-          right: h(DetailPane, { t, titleKey: 'todoDetailTitle', hintKey: 'todoDetailHint' }),
+          left: h(GroupList, { t, groups, selectedId, onSelect: setSelectedId }),
+          right: selected
+            ? h('div', { style: styles.cardHost }, h(AiCard, { t, item: selected, onAct: act, fluid: true }))
+            : h(EmptyPane, { title: t('aiEmptyTitle'), hint: t('aiEmptyHint') }),
         }),
       })
     }
@@ -2808,10 +2852,10 @@ window.__ModuleLoader__.load({
 
     // ---- AI 工作台 ---------------------------------------------------------
     /** 单张卡片：上半待处理内容，下半与 Agent 的对话栏。 */
-    function AiCard({ t, item, onAct }) {
+    function AiCard({ t, item, onAct, fluid }) {
       return h(
         'article',
-        { style: styles.aiCard, 'aria-label': item.title },
+        { style: fluid ? { ...styles.aiCard, width: '100%', height: '100%' } : styles.aiCard, 'aria-label': item.title },
         h(
           'div',
           { style: styles.aiCardHead },
@@ -2848,52 +2892,6 @@ window.__ModuleLoader__.load({
           ),
         ),
       )
-    }
-
-    function AiWorkbench({ t, status }) {
-      const [selected, setSelected] = React.useState(null)
-      const carouselRef = React.useRef(null)
-      const pending = (status && status.ai && status.ai.pending) || []
-      const done = (status && status.ai && status.ai.done) || []
-      const groups = [
-        { id: 'pending', title: t('aiQueue'), items: pending },
-        { id: 'done', title: t('aiDone'), items: done },
-      ]
-
-      const scrollCards = (direction) => {
-        const node = carouselRef.current
-        if (!node || typeof node.scrollBy !== 'function') return
-        node.scrollBy({ left: direction * (CARD_WIDTH + 12), behavior: 'smooth' })
-      }
-
-      const right =
-        pending.length === 0
-          ? h(EmptyPane, { title: t('aiEmptyTitle'), hint: t('aiEmptyHint') })
-          : h(
-              'div',
-              { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
-              h(
-                'div',
-                { style: styles.paneHeader },
-                h('span', { style: styles.paneHeaderText }, `${t('aiQueue')} · ${pending.length}`),
-                h('span', { style: styles.spacer }),
-                h('button', { type: 'button', style: styles.btnSmall, onClick: () => scrollCards(-1) }, t('prevCard')),
-                h('button', { type: 'button', style: styles.btnSmall, onClick: () => scrollCards(1) }, t('nextCard')),
-              ),
-              h(
-                'div',
-                { ref: carouselRef, style: styles.carousel },
-                pending.map((item) => h(AiCard, { key: item.id, t, item, onAct: () => {} })),
-              ),
-            )
-
-      return h(SplitPane, {
-        storageKey: 'ai',
-        spec: PANE_SPEC,
-        label: t('resize'),
-        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
-        right,
-      })
     }
 
     // ---- 设置 --------------------------------------------------------------
@@ -3378,7 +3376,6 @@ window.__ModuleLoader__.load({
         DraftsView,
         ApprovalsRail,
         KnowledgeView,
-        AiWorkbench,
         AiCard,
         SettingsView,
         AccountForm,
