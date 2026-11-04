@@ -456,6 +456,9 @@ function runRealReactPass() {
     check(sentMarkup.includes('t:mail.sent'), '[真实渲染] 发件箱页应渲染')
 
     // 新增页签与顺序
+    const inboxTabAt = pageMarkup.indexOf('t:mail.inbox')
+    const todoTabAt = pageMarkup.indexOf('t:mail.todo')
+    check(todoTabAt >= 0 && inboxTabAt > todoTabAt, '[真实渲染] 待跟进应排在收件箱之前')
     check(pageMarkup.includes('t:mail.searchPlaceholder'), '[真实渲染] 顶栏应有搜索框')
     const orderKeys = ['t:mail.sent', 't:mail.deleted', 't:mail.junk', 't:mail.historyMail', 't:mail.templates', 't:mail.contacts', 't:mail.ai']
     const positions = orderKeys.map((key) => pageMarkup.indexOf(key))

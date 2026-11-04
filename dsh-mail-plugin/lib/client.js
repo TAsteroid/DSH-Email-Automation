@@ -400,8 +400,8 @@ window.__ModuleLoader__.load({
     }
 
     const TABS = [
-      ['inbox', 'inbox'],
       ['todo', 'todo'],
+      ['inbox', 'inbox'],
       ['sent', 'sent'],
       ['draftsMail', 'drafts'],
       ['deleted', 'deleted'],
