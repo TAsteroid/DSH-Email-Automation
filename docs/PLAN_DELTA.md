@@ -72,6 +72,8 @@
 | IMAP 文件夹名 modified UTF-7 编解码 | `mail_core/imap_utf7.py` |
 | `folder.list` RPC（本地文件夹缓存） | `service.py` |
 | 通讯录（增删改查 + Agent 提示词生成） | schema v4 + UI |
+| 附件元数据与按需下载（schema v8） | `attachments` 表 + `attachment.list/fetch/backfill`；待跟进里以事项列出，用户确认后才下载 |
+| Agent 上下文工具（`mail_current` / `mail_thread` / `mail_related` / `mail_attachments`） | 让 Agent 知道「用户在看哪封」，并自行检索相关材料与附件 |
 | 邮件模板（本地保存，不同步） | schema v4 + UI |
 | 全文搜索（FTS5 + 中文子串回退） | `store.search_messages` + 顶栏搜索框 |
 | 文件夹页签（发件箱/草稿/已删除/垃圾/历史） | `MailFolderView` |
