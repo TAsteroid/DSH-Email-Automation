@@ -568,6 +568,22 @@ function runRealReactPass() {
     const todoSplitters = (todoWithAccounts.match(/role="separator"/g) || []).length
     check(todoSplitters === 2, `[真实渲染] 待跟进应有两处分隔条（账户栏与列表），实际 ${todoSplitters}`)
 
+    // 其它页签也带账户栏
+    for (const [label, View] of [
+      ['发件箱', views.SentView],
+      ['模板', views.TemplatesView],
+      ['通讯录', views.ContactsView],
+    ]) {
+      const markup = renderToStaticMarkup(
+        h(View, { t, status: { ...statusPayload, accounts: twoAccounts }, accountId: null, onSelectAccount: () => {} }),
+      )
+      check(markup.includes('t:mail.allAccounts'), `[真实渲染] ${label} 应有账户栏`)
+      const splitters = (markup.match(/role="separator"/g) || []).length
+      check(splitters >= 2, `[真实渲染] ${label} 应至少有账户栏与内容两处分隔条，实际 ${splitters}`)
+    }
+
+    check(pageMarkup.includes('t:mail.composeNew'), '[真实渲染] 顶栏应有新建邮件按钮')
+
     // 通讯录：字段 + Agent 提示词区
     const contactsMarkup = renderToStaticMarkup(h(views.ContactsView, { t }))
     for (const key of ['contactName', 'contactEmail', 'contactPhone', 'contactCompany', 'contactTitle', 'contactNotes']) {

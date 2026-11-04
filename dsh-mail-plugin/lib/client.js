@@ -145,6 +145,7 @@ window.__ModuleLoader__.load({
         forward: '转发',
         send: '发送',
         composeTitle: '编辑邮件',
+        composeNew: '新建邮件',
         composeTo: '收件人',
         composeCc: '抄送',
         composeSubject: '主题',
@@ -319,6 +320,7 @@ window.__ModuleLoader__.load({
         forward: 'Forward',
         send: 'Send',
         composeTitle: 'Compose',
+        composeNew: 'New mail',
         composeTo: 'To',
         composeCc: 'Cc',
         composeSubject: 'Subject',
@@ -1739,7 +1741,7 @@ window.__ModuleLoader__.load({
         agentChat ? h(AgentMailComposer, { t, message }) : null,
       )
     }
-    function InboxView({ t, status, onRefresh }) {
+    function InboxView({ t, status, onRefresh, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
       const bodyRef = React.useRef(null)
       const dragRef = React.useRef(null)
@@ -1754,7 +1756,6 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = React.useState(null)
       const [syncing, setSyncing] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
-      const [accountId, setAccountId] = React.useState(null)
 
       const openCompose = (mode) => {
         if (detail) setCompose(buildCompose(mode, detail, t))
@@ -1907,7 +1908,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { flex: 'none', width: layout.rail, minWidth: 0, overflow: 'hidden' } },
-          h(AccountRail, { t, accounts, accountId, onSelect: setAccountId }),
+          h(AccountRail, { t, accounts, accountId, onSelect: onSelectAccount }),
         ),
         handle('rail'),
         h(
@@ -1947,9 +1948,8 @@ window.__ModuleLoader__.load({
 
     // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
     /** 待跟进：左账户栏 + 按账户分组的待办列表 + 详情。 */
-    function TodoView({ t, status }) {
+    function TodoView({ t, status, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
-      const [accountId, setAccountId] = React.useState(null)
       const [selected, setSelected] = React.useState(null)
 
       const label = (account) => (account.displayName ? account.displayName : account.address)
@@ -1960,7 +1960,7 @@ window.__ModuleLoader__.load({
         storageKey: 'todoAccounts',
         spec: RAIL_SPEC,
         label: t('resize'),
-        left: h(AccountRail, { t, accounts, accountId, onSelect: setAccountId }),
+        left: h(AccountRail, { t, accounts, accountId, onSelect: onSelectAccount }),
         right: h(SplitPane, {
           storageKey: 'todo',
           spec: PANE_SPEC,
@@ -1984,7 +1984,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 通用文件夹视图：左侧邮件标题，右侧正文；文件夹名从服务器解码结果里按模式找。 */
-    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey, composeMode, agentChat, onRefresh }) {
+    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey, composeMode, agentChat, onRefresh, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
       const account = accounts.length > 0 ? accounts[0] : null
       const [folder, setFolder] = React.useState(null)
@@ -2016,13 +2016,15 @@ window.__ModuleLoader__.load({
         async (targetFolder) => {
           if (!account || !targetFolder) return
           try {
-            const value = await call('/messages', { accountId: account.id, folder: targetFolder, limit: 100 })
+            const params = { folder: targetFolder, limit: 100 }
+            if (accountId) params.accountId = accountId
+            const value = await call('/messages', params)
             setMessages((value && value.messages) || [])
           } catch (error) {
             setNote(error.message)
           }
         },
-        [account],
+        [account, accountId],
       )
 
       React.useEffect(() => {
@@ -2121,12 +2123,23 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: { display: 'flex', flex: 1, minHeight: 0 } },
-        content,
+        h(SplitPane, {
+          storageKey: `${storageKey}-accounts`,
+          spec: RAIL_SPEC,
+          label: t('resize'),
+          left: h(AccountRail, {
+            t,
+            accounts,
+            accountId,
+            onSelect: onSelectAccount,
+          }),
+          right: content,
+        }),
         compose
           ? h(ComposeModal, {
               t,
               initial: compose,
-              accountId: account ? account.id : undefined,
+              accountId: accountId || (account ? account.id : undefined),
               onSubmitted: () => {
                 setCompose(null)
                 if (onRefresh) onRefresh()
@@ -2137,11 +2150,13 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function SentView({ t, status, onRefresh }) {
+    function SentView({ t, status, onRefresh, accountId, onSelectAccount }) {
       return h(MailFolderView, {
         t,
         status,
         onRefresh,
+        accountId,
+        onSelectAccount,
         storageKey: 'sent',
         folderPattern: /sent|已发送/i,
         titleKey: 'sent',
@@ -2150,11 +2165,13 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function DraftsMailView({ t, status, onRefresh }) {
+    function DraftsMailView({ t, status, onRefresh, accountId, onSelectAccount }) {
       return h(MailFolderView, {
         t,
         status,
         onRefresh,
+        accountId,
+        onSelectAccount,
         storageKey: 'draftsMail',
         folderPattern: /draft|草稿/i,
         titleKey: 'drafts',
@@ -2163,11 +2180,13 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function DeletedView({ t, status, onRefresh }) {
+    function DeletedView({ t, status, onRefresh, accountId, onSelectAccount }) {
       return h(MailFolderView, {
         t,
         status,
         onRefresh,
+        accountId,
+        onSelectAccount,
         storageKey: 'deleted',
         folderPattern: /deleted|trash|已删除|废纸/i,
         titleKey: 'deleted',
@@ -2175,11 +2194,13 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function JunkView({ t, status, onRefresh }) {
+    function JunkView({ t, status, onRefresh, accountId, onSelectAccount }) {
       return h(MailFolderView, {
         t,
         status,
         onRefresh,
+        accountId,
+        onSelectAccount,
         storageKey: 'junk',
         folderPattern: /junk|spam|垃圾/i,
         titleKey: 'junk',
@@ -2188,8 +2209,10 @@ window.__ModuleLoader__.load({
     }
 
     /** 模板：纯本地保存，不和邮箱同步。 */
-    function TemplatesView({ t, status, onRefresh }) {
-      const accountId = status && status.accounts && status.accounts.length > 0 ? status.accounts[0].id : undefined
+    function TemplatesView({ t, status, onRefresh, accountId, onSelectAccount }) {
+      const accounts = (status && status.accounts) || []
+      const senderAccountId =
+        accountId || (accounts.length > 0 ? accounts[0].id : undefined)
       const [templates, setTemplates] = React.useState([])
       const [selectedId, setSelectedId] = React.useState(null)
       const [draft, setDraft] = React.useState({ name: '', subject: '', body: '' })
@@ -2336,7 +2359,7 @@ window.__ModuleLoader__.load({
         ? h(ComposeModal, {
             t,
             initial: compose,
-            accountId: accountId,
+            accountId: senderAccountId,
             onSubmitted: () => {
               setCompose(null)
               if (onRefresh) onRefresh()
@@ -2344,11 +2367,23 @@ window.__ModuleLoader__.load({
             onClose: () => setCompose(null),
           })
         : null
-      return h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } }, content, composeModal)
+      return h(
+        'div',
+        { style: { display: 'flex', flex: 1, minHeight: 0 } },
+        h(SplitPane, {
+          storageKey: 'templates-accounts',
+          spec: RAIL_SPEC,
+          label: t('resize'),
+          left: h(AccountRail, { t, accounts, accountId, onSelect: onSelectAccount }),
+          right: content,
+        }),
+        composeModal,
+      )
     }
 
     /** 通讯录：左列表 / 右详情 + Agent 提示词生成。 */
-    function ContactsView({ t }) {
+    function ContactsView({ t, status, accountId, onSelectAccount }) {
+      const accounts = (status && status.accounts) || []
       const blank = { name: '', email: '', phone: '', company: '', title: '', notes: '' }
       const [contacts, setContacts] = React.useState([])
       const [selectedId, setSelectedId] = React.useState(null)
@@ -2469,7 +2504,7 @@ window.__ModuleLoader__.load({
         },
       ]
 
-      return h(SplitPane, {
+      const content = h(SplitPane, {
         storageKey: 'contacts',
         spec: PANE_SPEC,
         label: t('resize'),
@@ -2542,6 +2577,17 @@ window.__ModuleLoader__.load({
           ),
         ),
       })
+      return h(
+        'div',
+        { style: { display: 'flex', flex: 1, minHeight: 0 } },
+        h(SplitPane, {
+          storageKey: 'contacts-accounts',
+          spec: RAIL_SPEC,
+          label: t('resize'),
+          left: h(AccountRail, { t, accounts, accountId, onSelect: onSelectAccount }),
+          right: content,
+        }),
+      )
     }
 
     /** 搜索结果：查询非空时接管主区域。 */
@@ -3098,7 +3144,7 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 顶栏 --------------------------------------------------------------
-    function TopBar({ t, status, onRefresh, query, onQueryChange }) {
+    function TopBar({ t, status, onRefresh, query, onQueryChange, onCompose }) {
       const core = (status && status.core) || null
       const ok = Boolean(core && core.state === 'ready')
       const pending = (status && status.counters && status.counters.pendingAi) || 0
@@ -3112,6 +3158,11 @@ window.__ModuleLoader__.load({
         'header',
         { style: styles.topbar },
         h('h1', { style: styles.title }, t('title')),
+        h(
+          'button',
+          { type: 'button', style: styles.iconBtn, title: t('composeNew'), 'aria-label': t('composeNew'), onClick: onCompose },
+          '＋',
+        ),
         h('span', { style: styles.spacer }),
         h(
           'div',
@@ -3155,6 +3206,8 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [query, setQuery] = React.useState('')
+      const [accountId, setAccountId] = React.useState(null)
+      const [newCompose, setNewCompose] = React.useState(null)
 
       const load = React.useCallback(
         (signal) =>
@@ -3177,16 +3230,25 @@ window.__ModuleLoader__.load({
 
       const refresh = () => load(new AbortController().signal)
 
+      const activeAccountId =
+        accountId || (status && status.accounts && status.accounts.length > 0 ? status.accounts[0].id : undefined)
+
       let content
       if (query.trim().length > 0) content = h(SearchView, { t, query: query.trim(), status })
-      else if (tab === 'inbox') content = h(InboxView, { t, status, onRefresh: refresh })
-      else if (tab === 'todo') content = h(TodoView, { t, status })
-      else if (tab === 'sent') content = h(SentView, { t, status, onRefresh: refresh })
-      else if (tab === 'draftsMail') content = h(DraftsMailView, { t, status, onRefresh: refresh })
-      else if (tab === 'deleted') content = h(DeletedView, { t, status, onRefresh: refresh })
-      else if (tab === 'junk') content = h(JunkView, { t, status, onRefresh: refresh })
-      else if (tab === 'templates') content = h(TemplatesView, { t, status, onRefresh: refresh })
-      else if (tab === 'contacts') content = h(ContactsView, { t })
+      else if (tab === 'inbox')
+        content = h(InboxView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'todo') content = h(TodoView, { t, status, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'sent')
+        content = h(SentView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'draftsMail')
+        content = h(DraftsMailView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'deleted')
+        content = h(DeletedView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'junk')
+        content = h(JunkView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'templates')
+        content = h(TemplatesView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'contacts') content = h(ContactsView, { t, status, accountId, onSelectAccount: setAccountId })
       else if (tab === 'ai') content = h(AiWorkbench, { t, status })
       else if (tab === 'knowledge') content = h(KnowledgeView, { t, status })
       else content = h(SettingsView, { t, status, onRefresh: refresh })
@@ -3195,7 +3257,26 @@ window.__ModuleLoader__.load({
         'div',
         { style: styles.panel },
         h('style', { dangerouslySetInnerHTML: { __html: SELECT_CSS } }),
-        h(TopBar, { t, status, onRefresh: refresh, query, onQueryChange: setQuery }),
+        h(TopBar, {
+          t,
+          status,
+          onRefresh: refresh,
+          query,
+          onQueryChange: setQuery,
+          onCompose: () => setNewCompose({ mode: 'send', to: '', cc: '', subject: '', body: '' }),
+        }),
+        newCompose
+          ? h(ComposeModal, {
+              t,
+              initial: newCompose,
+              accountId: activeAccountId,
+              onSubmitted: () => {
+                setNewCompose(null)
+                refresh()
+              },
+              onClose: () => setNewCompose(null),
+            })
+          : null,
         h(
           'nav',
           { style: styles.navScroll, role: 'tablist', 'aria-label': t('title') },
