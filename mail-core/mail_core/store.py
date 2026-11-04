@@ -25,6 +25,9 @@ mailbox upgrades in place.  Schema v7 adds conversation threading to
 ``messages``: ``thread_id`` (account-scoped ``<accountId>:<rootMessageId>``)
 plus the ``in_reply_to`` / ``references`` headers it is derived from; the v7
 upgrade backfills ``thread_id`` for mail synced before threading existed.
+Schema v8 adds attachment metadata (``attachments``, one row per MIME part,
+cascade-deleted with its message) and ``messages.attachments_synced`` so
+pre-v8 mail can be re-parsed for attachments without refetching it twice.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -303,6 +306,42 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> None:
     )
 
 
+# Schema v8: attachment metadata only -- file bytes are downloaded on demand
+# into ``<data-dir>/attachments`` and never stored in SQLite.  ``part_id`` is
+# the IMAP body section (``2`` / ``1.3``) used by ``attachment.fetch`` when
+# the user asks for the file.  ``attachments_synced`` marks a message whose
+# attachment list has been extracted; rows from an older schema start at 0
+# so ``attachment.backfill`` knows what still needs a refetch.
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attachments (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+            filename     TEXT NOT NULL DEFAULT '',
+            content_type TEXT NOT NULL DEFAULT '',
+            size         INTEGER NOT NULL DEFAULT 0,
+            part_id      TEXT NOT NULL DEFAULT '',
+            inline       INTEGER NOT NULL DEFAULT 0,
+            sha256       TEXT NOT NULL DEFAULT '',
+            local_path   TEXT NOT NULL DEFAULT '',
+            fetched_at   TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
+        "ON attachments (message_id)"
+    )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "attachments_synced" not in columns:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN attachments_synced "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -311,6 +350,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     5: _MIGRATION_5,
     6: _migrate_to_v6,
     7: _migrate_to_v7,
+    8: _migrate_to_v8,
 }
 
 
@@ -837,6 +877,7 @@ class Store:
         body_html: str = "",
         size: int = 0,
         seen: bool = False,
+        attachments: Optional[Iterable[dict]] = None,
         created_at: Optional[str] = None,
     ) -> bool:
         """Store one synced message; returns ``True`` only when it is new.
@@ -845,7 +886,9 @@ class Store:
         uidvalidity, uid)`` constraint makes re-syncing the same message a
         no-op, so the boolean is exactly "rowcount == 1".  ``thread_id`` is
         computed from the references against the rows already stored when the
-        caller does not pass one.
+        caller does not pass one.  ``attachments`` (the MIME metadata from
+        :func:`mail_core.mime_parse.parse_message`) is written in the same
+        transaction and marks the message as attachment-synced.
         """
         row_id = f"msg_{uuid.uuid4().hex}"
         if not message_id:
@@ -856,6 +899,10 @@ class Store:
             thread_id = self.resolve_thread_id(
                 account_id, message_id, references, in_reply_to
             )
+        timestamp = created_at or utc_now()
+        attachment_rows = self._attachment_rows(
+            row_id, attachments or (), timestamp
+        )
         with self._conn:
             cursor = self._conn.execute(
                 """
@@ -863,8 +910,9 @@ class Store:
                     id, account_id, folder, uidvalidity, uid, message_id,
                     thread_id, in_reply_to, refs,
                     subject, from_addr, to_addr, cc_addr, date, snippet,
-                    body_text, body_html, size, seen, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    body_text, body_html, size, seen, attachments_synced,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row_id,
@@ -886,10 +934,255 @@ class Store:
                     body_html,
                     int(size),
                     1 if seen else 0,
-                    created_at or utc_now(),
+                    1,
+                    timestamp,
                 ),
             )
+            if cursor.rowcount > 0 and attachment_rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO attachments (
+                        id, message_id, filename, content_type, size,
+                        part_id, inline, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    attachment_rows,
+                )
         return cursor.rowcount > 0
+
+    @staticmethod
+    def _attachment_rows(
+        message_id: str,
+        attachments: Iterable[dict],
+        created_at: str,
+    ) -> list[tuple]:
+        rows: list[tuple] = []
+        for attachment in attachments:
+            rows.append(
+                (
+                    f"att_{uuid.uuid4().hex}",
+                    message_id,
+                    str(attachment.get("filename", "") or ""),
+                    str(attachment.get("contentType", "") or ""),
+                    int(attachment.get("size", 0) or 0),
+                    str(attachment.get("partId", "") or ""),
+                    1 if attachment.get("inline") else 0,
+                    created_at,
+                )
+            )
+        return rows
+
+    def insert_attachments(
+        self,
+        message_id: str,
+        attachments: Iterable[dict],
+        *,
+        created_at: Optional[str] = None,
+    ) -> int:
+        """Insert attachment metadata for an existing message (idempotent-ish)."""
+        rows = self._attachment_rows(
+            message_id, attachments, created_at or utc_now()
+        )
+        with self._conn:
+            if rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO attachments (
+                        id, message_id, filename, content_type, size,
+                        part_id, inline, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._conn.execute(
+                "UPDATE messages SET attachments_synced = 1 WHERE id = ?",
+                (message_id,),
+            )
+        return len(rows)
+
+    def replace_attachments(
+        self,
+        message_id: str,
+        attachments: Iterable[dict],
+        *,
+        created_at: Optional[str] = None,
+    ) -> int:
+        """Replace the attachment list of a message (used by backfill)."""
+        rows = self._attachment_rows(
+            message_id, attachments, created_at or utc_now()
+        )
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM attachments WHERE message_id = ?", (message_id,)
+            )
+            if rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO attachments (
+                        id, message_id, filename, content_type, size,
+                        part_id, inline, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._conn.execute(
+                "UPDATE messages SET attachments_synced = 1 WHERE id = ?",
+                (message_id,),
+            )
+        return len(rows)
+
+    def mark_attachments_synced(self, message_id: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET attachments_synced = 1 WHERE id = ?",
+                (message_id,),
+            )
+        return cursor.rowcount > 0
+
+    def pending_attachment_messages(
+        self,
+        account_id: str,
+        folder: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Messages whose attachment metadata has not been extracted yet."""
+        clauses = ["account_id = ?", "attachments_synced = 0"]
+        args: list = [account_id]
+        if folder is not None:
+            clauses.append("folder = ?")
+            args.append(folder)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, account_id, folder, uidvalidity, uid
+            FROM messages WHERE {' AND '.join(clauses)}
+            ORDER BY date DESC, rowid DESC LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "accountId": row["account_id"],
+                "folder": row["folder"],
+                "uidvalidity": int(row["uidvalidity"]),
+                "uid": int(row["uid"]),
+            }
+            for row in rows
+        ]
+
+    # -- attachment metadata -----------------------------------------------
+
+    @staticmethod
+    def _attachment_list_item(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "messageId": row["message_id"],
+            "subject": row["subject"],
+            "fromAddr": row["from_addr"],
+            "filename": row["filename"],
+            "contentType": row["content_type"],
+            "size": int(row["size"]),
+            "fetchedAt": row["fetched_at"],
+        }
+
+    def list_attachments(
+        self,
+        *,
+        message_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        pending_only: bool = False,
+        include_inline: bool = False,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Attachment metadata joined with its message, newest mail first.
+
+        Inline resources (HTML images, calendar parts) are not shown by
+        default: they are not "attachments to analyse", even though their
+        metadata is stored so ``attachment.get`` can still inspect it.
+        """
+        clauses: list[str] = []
+        args: list = []
+        if message_id is not None:
+            clauses.append("a.message_id = ?")
+            args.append(message_id)
+        if account_id is not None:
+            clauses.append("m.account_id = ?")
+            args.append(account_id)
+        if pending_only:
+            clauses.append("a.fetched_at = ''")
+        if not include_inline:
+            clauses.append("a.inline = 0")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"""
+            SELECT a.*, m.subject, m.from_addr
+            FROM attachments a
+            JOIN messages m ON m.id = a.message_id
+            {where}
+            ORDER BY m.date DESC, m.rowid DESC, a.id ASC
+            LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        return [self._attachment_list_item(row) for row in rows]
+
+    def get_attachment(self, attachment_id: str) -> Optional[dict]:
+        """Full attachment metadata plus the message fields a fetch needs."""
+        row = self._conn.execute(
+            """
+            SELECT a.*, m.account_id, m.folder, m.uidvalidity, m.uid,
+                   m.subject, m.from_addr
+            FROM attachments a
+            JOIN messages m ON m.id = a.message_id
+            WHERE a.id = ?
+            """,
+            (attachment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        item = self._attachment_list_item(row)
+        item.update(
+            {
+                "accountId": row["account_id"],
+                "folder": row["folder"],
+                "uidvalidity": int(row["uidvalidity"]),
+                "uid": int(row["uid"]),
+                "partId": row["part_id"],
+                "inline": bool(row["inline"]),
+                "sha256": row["sha256"],
+                "path": row["local_path"],
+                "downloaded": bool(row["fetched_at"] and row["local_path"]),
+            }
+        )
+        return item
+
+    def set_attachment_download(
+        self,
+        attachment_id: str,
+        *,
+        local_path: str,
+        sha256: str,
+        fetched_at: Optional[str] = None,
+    ) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE attachments SET local_path = ?, sha256 = ?, fetched_at = ? "
+                "WHERE id = ?",
+                (local_path, sha256, fetched_at or utc_now(), attachment_id),
+            )
+        return cursor.rowcount > 0
+
+    def count_attachments(self, message_id: Optional[str] = None) -> int:
+        if message_id is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM attachments"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM attachments WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+        return int(row["n"])
 
     def list_messages(
         self,

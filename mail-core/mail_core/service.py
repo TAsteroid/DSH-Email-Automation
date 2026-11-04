@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import backup, crypto, delete, drafts, imap_client, pop3_client, sender, smtp_client
+from . import attachments, backup, crypto, delete, drafts, imap_client, pop3_client, sender, smtp_client
 from . import protocol
 from . import sync
 from .protocol import (
@@ -198,6 +198,10 @@ class Service:
             "thread.list": self._thread_list,
             "thread.get": self._thread_get,
             "history.backfill": self._history_backfill,
+            "attachment.list": self._attachment_list,
+            "attachment.get": self._attachment_get,
+            "attachment.fetch": self._attachment_fetch,
+            "attachment.backfill": self._attachment_backfill,
             "contact.list": self._contact_list,
             "contact.add": self._contact_add,
             "contact.update": self._contact_update,
@@ -613,6 +617,59 @@ class Service:
         if thread is None:
             raise MailCoreError(NOT_FOUND, "thread not found")
         return thread
+
+    # -- attachments -------------------------------------------------------
+
+    def _attachment_list(self, params: dict) -> dict:
+        """List stored attachment metadata (local index only, no download)."""
+        return {
+            "attachments": self.store.list_attachments(
+                message_id=_optional_id(params, "messageId"),
+                account_id=_optional_id(params, "accountId"),
+                pending_only=_optional_bool(params, "pendingOnly", False),
+            )
+        }
+
+    def _attachment_get(self, params: dict) -> dict:
+        attachment_id = _require_str(params, "id")
+        attachment = self.store.get_attachment(attachment_id)
+        if attachment is None:
+            raise MailCoreError(NOT_FOUND, "attachment not found")
+        return attachment
+
+    def _attachment_fetch(self, params: dict) -> dict:
+        """Download one attachment part into ``<dataDir>/attachments``."""
+        attachment_id = _require_str(params, "id")
+        max_bytes = _optional_int(
+            params,
+            "maxBytes",
+            attachments.DEFAULT_MAX_BYTES,
+            minimum=1,
+            maximum=attachments.MAX_MAX_BYTES,
+        )
+        attachment = self.store.get_attachment(attachment_id)
+        if attachment is None:
+            raise MailCoreError(NOT_FOUND, "attachment not found")
+
+        account, password = self._account_credentials(attachment["accountId"])
+        return attachments.download(
+            self.store,
+            self.data_dir,
+            attachment,
+            account,
+            password,
+            max_bytes=max_bytes,
+        )
+
+    def _attachment_backfill(self, params: dict) -> dict:
+        """Extract attachment metadata for mail synced before schema v8."""
+        account_id = _require_str(params, "accountId")
+        folder = _optional_id(params, "folder")
+        limit = _optional_int(params, "limit", 50, minimum=1, maximum=200)
+        account, password = self._account_credentials(account_id)
+        return sync.backfill_attachment_metadata(
+            self.store, account, password, folder, limit
+        )
 
     # -- contacts ----------------------------------------------------------
 

@@ -184,6 +184,26 @@ function handleMethod(method, params) {
   }
   if (method === 'message.delete') return { deleted: true, trashed: params.permanent !== true, localOnly: false }
   if (method === 'message.restore') return { restored: true, folder: params.folder ?? 'INBOX' }
+  if (method === 'attachment.list') {
+    return {
+      attachments: [
+        {
+          id: 'att_1',
+          messageId: 'msg_1',
+          accountId: 'acc_1',
+          subject: '报价回复',
+          fromAddr: 'a@b.com',
+          filename: '报价表.xlsx',
+          contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          size: 2048,
+          fetchedAt: '',
+        },
+      ],
+    }
+  }
+  if (method === 'attachment.fetch') {
+    return { id: params.id, path: 'C:\\data\\attachments\\msg_1\\报价表.xlsx', size: 2048, sha256: 'abc123', fetchedAt: '2026-11-04T12:00:00Z' }
+  }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -772,6 +792,39 @@ check(restoreRoute && restoreRoute.status === 200, `恢复应 200，实际 ${res
 if (restoreRoute && restoreRoute.body) {
   const parsed = JSON.parse(restoreRoute.body)
   check(parsed.value.restored === true && parsed.value.folder === 'INBOX', '恢复默认回 INBOX')
+}
+
+// ---- 附件 ---------------------------------------------------------------
+const attachmentsRoute = await invoke('/api/dsh-mail/attachments', {
+  method: 'POST',
+  body: JSON.stringify({ messageId: 'msg_1' }),
+})
+check(attachmentsRoute && attachmentsRoute.status === 200, `attachments 应 200，实际 ${attachmentsRoute && attachmentsRoute.status}`)
+if (attachmentsRoute && attachmentsRoute.body) {
+  const parsed = JSON.parse(attachmentsRoute.body)
+  check(parsed.value.attachments[0].filename === '报价表.xlsx', '附件应带文件名')
+  check(parsed.value.attachments[0].size === 2048, '附件应带大小')
+}
+
+const fetchNoId = await invoke('/api/dsh-mail/attachments/fetch', { method: 'POST', body: '{}' })
+check(fetchNoId && fetchNoId.status === 400, `附件下载缺 id 应 400，实际 ${fetchNoId && fetchNoId.status}`)
+
+const fetchRoute = await invoke('/api/dsh-mail/attachments/fetch', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'att_1' }),
+})
+check(fetchRoute && fetchRoute.status === 200, `附件下载应 200，实际 ${fetchRoute && fetchRoute.status}`)
+if (fetchRoute && fetchRoute.body) {
+  const parsed = JSON.parse(fetchRoute.body)
+  check(String(parsed.value.path).includes('attachments'), '下载后应返回本地路径')
+  check(parsed.value.sha256 === 'abc123', '下载后应有 sha256')
+}
+
+const attachmentTool = tools.get('mail_attachments')
+if (attachmentTool) {
+  const listed = await attachmentTool.execute({ messageId: 'msg_1' }, { agent: { id: 'sess_1' } })
+  check(listed.available === true && listed.attachments.length === 1, 'mail_attachments 应列出附件')
+  check(listed.attachments[0].fetched === false, '未下载的附件 fetched 应为 false')
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

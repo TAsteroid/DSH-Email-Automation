@@ -170,7 +170,12 @@ window.__ModuleLoader__.load({
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
         deleteMail: '删除',
-        restoreMail: '恢复',
+        attachmentHint: '下载后 Agent 才能读取附件内容；未下载前库里只有文件名和大小。',
+        attachmentTitle: '附件待处理',
+        attachmentAnalyze: '下载并准备分析',
+        attachmentFetched: '已下载',
+        attachmentFrom: '来自',
+        attachmentSize: '大小',
         restoredOk: '已恢复到',
         confirmDeleteTitle: '删除这封邮件？',
         confirmDeleteToTrash: '邮件会移到「已删除」。',
@@ -376,6 +381,12 @@ window.__ModuleLoader__.load({
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
 
         deleteMail: 'Delete',
+        attachmentHint: 'The agent can only read an attachment after it is downloaded; before that we store only the filename and size.',
+        attachmentTitle: 'Attachments to review',
+        attachmentAnalyze: 'Download for analysis',
+        attachmentFetched: 'Downloaded',
+        attachmentFrom: 'From',
+        attachmentSize: 'Size',
         restoreMail: 'Restore',
         restoredOk: 'Restored to',
         confirmDeleteTitle: 'Delete this message?',
@@ -2128,6 +2139,31 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
+    /** 附件事项卡片：显示来源与大小，确认后才下载。 */
+    function AttachmentCard({ t, item, fetching, result, onFetch }) {
+      return h(
+        'article',
+        { style: { ...styles.aiCard, width: '100%', height: '100%' }, 'aria-label': item.title },
+        h('p', { style: styles.sectionTitle }, t('attachmentTitle')),
+        h('h3', { style: styles.msgSubject }, item.title),
+        h('p', { style: styles.muted }, `${t('attachmentFrom')}: ${item.subject}`),
+        h('p', { style: styles.muted }, `${t('attachmentSize')}: ${formatBytes(item.size)} · ${item.contentType || '—'}`),
+        h(
+          'div',
+          { style: styles.formActions },
+          h('button', { type: 'button', style: styles.btn, disabled: fetching, onClick: onFetch }, t('attachmentAnalyze')),
+        ),
+        result
+          ? h(
+              'p',
+              { style: result.error ? styles.error : styles.muted },
+              result.error ? result.error : `${t('attachmentFetched')}: ${result.path || ''} (${formatBytes(result.size)})`,
+            )
+          : null,
+        h('p', { style: styles.muted }, t('attachmentHint')),
+      )
+    }
+
     /** 待跟进：账户栏 + 待处理/已处理列表 + 右侧卡片工作台（原 AI 工作台）。 */
     function TodoView({ t, status, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
@@ -2141,25 +2177,61 @@ window.__ModuleLoader__.load({
       }, [status])
 
       const label = (account) => (account.displayName ? account.displayName : account.address)
-      const visible = accountId === null ? accounts : accounts.filter((account) => account.id === accountId)
+      const visible = accountId ? accounts.filter((account) => account.id === accountId) : accounts
       const toItem = (item) => ({
         id: item.id,
         title: item.title || item.subject || t('noSubject'),
         meta: item.accountId ? item.accountId : '',
       })
 
+      // 待处理附件（元数据已入库、尚未下载）与 AI 待办合并展示
+      const attachments = ((status && status.attachments && status.attachments.pending) || []).map((item) => ({
+        id: `att_${item.id}`,
+        attachmentId: item.id,
+        kind: 'attachment',
+        accountId: item.accountId || '',
+        title: item.filename || '(未命名附件)',
+        meta: `${item.subject || ''} · ${formatBytes(item.size)}`,
+        subject: item.subject || '',
+        contentType: item.contentType || '',
+        size: Number(item.size) || 0,
+        fetchedAt: item.fetchedAt || '',
+      }))
+
       const groups = [
         ...visible.map((account) => ({
           id: `${account.id}-pending`,
           title: `${label(account)} · ${t('aiQueue')}`,
-          items: (items.pending || [])
-            .filter((item) => !item.accountId || item.accountId === account.id)
-            .map(toItem),
+          items: [
+            ...attachments.filter((item) => !item.accountId || item.accountId === account.id),
+            ...(items.pending || [])
+              .filter((item) => !item.accountId || item.accountId === account.id)
+              .map(toItem),
+          ],
         })),
         { id: 'done', title: t('aiDone'), items: (items.done || []).map(toItem) },
       ]
 
-      const selected = [...(items.pending || []), ...(items.done || [])].find((item) => item.id === selectedId) || null
+      const selected =
+        attachments.find((item) => item.id === selectedId) ||
+        [...(items.pending || []), ...(items.done || [])].find((item) => item.id === selectedId) ||
+        null
+
+      const [fetching, setFetching] = React.useState(false)
+      const [fetched, setFetched] = React.useState(null)
+      const fetchAttachment = async () => {
+        if (!selected || selected.kind !== 'attachment' || fetching) return
+        setFetching(true)
+        setFetched(null)
+        try {
+          const value = await call('/attachments/fetch', { id: selected.attachmentId })
+          setFetched(value || {})
+        } catch (error) {
+          setFetched({ error: error.message })
+        } finally {
+          setFetching(false)
+        }
+      }
 
       const act = (action, item) => {
         setItems((previous) => {
@@ -2183,7 +2255,13 @@ window.__ModuleLoader__.load({
           label: t('resize'),
           left: h(GroupList, { t, groups, selectedId, onSelect: setSelectedId }),
           right: selected
-            ? h('div', { style: styles.cardHost }, h(AiCard, { t, item: selected, onAct: act, fluid: true }))
+            ? h(
+                'div',
+                { style: styles.cardHost },
+                selected.kind === 'attachment'
+                  ? h(AttachmentCard, { t, item: selected, fetching, result: fetched, onFetch: fetchAttachment })
+                  : h(AiCard, { t, item: selected, onAct: act, fluid: true }),
+              )
             : h(EmptyPane, { title: t('aiEmptyTitle'), hint: t('aiEmptyHint') }),
         }),
       })
@@ -3879,6 +3957,7 @@ window.__ModuleLoader__.load({
       __test: {
         MailPanel,
         ConfirmDialog,
+        AttachmentCard,
         InboxView,
         AccountRail,
         SentView,

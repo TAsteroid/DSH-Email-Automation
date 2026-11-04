@@ -420,6 +420,7 @@ export function apply(ctx, config) {
     const sync = ready ? await callCore('sync.status') : { available: false, reason: readyError }
     const approvals = ready ? await callCore('approval.list') : { available: false, reason: readyError }
     const drafts = ready ? await callCore('draft.list', {}) : { available: false, reason: readyError }
+    const attachments = ready ? await callCore('attachment.list', { pendingOnly: true }) : { available: false, reason: readyError }
     const counters = (sync.available && sync.value?.counters) || {
       accounts: 0,
       messages: 0,
@@ -454,6 +455,9 @@ export function apply(ctx, config) {
         history: decorateApprovals(approvals.available ? approvals.value?.history : [], drafts),
       },
       counters,
+      attachments: {
+        pending: (attachments.available && attachments.value?.attachments) || [],
+      },
       lastSyncAt: (sync.available && sync.value?.lastSyncAt) || '',
     }
   }
@@ -1371,6 +1375,79 @@ export function apply(ctx, config) {
     'mail: register mail_related tool',
   )
 
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_attachments',
+        description:
+          'List the attachments of one message (defaults to the message the user selected): filename, content type, size, and whether it is already downloaded locally. Read-only — downloading needs the user to confirm in the Mail panel.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            messageId: { type: 'string', description: 'Defaults to the currently selected message' },
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              messageId: { type: 'string' },
+              attachments: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string' },
+                    filename: { type: 'string' },
+                    contentType: { type: 'string' },
+                    size: { type: 'number' },
+                    fetched: { type: 'boolean' },
+                    path: { type: 'string' },
+                  },
+                },
+              },
+            },
+            required: ['available', 'attachments'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `attachments unavailable: ${value.reason ?? 'unknown'}` }]
+            if (value.attachments.length === 0) return [{ type: 'text', text: 'no attachments' }]
+            return [
+              {
+                type: 'text',
+                text: value.attachments
+                  .map((item) => `${item.filename} (${item.contentType}, ${item.size} B)${item.fetched ? ' ✓local' : ''}`)
+                  .join('\n'),
+              },
+            ]
+          },
+        },
+        timeoutMs: 20_000,
+        isConcurrencySafe: () => true,
+        async execute(args) {
+          const messageId = typeof args.messageId === 'string' && args.messageId.trim() ? args.messageId.trim() : uiState.messageId
+          if (!messageId) return { available: false, reason: 'no messageId given and nothing is selected', messageId: '', attachments: [] }
+          const result = await callCore('attachment.list', { messageId })
+          if (!result.available) return { available: false, reason: result.reason.message, messageId, attachments: [] }
+          const attachments = (result.value?.attachments ?? []).map((item) => ({
+            id: item.id ?? '',
+            filename: item.filename ?? '',
+            contentType: item.contentType ?? '',
+            size: Number(item.size) || 0,
+            fetched: Boolean(item.fetchedAt),
+            path: item.path ?? item.localPath ?? '',
+          }))
+          return { available: true, reason: '', messageId, attachments }
+        },
+      }),
+    'mail: register mail_attachments tool',
+  )
+
   // 3) 本机 HTTP 通道
   ctx.effect(() => {
     const disposers = []
@@ -1614,6 +1691,31 @@ export function apply(ctx, config) {
       // 恢复后立刻同步目标文件夹，界面当场能看到
       if (value && value.folder) await syncFolderByName(value.folder)
       return value
+    })
+
+    // ---- 附件 --------------------------------------------------------------
+    route('/attachments', async (body) => {
+      const params = {}
+      if (typeof body.messageId === 'string' && body.messageId.trim()) params.messageId = body.messageId.trim()
+      if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
+      if (body.pendingOnly === true) params.pendingOnly = true
+      return requireCoreResult(await callCore('attachment.list', params))
+    })
+
+    route('/attachments/fetch', async (body) => {
+      const id = requireText(body.id, 'id')
+      const params = { id }
+      if (body.maxBytes !== undefined) params.maxBytes = Number(body.maxBytes)
+      return requireCoreResult(await callCore('attachment.fetch', params, { timeoutMs: 120_000 }))
+    })
+
+    // 老邮件补附件元数据（v8 之前同步的邮件没有附件记录）
+    route('/attachments/backfill', async (body) => {
+      const params = {}
+      if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
+      if (typeof body.folder === 'string' && body.folder.trim()) params.folder = body.folder.trim()
+      if (body.limit !== undefined) params.limit = Number(body.limit)
+      return requireCoreResult(await callCore('attachment.backfill', params, { timeoutMs: SYNC_TIMEOUT_MS }))
     })
 
     // ---- 界面上下文（读取用户当前操作位置，不需审批）------------------------

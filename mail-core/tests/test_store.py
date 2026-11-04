@@ -62,8 +62,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(reopened.schema_version, SCHEMA_VERSION)
         self.assertEqual(len(reopened.list_accounts()), 1)
 
-    def test_v1_database_upgrades_to_v7_and_keeps_accounts(self):
-        """An existing v1 database walks v2 -> ... -> v7 and keeps its accounts."""
+    def test_v1_database_upgrades_to_v8_and_keeps_accounts(self):
+        """An existing v1 database walks v2 -> ... -> v8 and keeps its accounts."""
         v1_path = Path(self._tmp.name) / "legacy.db"
         connection = sqlite3.connect(str(v1_path))
         try:
@@ -102,6 +102,7 @@ class StoreTests(unittest.TestCase):
             )
         }
         self.assertIn("messages", tables)
+        self.assertIn("attachments", tables)
         # The new message store accepts rows for the migrated account.
         self.assertTrue(
             store.insert_message(
@@ -121,15 +122,19 @@ class StoreTests(unittest.TestCase):
         store._conn.executescript(MIGRATIONS[5])
         MIGRATIONS[6](store._conn)
         MIGRATIONS[7](store._conn)
+        MIGRATIONS[8](store._conn)
         self.assertEqual(store.get_account("acc_old")["protocol"], "imap")
         self.assertEqual(store.schema_version, SCHEMA_VERSION)
 
         message_columns = {
             row[1] for row in store._conn.execute("PRAGMA table_info(messages)")
         }
-        self.assertTrue({"thread_id", "in_reply_to", "refs"} <= message_columns)
+        self.assertTrue(
+            {"thread_id", "in_reply_to", "refs", "attachments_synced"}
+            <= message_columns
+        )
 
-    def test_v6_database_upgrades_to_v7_and_backfills_threads(self):
+    def test_v6_database_upgrades_to_v8_and_backfills_threads(self):
         """A pre-threading mailbox keeps its mail and gets thread ids."""
         v6_path = Path(self._tmp.name) / "legacy-v6.db"
         connection = sqlite3.connect(str(v6_path))
@@ -181,6 +186,30 @@ class StoreTests(unittest.TestCase):
 
         self.assertEqual(store.schema_version, SCHEMA_VERSION)
         self.assertEqual(store.count_messages(), 2)
+        attachment_columns = {
+            row[1] for row in store._conn.execute("PRAGMA table_info(attachments)")
+        }
+        self.assertTrue(
+            {
+                "id",
+                "message_id",
+                "filename",
+                "content_type",
+                "size",
+                "part_id",
+                "inline",
+                "sha256",
+                "local_path",
+                "fetched_at",
+                "created_at",
+            }
+            <= attachment_columns
+        )
+        synced = {
+            row["attachments_synced"]
+            for row in store._conn.execute("SELECT attachments_synced FROM messages")
+        }
+        self.assertEqual(synced, {0})
         rows = store._conn.execute(
             "SELECT message_id, thread_id FROM messages ORDER BY uid ASC"
         ).fetchall()

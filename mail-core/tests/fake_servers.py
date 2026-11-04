@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import email
 import email.header
 import re
 import socket
@@ -421,15 +422,66 @@ def _imap_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _imap_resolve_part(message, section: str):
+    """Resolve an IMAP body-section path (``2`` / ``1.3``) to a MIME part."""
+    node = message
+    for segment in (section or "").split("."):
+        if not segment:
+            return None
+        try:
+            index = int(segment)
+        except ValueError:
+            return None
+        payload = node.get_payload()
+        if isinstance(payload, list):
+            if index < 1 or index > len(payload):
+                return None
+            node = payload[index - 1]
+        elif index != 1:
+            return None
+    return node
+
+
+def _imap_part_headers(part) -> bytes:
+    lines = [f"{key}: {value}" for key, value in part.items()]
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8", "surrogateescape")
+
+
+def _imap_part_body(part) -> bytes:
+    payload = part.get_payload(decode=False)
+    if isinstance(payload, list):
+        if payload and hasattr(payload[0], "as_bytes"):
+            return payload[0].as_bytes()
+        return b""
+    if isinstance(payload, bytes):
+        return payload
+    if isinstance(payload, str):
+        return payload.encode("utf-8", "surrogateescape")
+    return b""
+
+
+def _imap_section_bytes(raw: bytes, section: str, *, headers_only: bool):
+    try:
+        message = email.message_from_bytes(raw)
+    except Exception:
+        return None
+    part = _imap_resolve_part(message, section)
+    if part is None:
+        return None
+    return _imap_part_headers(part) if headers_only else _imap_part_body(part)
+
+
 class FakeImapServer(_LoopbackServer):
     """Speaks enough IMAP4rev1 for the sync and delete paths.
 
     Supported: ``CAPABILITY``, ``LOGIN``, ``LIST``, ``SELECT``/``EXAMINE``,
     ``UID SEARCH`` (``ALL``, ``UID n``, ``UID n:m``, ``UID n:*``),
-    ``UID FETCH`` (literal body), ``UID COPY``, ``UID STORE``, ``EXPUNGE``
+    ``UID FETCH`` (literal body, whole message or ``BODY[<section>]`` /
+    ``BODY[<section>.MIME]``), ``UID COPY``, ``UID STORE``, ``EXPUNGE``
     and ``LOGOUT``.  ``messages`` is one raw RFC 822 byte string per message;
     mailbox UID ``n`` is ``messages[n - 1]``.  ``uidvalidity`` can be changed
     between syncs to exercise the reset path.
+
 
     Copies and expunges are modelled per selected mailbox so a test can check
     that a delete really landed: ``COPY`` adds a new UID to the target
@@ -602,8 +654,30 @@ class FakeImapServer(_LoopbackServer):
             except ValueError:
                 self._send(connection, f"{tag} BAD invalid UID\r\n")
                 return
-            if 1 <= uid <= len(self.messages):
-                raw = self.messages[uid - 1]
+            raw = self.messages[uid - 1] if 1 <= uid <= len(self.messages) else None
+            sections = re.findall(
+                r"BODY(?:\.PEEK)?\[([^\]]*)\]", _spec, re.IGNORECASE
+            )
+            if raw is not None and any(section for section in sections):
+                self._send(
+                    connection, f"* {uid} FETCH (UID {uid}".encode("ascii")
+                )
+                for section in sections:
+                    headers_only = section.upper().endswith(".MIME")
+                    part_id = section[: -len(".MIME")] if headers_only else section
+                    payload = _imap_section_bytes(
+                        raw, part_id, headers_only=headers_only
+                    )
+                    if payload is None:
+                        continue
+                    label = f"BODY[{section}]"
+                    self._send(
+                        connection,
+                        f" {label} {{{len(payload)}}}\r\n".encode("ascii"),
+                    )
+                    self._send(connection, payload)
+                self._send(connection, b")\r\n")
+            elif raw is not None:
                 header = (
                     f"* {uid} FETCH (UID {uid} RFC822.SIZE {len(raw)} "
                     f"BODY[] {{{len(raw)}}}\r\n"

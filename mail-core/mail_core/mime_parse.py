@@ -215,6 +215,144 @@ def make_snippet(text: str) -> str:
     return " ".join((text or "").split())[:SNIPPET_LENGTH]
 
 
+# -- attachments -----------------------------------------------------------
+
+# Parts that render the message body.  They are only treated as attachments
+# when they carry a filename or an explicit attachment disposition (a mailed
+# `.txt` file is an attachment, the readable body is not).
+_BODY_TYPES = frozenset({"text/plain", "text/html"})
+
+
+def _iter_parts(message, prefix: str = ""):
+    """Yield ``(imap_section, part)`` pairs matching IMAP body sections.
+
+    ``multipart/mixed`` children are ``1``, ``2`` …; nested containers extend
+    the path (``1.1``, ``1.2`` …).  A single-part message yields ``1``.  A
+    ``message/rfc822`` part is itself an attachment, not a container to walk
+    into.
+    """
+    if message.is_multipart() and message.get_content_type() != "message/rfc822":
+        payload = message.get_payload()
+        if not isinstance(payload, list):
+            yield prefix or "1", message
+            return
+        for index, child in enumerate(payload, start=1):
+            part_id = f"{prefix}.{index}" if prefix else str(index)
+            yield from _iter_parts(child, part_id)
+    else:
+        yield prefix or "1", message
+
+
+def _disposition(part) -> str:
+    raw = part.get("Content-Disposition") or ""
+    return str(raw).split(";", 1)[0].strip().lower()
+
+
+def _attachment_filename(part) -> str:
+    """Decoded filename (RFC 2231 handled by ``get_filename``, 2047 on top)."""
+    try:
+        name = part.get_filename()
+    except Exception:
+        name = None
+    if not name:
+        return ""
+    text = str(name).strip()
+    if "=?" in text:
+        text = decode_header_value(text)
+    return text
+
+
+def _part_size(part) -> int:
+    """Byte length of the transfer-decoded part content."""
+    try:
+        payload = part.get_payload(decode=True)
+    except Exception:
+        payload = None
+    if isinstance(payload, (bytes, bytearray)):
+        return len(payload)
+    raw = part.get_payload()
+    if isinstance(raw, list):
+        total = 0
+        for item in raw:
+            encoder = getattr(item, "as_bytes", None)
+            if callable(encoder):
+                total += len(encoder())
+        return total
+    if isinstance(raw, (bytes, bytearray)):
+        return len(raw)
+    if isinstance(raw, str):
+        return len(raw.encode("utf-8", "replace"))
+    return 0
+
+
+def extract_attachments(message: email.message.Message) -> list[dict]:
+    """List the attachment parts of a parsed message.
+
+    Detection follows the product rule: a part counts when it has a filename
+    or an explicit ``attachment`` disposition, body text parts do not count,
+    and inline resources (Content-ID / ``inline`` disposition) are flagged
+    ``inline`` so the list RPC can keep them out of the "to analyse" queue.
+    """
+    try:
+        parts = list(_iter_parts(message))
+    except Exception:  # a broken MIME tree must not fail the whole sync
+        return []
+
+    attachments: list[dict] = []
+    for part_id, part in parts:
+        try:
+            content_type = (part.get_content_type() or "").lower()
+            filename = _attachment_filename(part)
+            disposition = _disposition(part)
+            has_content_id = bool(part.get("Content-ID"))
+            is_body = (
+                content_type in _BODY_TYPES
+                and not filename
+                and disposition != "attachment"
+            )
+            if is_body:
+                continue
+            if not filename and disposition != "attachment":
+                continue
+            inline = disposition == "inline" or (
+                has_content_id and disposition != "attachment"
+            )
+            attachments.append(
+                {
+                    "filename": filename,
+                    "contentType": content_type or "application/octet-stream",
+                    "size": _part_size(part),
+                    "partId": part_id,
+                    "inline": inline,
+                }
+            )
+        except Exception:  # one malformed part must not hide the others
+            continue
+    return attachments
+
+
+def decode_part_bytes(mime_bytes: bytes, body_bytes: bytes) -> bytes:
+    """Decode a fetched IMAP body part using its MIME headers.
+
+    ``BODY[<part>.MIME]`` gives the headers (Content-Type /
+    Content-Transfer-Encoding) and ``BODY[<part>]`` gives the still-encoded
+    body; reassembling them and calling ``get_payload(decode=True)`` is the
+    standard-library way to undo base64 / quoted-printable.  When the server
+    declines the MIME fetch, the body is returned untouched.
+    """
+    if not mime_bytes:
+        return body_bytes
+    try:
+        headers = mime_bytes.rstrip(b"\r\n")
+        part = email.message_from_bytes(headers + b"\r\n\r\n" + body_bytes)
+        decoded = part.get_payload(decode=True)
+        if isinstance(decoded, (bytes, bytearray)):
+            return bytes(decoded)
+    except Exception:
+        pass
+    return body_bytes
+
+
 def _truncate_utf8(text: str) -> tuple[str, bool]:
     """Keep at most :data:`MAX_BODY_BYTES` UTF-8 bytes."""
     if not text:
@@ -239,6 +377,7 @@ def _empty_message(size: int) -> dict:
         "text": "",
         "html": "",
         "size": int(size),
+        "attachments": [],
     }
 
 
@@ -277,6 +416,10 @@ def parse_message(
         text, html_text = extract_bodies(message)
     except Exception:  # a broken MIME tree must not fail the whole sync
         pass
+    try:
+        attachments = extract_attachments(message)
+    except Exception:
+        attachments = []
     truncated = False
     if total_size > MAX_RAW_BYTES:
         text, text_cut = _truncate_utf8(text)
@@ -304,4 +447,5 @@ def parse_message(
         "text": text,
         "html": html_text,
         "size": total_size,
+        "attachments": attachments,
     }

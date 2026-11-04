@@ -161,6 +161,7 @@ def _insert(
         body_text=parsed["text"],
         body_html=parsed["html"],
         size=parsed["size"],
+        attachments=parsed.get("attachments", []),
     )
 
 
@@ -773,3 +774,207 @@ def _backfill_result(
         "stored": stored,
         "oldestDate": store.oldest_message_date(account_id, folder),
     }
+
+
+# -- attachment metadata backfill -----------------------------------------
+
+
+def backfill_attachment_metadata(
+    store: Store,
+    account: dict,
+    password: str,
+    folder: Optional[str] = None,
+    limit: int = DEFAULT_LIMIT,
+) -> dict:
+    """Re-parse old messages that predate the v8 attachment table.
+
+    Messages synced after v8 already carry their attachment metadata, so this
+    only touches rows whose ``attachments_synced`` flag is still 0.  The raw
+    body is fetched again (attachment *files* are not downloaded here), the
+    MIME parts are parsed, and the message is marked synced either way.
+    """
+    receive_protocol = account.get("protocol") or "imap"
+    if receive_protocol == "pop3":
+        return _backfill_attachments_pop3(
+            store, account, password, folder, limit
+        )
+    return _backfill_attachments_imap(store, account, password, folder, limit)
+
+
+def _attachment_backfill_result(
+    account_id: str, folder: str, messages: int, attachments: int
+) -> dict:
+    return {
+        "accountId": account_id,
+        "folder": folder or "",
+        "messages": messages,
+        "attachments": attachments,
+    }
+
+
+def _backfill_attachments_imap(
+    store: Store,
+    account: dict,
+    password: str,
+    folder: Optional[str],
+    limit: int,
+) -> dict:
+    account_id = str(account["id"])
+    pending = store.pending_attachment_messages(account_id, folder, limit)
+    if not pending:
+        return _attachment_backfill_result(account_id, folder or "", 0, 0)
+
+    # One SELECT per folder; messages arrive grouped by folder from the store.
+    by_folder: dict[str, list[dict]] = {}
+    for message in pending:
+        by_folder.setdefault(message["folder"], []).append(message)
+
+    processed = inserted = 0
+    connection = None
+    try:
+        connection = imap_client.connect(
+            account["imapHost"],
+            int(account["imapPort"]),
+            account["imapSecurity"],
+        )
+        try:
+            connection.login(account["username"], password)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"login failed: {_redact(exc, password)}"
+            ) from None
+
+        for folder_name, messages in by_folder.items():
+            wire_folder = imap_client.encode_mailbox(folder_name)
+            try:
+                status, data = connection.select(wire_folder)
+            except _IMAP_FAILURES as exc:
+                raise imap_client.ImapError(
+                    f"SELECT {folder_name} failed: {_redact(exc, password)}"
+                ) from None
+            if status != "OK":
+                raise imap_client.ImapError(
+                    f"SELECT {folder_name} failed: {_text(data)}"
+                )
+
+            server_uidvalidity = _read_uidvalidity(connection, wire_folder)
+            expected = {message["uidvalidity"] for message in messages}
+            if (
+                server_uidvalidity is not None
+                and expected
+                and expected != {server_uidvalidity}
+            ):
+                raise imap_client.ImapError(
+                    f"UIDVALIDITY changed for {folder_name}; run sync.run first"
+                )
+
+            for message in messages:
+                raw, size = _fetch_one(connection, message["uid"])
+                parsed = _parse(
+                    account_id,
+                    folder_name,
+                    message["uidvalidity"],
+                    message["uid"],
+                    raw,
+                    size,
+                )
+                inserted += store.replace_attachments(
+                    message["id"], parsed.get("attachments", [])
+                )
+                processed += 1
+    except MailCoreError:
+        raise
+    except _IMAP_FAILURES as exc:
+        raise imap_client.ImapError(
+            f"attachment backfill failed: {_redact(exc, password)}"
+        ) from None
+    finally:
+        if connection is not None:
+            try:
+                connection.logout()
+            except Exception:
+                pass
+
+    return _attachment_backfill_result(
+        account_id, folder or "", processed, inserted
+    )
+
+
+def _backfill_attachments_pop3(
+    store: Store,
+    account: dict,
+    password: str,
+    folder: Optional[str],
+    limit: int,
+) -> dict:
+    account_id = str(account["id"])
+    pending = store.pending_attachment_messages(account_id, folder, limit)
+    if not pending:
+        return _attachment_backfill_result(account_id, folder or "", 0, 0)
+
+    processed = inserted = 0
+    connection = None
+    try:
+        connection = pop3_client.connect(
+            account["imapHost"],
+            int(account["imapPort"]),
+            account["imapSecurity"],
+        )
+        try:
+            connection.user(account["username"])
+            connection.pass_(password)
+        except _POP3_FAILURES as exc:
+            raise pop3_client.Pop3Error(
+                f"login failed: {_redact(exc, password)}"
+            ) from None
+
+        try:
+            _status, lines, _octets = connection.uidl()
+        except _POP3_FAILURES as exc:
+            raise pop3_client.Pop3Error(
+                f"UIDL failed: {_redact(exc, password)}"
+            ) from None
+
+        by_uid: dict[int, int] = {}
+        for message_number, uidl in _parse_uidl(lines):
+            by_uid[_pop3_uid(uidl, message_number)] = message_number
+
+        for message in pending:
+            message_number = by_uid.get(int(message["uid"]))
+            if message_number is None:
+                continue
+            try:
+                _status, body_lines, _octets = connection.retr(message_number)
+            except _POP3_FAILURES as exc:
+                raise pop3_client.Pop3Error(
+                    f"RETR {message_number} failed: {_redact(exc, password)}"
+                ) from None
+            raw = b"\r\n".join(body_lines)
+            if body_lines:
+                raw += b"\r\n"
+            parsed = _parse(
+                account_id, message["folder"], 0, message["uid"], raw, len(raw)
+            )
+            inserted += store.replace_attachments(
+                message["id"], parsed.get("attachments", [])
+            )
+            processed += 1
+    except MailCoreError:
+        raise
+    except _POP3_FAILURES as exc:
+        raise pop3_client.Pop3Error(
+            f"attachment backfill failed: {_redact(exc, password)}"
+        ) from None
+    finally:
+        if connection is not None:
+            try:
+                connection.quit()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    return _attachment_backfill_result(
+        account_id, folder or "", processed, inserted
+    )

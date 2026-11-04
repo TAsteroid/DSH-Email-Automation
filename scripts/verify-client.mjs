@@ -628,6 +628,35 @@ function runRealReactPass() {
 
     check(pageMarkup.includes('t:mail.composeNew'), '[真实渲染] 顶栏应有新建邮件按钮')
 
+    // 附件在待跟进里作为事项出现
+    const todoWithAttachment = renderToStaticMarkup(
+      h(views.TodoView, {
+        t,
+        status: {
+          ...statusPayload,
+          accounts: twoAccounts,
+          attachments: {
+            pending: [
+              { id: 'att_1', accountId: 'a1', filename: '报价表.xlsx', subject: '报价回复', contentType: 'application/vnd.ms-excel', size: 2048 },
+            ],
+          },
+        },
+      }),
+    )
+    check(todoWithAttachment.includes('报价表.xlsx'), '[真实渲染] 待跟进应列出待处理附件')
+
+    const attachmentCard = renderToStaticMarkup(
+      h(views.AttachmentCard, {
+        t,
+        item: { title: '报价表.xlsx', subject: '报价回复', size: 2048, contentType: 'application/vnd.ms-excel' },
+        fetching: false,
+        result: null,
+        onFetch: () => {},
+      }),
+    )
+    check(attachmentCard.includes('t:mail.attachmentAnalyze'), '[真实渲染] 附件卡片应有下载并分析按钮')
+    check(attachmentCard.includes('t:mail.attachmentHint'), '[真实渲染] 附件卡片应说明下载后才能分析')
+
     // 通讯录：字段 + Agent 提示词区
     const contactsMarkup = renderToStaticMarkup(h(views.ContactsView, { t }))
     for (const key of ['contactName', 'contactEmail', 'contactPhone', 'contactCompany', 'contactTitle', 'contactNotes']) {

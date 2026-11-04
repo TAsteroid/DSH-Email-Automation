@@ -59,12 +59,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 7}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 8}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程。**它和 `protocol` 无关**：v7 只新增列、索引和线程字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据。**它和 `protocol` 无关**：v8 只新增表和列，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -385,6 +385,86 @@ POP3 结果：
 - `oldestDate`：该 folder 本地当前最老的非空 `date`（没有邮件时为空串），用于展示回溯进度。
 - 账号不存在 → `NOT_FOUND`；没有可用密码 → `CREDENTIAL_MISSING`；网络失败 → `IMAP_ERROR`（POP3 同样沿用）。
 
+### 附件（schema v8）
+
+附件**元数据在同步时入库**（表 `attachments`，按 MIME part 一行，随所属邮件级联删除），文件本体默认不下载：收到带附件的邮件后，附件以「待办」形式出现在 `attachment.list`。用户确认后才调 `attachment.fetch` 把该 part 下载到本地数据目录。
+
+解析规则：
+
+- 遍历 MIME parts，跳过正文部分（无 filename、非 attachment disposition 的 `text/plain` / `text/html`）。
+- 其余**有 filename 或有 `attachment` disposition** 的 part 记为附件；`filename` 走 RFC 2231（`filename*=utf-8''…`）和 RFC 2047 解码，中文文件名按 UTF-8 保存。
+- `inline` 资源（HTML 内嵌图、带 `Content-ID` 或 `inline` disposition 的 part）会记录元数据并置 `inline = 1`，但 `attachment.list` **默认不返回**——它们不是待用户分析的文件。
+- `part_id` 是 IMAP body section（`2`、`1.3`…），`attachment.fetch` 直接用它取该 part；`size` 是解码后的字节数。
+- v8 之前同步的旧邮件没有附件行，由 [`attachment.backfill`](#attachmentbackfill) 重新解析补上；新同步的邮件在入库的同一事务里写入。
+
+### `attachment.list`
+
+参数（全部可省略）：
+
+```json
+{"messageId": "msg_xxx", "accountId": "acc_xxx", "pendingOnly": false}
+```
+
+结果：
+
+```json
+{"attachments": [{
+  "id": "att_xxx", "messageId": "msg_xxx", "subject": "合同确认",
+  "fromAddr": "a@b.com", "filename": "合同.pdf",
+  "contentType": "application/pdf", "size": 48123, "fetchedAt": ""
+}]}
+```
+
+- 只读本地元数据，**不联网、不下载**；按所属邮件的 `date` 倒序（同一天新的在前）。
+- `pendingOnly: true` 只返回 `fetchedAt == ""`（还没下载）的附件。
+- `fetchedAt` 非空表示文件已经下载到本地；`inline` 附件默认不出现，需要时用 `attachment.get` 按 id 查。
+- 字段固定为上面 8 个，不含本地路径（路径在 `attachment.get` / `attachment.fetch` 里给）。
+
+### `attachment.get`
+
+参数：`{"id": "att_xxx"}`
+
+结果：
+
+```json
+{"id": "att_xxx", "messageId": "msg_xxx", "subject": "合同确认",
+ "fromAddr": "a@b.com", "filename": "合同.pdf",
+ "contentType": "application/pdf", "size": 48123, "partId": "2",
+ "inline": false, "sha256": "9f2c…", "path": "C:\\...\\attachments\\msg_xxx\\合同.pdf",
+ "fetchedAt": "2026-11-05T01:20:00Z", "downloaded": true}
+```
+
+- `downloaded` 是「有一次成功下载」的布尔值（同时看 `fetchedAt` 和 `path`）；没下载时 `path` / `sha256` 为空串。
+- `id` 不存在 → `NOT_FOUND`。
+
+### `attachment.fetch`
+
+参数：`{"id": "att_xxx", "maxBytes": 26214400}`
+
+结果：
+
+```json
+{"id": "att_xxx", "path": "C:\\...\\attachments\\msg_xxx\\合同.pdf",
+ "size": 48123, "sha256": "9f2c…", "fetchedAt": "2026-11-05T01:20:00Z"}
+```
+
+- **仅 IMAP**：POP3 账号返回 `BAD_REQUEST`（错误 message 带 `pop3`）。
+- IMAP 用 `UID FETCH <uid> BODY.PEEK[<part_id>.MIME] BODY.PEEK[<part_id>]` 只取该 part，再用其 MIME 头解开 base64 / quoted-printable；**不拉整封邮件**。
+- `maxBytes` 缺省 25 MiB，上限 100 MiB（超过按 100 MiB 处理；小于 1 → `BAD_REQUEST`）。元数据里的 `size` 或实际解码后的字节数超过 `maxBytes` → `BAD_REQUEST`，不落盘、不改记录。
+- 落盘路径：`<data-dir>/attachments/<messageId>/<安全文件名>`。文件名先去掉路径分隔符和控制字符、清理 `.` / `..`、限制长度（保留扩展名），空名用 `attachment`；同名文件自动加 `-2` / `-3` 后缀；任何情况下路径都不能逃出 `attachments` 目录。
+- 保存后计算 SHA-256 并写回 `local_path` / `sha256` / `fetched_at`；**重复 fetch 同一附件**直接返回已有文件（不重新联网、不改 `fetchedAt`）。
+- 失败：附件 / 邮件不存在 → `NOT_FOUND`；没有可用密码 → `CREDENTIAL_MISSING`；服务器拒绝、UIDVALIDITY 已变化、网络失败 → `IMAP_ERROR`。错误 message 不含密码。
+
+### `attachment.backfill`
+
+参数：`{"accountId": "acc_xxx", "folder": "INBOX", "limit": 50}`
+
+结果：`{"accountId": "acc_xxx", "folder": "INBOX", "messages": 12, "attachments": 15}`
+
+- 找出 `attachments_synced = 0` 的邮件（v8 之前同步的旧邮件），重新拉**原始邮件**（不是附件本体）、解析 MIME 并写入附件元数据；处理过的邮件置 `attachments_synced = 1`，所以重复调用时 `messages = 0`（幂等）。
+- `folder` 可省略（该账号所有文件夹）；`limit` 缺省 50、上限 200（本次最多处理多少封邮件）。
+- IMAP / POP3 账号都支持；账号不存在 → `NOT_FOUND`；网络失败 → `IMAP_ERROR`。
+
 ### `contact.list`
 
 参数：`{}`
@@ -639,3 +719,4 @@ POP3 结果：
 - v5 只**新增** `drafts`、`approvals`、`mail_actions` 三张表及其索引，不改旧表；老库（v1~v4）启动时自动迁移，账号 / 邮件 / 通讯录 / 模板全部保留。`drafts.account_id` 与 `approvals.draft_id` 带 `ON DELETE CASCADE`（删账号连带草稿、删草稿连带审批），`mail_actions` 故意不设外键，发送审计记录不随草稿删除而消失。
 - v6 只给 `approvals` **新增** `decided_via`、`decided_by` 两列，默认空串，不改旧表结构、不丢旧数据；已有决定迁移后审计字段为空（v5 记录本来就没有来源信息，不回填猜测值）。迁移幂等，老库（v1~v5）启动时自动升级。
 - v7 只给 `messages` **新增** `thread_id`、`in_reply_to`、`refs` 三列（`refs` 是 `References` 头；`references` 是 SQL 关键字，故列名缩短）以及两个线程索引，不改旧表结构、不删旧邮件；迁移后对 `thread_id = ''` 的旧行按线程规则回填一次（幂等，重复迁移不再改动已回填的行）。老库（v1~v6）启动时先自动备份再逐级升级。新增字段都可空串，旧插件忽略 `threadId` 即可继续工作。
+- v8 只**新增** `attachments` 表（`message_id` 外键指向 `messages.id`，`ON DELETE CASCADE`）和 `messages.attachments_synced` 标记列（旧邮件默认 0，表示附件元数据尚未提取），不改旧表结构、不删旧邮件、不在库里存附件内容。旧邮件用 `attachment.backfill` 补；新同步邮件在同一事务内写入附件行。老库（v1~v7）启动时先自动备份再升级；附件文件只落在 `<data-dir>/attachments/`。
