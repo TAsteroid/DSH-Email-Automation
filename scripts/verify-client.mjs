@@ -458,7 +458,8 @@ function runRealReactPass() {
     }
     const railWithPending = renderToStaticMarkup(h(views.ApprovalsRail, { t, status: pendingStatus }))
     check(railWithPending.includes('报价回复'), '[真实渲染] 待审批应显示草稿主题')
-    check(railWithPending.includes('t:mail.approveAndSend'), '[真实渲染] 待审批应有「批准并发送」')
+    check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应有「复制发送指令」')
+    check(railWithPending.includes('t:mail.approvalSendHint'), '[真实渲染] 应说明发送需经 Agent 审批')
     check(railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批应有「拒绝」')
 
     const agentMarkup = renderToStaticMarkup(h(views.AgentMailComposer, { t, message: baseMessage }))

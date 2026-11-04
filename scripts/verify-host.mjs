@@ -26,6 +26,8 @@ const check = (condition, message) => {
 // ---- 假 Mail Core ---------------------------------------------------------
 const received = []
 const configEdits = []
+const approvalRequests = []
+let approvalOutcome = 'allowed-once'
 let tornDown = false
 
 function makeFakeChild() {
@@ -148,6 +150,9 @@ function handleMethod(method, params) {
     }
   }
   if (method === 'draft.save') return { id: params.draftId ?? 'drf_new', contentHash: 'deadbeef', status: 'draft' }
+  if (method === 'draft.get') {
+    return { id: params.id, accountId: 'acc_1', to: 'x@b.com', cc: '', subject: '报价回复', body: '正文', contentHash: 'h1', status: 'approved' }
+  }
   if (method === 'draft.remove') return { removed: true }
   if (method === 'approval.list') {
     return {
@@ -240,6 +245,12 @@ const ctx = {  effect: (fn) => {
     entries: () => [{ id: 'dsh-mail-plugin', name: 'dsh-mail-plugin' }],
     edit: async (entry, change) => {
       configEdits.push({ entry, next: change({ syncIntervalMs: 300_000 }) })
+    },
+  },
+  approval: {
+    request: async (request) => {
+      approvalRequests.push(request)
+      return approvalOutcome
     },
   },
   logger: { info: () => {} },
@@ -584,20 +595,31 @@ check(approvalsRoute && approvalsRoute.status === 200, `approvals 应 200，实�
 const approvalRequestNoDraft = await invoke('/api/dsh-mail/approvals/request', { method: 'POST', body: '{}' })
 check(approvalRequestNoDraft && approvalRequestNoDraft.status === 400, `缺 draftId 应 400，实际 ${approvalRequestNoDraft && approvalRequestNoDraft.status}`)
 
-const approveRoute = await invoke('/api/dsh-mail/approvals/approve', {
-  method: 'POST',
-  body: JSON.stringify({ id: 'apr_1' }),
-})
-check(approveRoute && approveRoute.status === 200, `批准应 200，实际 ${approveRoute && approveRoute.status}`)
+// 批准与执行不应有 HTTP 入口（否则 Agent 可用命令行自我批准）
+check(!routes.has('/api/dsh-mail/approvals/approve'), '不应存在 HTTP 批准入口')
 
 const executeRoute = await invoke('/api/dsh-mail/actions/execute', {
   method: 'POST',
   body: JSON.stringify({ approvalId: 'apr_1' }),
 })
-check(executeRoute && executeRoute.status === 200, `执行应 200，实际 ${executeRoute && executeRoute.status}`)
-if (executeRoute && executeRoute.body) {
-  const parsed = JSON.parse(executeRoute.body)
-  check(parsed.value.sent === true && parsed.value.messageId, '执行应返回 sent 与 messageId')
+check(executeRoute && executeRoute.status === 403, `HTTP 发送入口应 403，实际 ${executeRoute && executeRoute.status}`)
+check(executeRoute && JSON.parse(executeRoute.body).code === 'FORBIDDEN', 'HTTP 发送入口应返回 FORBIDDEN')
+
+// 发送只能经 Agent 工具 + 宿主审批
+const sendTool = tools.get('mail_send_draft')
+if (sendTool) {
+  approvalOutcome = 'allowed-once'
+  const approvedSend = await sendTool.execute({ draftId: 'drf_1' }, { agent: { id: 'sess_1' }, signal: new AbortController().signal })
+  check(approvedSend.sent === true, `批准后应发送成功，实际 ${JSON.stringify(approvedSend)}`)
+  check(approvedSend.messageId === '<msg@example>', '应返回 Message-ID')
+  check(approvalRequests.length === 1, '应调用一次宿主审批')
+  check(approvalRequests[0].toolName === 'mail_send_draft', '审批应标明来源工具')
+  check(String(approvalRequests[0].displayReason.zh).includes('报价回复'), '审批文案应带上邮件主题')
+
+  approvalOutcome = 'rejected'
+  const rejectedSend = await sendTool.execute({ draftId: 'drf_1' }, { agent: { id: 'sess_1' }, signal: new AbortController().signal })
+  check(rejectedSend.sent === false, '用户拒绝时不应发送')
+  check(String(rejectedSend.reason).includes('rejected'), '应把拒绝原因带回来')
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

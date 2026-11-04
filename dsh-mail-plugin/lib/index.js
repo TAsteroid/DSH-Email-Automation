@@ -19,7 +19,14 @@ import { createCoreClient } from './core-client.js'
 export const name = 'dsh-mail-plugin'
 
 /** 硬依赖：缺任何一个就不会激活，避免半死状态。 */
-export const inject = ['tools', 'webServer', 'timer', 'subprocess', 'configEditor']
+export const inject = ['tools', 'webServer', 'timer', 'subprocess', 'configEditor', 'approval']
+
+/**
+ * 发送安全模型（计划书 §10.1）：
+ * 只有 Agent 工具 `mail_send_draft` 能真正发信，而且必须先经过宿主的用户审批
+ * （`ctx.approval.request`，答复方是 DSH 界面的真人）。
+ * 本机 HTTP 路由**不提供**批准/执行入口，否则 Agent 用命令行即可自我批准。
+ */
 
 /**
  * 配置从 profile 的 patch 行读取，这里做防御式解析（缺省/类型不对都回落到默认）。
@@ -931,6 +938,82 @@ export function apply(ctx, config) {
     'mail: register mail_request_approval tool',
   )
 
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_send_draft',
+        description:
+          'Send one saved draft. This raises the harness approval prompt and sends only when the USER allows it once — the agent cannot approve it itself. Use mail_draft_save first; the approval records are created automatically.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            draftId: { type: 'string', description: 'Draft id from mail_draft_save' },
+            approvalId: { type: 'string', description: 'Existing pending approval; created automatically when omitted' },
+          },
+          required: ['draftId'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              sent: { type: 'boolean' },
+              messageId: { type: 'string' },
+            },
+            required: ['available', 'sent'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `not sent: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `sent (Message-ID ${value.messageId})` }]
+          },
+        },
+        timeoutMs: 300_000,
+        isConcurrencySafe: () => false,
+        async execute(args, exec) {
+          const fail = (reason) => ({ available: false, reason, sent: false, messageId: '' })
+          const draft = await callCore('draft.get', { id: args.draftId })
+          if (!draft.available) return fail(draft.reason.message)
+          const value = draft.value || {}
+
+          let approvalId = typeof args.approvalId === 'string' ? args.approvalId.trim() : ''
+          if (!approvalId) {
+            const requested = await callCore('approval.request', { draftId: args.draftId })
+            if (!requested.available) return fail(requested.reason.message)
+            approvalId = requested.value?.id ?? ''
+          }
+          if (!approvalId) return fail('could not create an approval record')
+
+          const agent = exec && exec.agent
+          if (!ctx.approval || !agent) return fail('approval service or agent context unavailable')
+
+          const reasonZh = `发送邮件给 ${value.to || '(空)'}：${value.subject || '(无主题)'}`
+          const outcome = await ctx.approval.request({
+            agent,
+            toolName: 'mail_send_draft',
+            reason: reasonZh,
+            displayReason: {
+              en: `Send mail to ${value.to || '(none)'}: ${value.subject || '(no subject)'}`,
+              zh: reasonZh,
+            },
+            signal: exec.signal,
+          })
+          if (outcome !== 'allowed-once') return fail(`user did not approve (${outcome})`)
+
+          const approved = await callCore('approval.approve', { id: approvalId })
+          if (!approved.available) return fail(approved.reason.message)
+          const executed = await callCore('action.execute', { approvalId }, { timeoutMs: 120_000 })
+          if (!executed.available) return fail(executed.reason.message)
+
+          await syncSentFolders()
+          return { available: true, reason: '', sent: true, messageId: executed.value?.messageId ?? '' }
+        },
+      }),
+    'mail: register mail_send_draft tool',
+  )
+
   // 3) 本机 HTTP 通道
   ctx.effect(() => {
     const disposers = []
@@ -963,7 +1046,16 @@ export function apply(ctx, config) {
               return writeJson(res, 200, { ok: true, value })
             } catch (error) {
               const code = error?.code ?? 'BAD_REQUEST'
-              const status = code === 'NOT_FOUND' ? 404 : code === 'BAD_REQUEST' ? 400 : code === 'CREDENTIAL_MISSING' ? 409 : 502
+              const status =
+                code === 'NOT_FOUND'
+                  ? 404
+                  : code === 'BAD_REQUEST'
+                    ? 400
+                    : code === 'CREDENTIAL_MISSING'
+                      ? 409
+                      : code === 'FORBIDDEN'
+                        ? 403
+                        : 502
               return writeJson(res, status, { ok: false, code, message: error?.message ?? String(error) })
             }
           },
@@ -1121,26 +1213,16 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('approval.request', params))
     })
 
-    route('/approvals/approve', async (body) => {
-      const id = requireText(body.id, 'id')
-      return requireCoreResult(await callCore('approval.approve', { id }))
-    })
-
     route('/approvals/reject', async (body) => {
       const id = requireText(body.id, 'id')
       return requireCoreResult(await callCore('approval.reject', { id }))
     })
 
-    route('/actions/execute', async (body) => {
-      const approvalId = requireText(body.approvalId, 'approvalId')
-      const params = { approvalId }
-      if (body.idempotencyKey !== undefined && typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()) {
-        params.idempotencyKey = body.idempotencyKey.trim()
-      }
-      const value = requireCoreResult(await callCore('action.execute', params, { timeoutMs: 120_000 }))
-      // 发完立刻补同步「已发送」，否则用户切到发件箱看不到这封信
-      await syncSentFolders()
-      return value
+    // 批准与执行没有 HTTP 入口：见文件头的发送安全模型。
+    route('/actions/execute', async () => {
+      throw Object.assign(new Error('sending requires the agent approval prompt (mail_send_draft); there is no HTTP send endpoint'), {
+        code: 'FORBIDDEN',
+      })
     })
 
     route('/messages', async (body) => {

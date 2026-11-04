@@ -158,6 +158,9 @@ window.__ModuleLoader__.load({
         composePendingHint: '已提交审批，去右侧审批栏批准后才会真正发送。',
         approveAndSend: '批准并发送',
         rejectApproval: '拒绝',
+        approvalSendHint: '发送只能由 Agent 发起并弹出 DSH 审批确认。点「复制发送指令」，把它粘到对话里即可。',
+        copySendCommand: '复制发送指令',
+        sendCommandCopied: '指令已复制',
         sentOk: '已发送',
         approvalExpired: '已过期',
         agentChatTitle: '与 Agent 对话处理这封邮件',
@@ -339,6 +342,9 @@ window.__ModuleLoader__.load({
         composePendingHint: 'Submitted for approval — it is sent only after you approve it in the rail.',
         approveAndSend: 'Approve and send',
         rejectApproval: 'Reject',
+        approvalSendHint: 'Sending is agent-initiated and confirmed through the DSH approval prompt. Use "Copy send command" and paste it into the conversation.',
+        copySendCommand: 'Copy send command',
+        sendCommandCopied: 'Command copied',
         sentOk: 'Sent',
         approvalExpired: 'expired',
         agentChatTitle: 'Ask the Agent about this mail',
@@ -2771,22 +2777,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const approveAndSend = async (approval) => {
-        if (busy) return
-        setBusy(approval.id)
-        setNote(null)
-        try {
-          await call('/approvals/approve', { id: approval.id })
-          const result = await call('/actions/execute', { approvalId: approval.id })
-          setNote(`${t('sentOk')}${result && result.messageId ? ` · ${result.messageId}` : ''}`)
-          if (onRefresh) onRefresh()
-        } catch (error) {
-          setNote(error.message)
-        } finally {
-          setBusy(null)
-        }
-      }
-
       const reject = async (approval) => {
         if (busy) return
         setBusy(approval.id)
@@ -2798,6 +2788,17 @@ window.__ModuleLoader__.load({
           setNote(error.message)
         } finally {
           setBusy(null)
+        }
+      }
+
+      // 发送改为 Agent 发起 + 宿主审批框；这里只提供把指令复制到对话的入口
+      const copySendCommand = async (approval) => {
+        const text = `请发送审批编号 ${approval.id} 的邮件（主题：${approval.subject || '(无主题)'}）`
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(text)
+          setNote(t('sendCommandCopied'))
+        } catch {
+          setNote(text)
         }
       }
 
@@ -2840,9 +2841,9 @@ window.__ModuleLoader__.load({
                             type: 'button',
                             style: styles.btnSmall,
                             disabled: busy === item.id,
-                            onClick: () => approveAndSend(item),
+                            onClick: () => copySendCommand(item),
                           },
-                          t('approveAndSend'),
+                          t('copySendCommand'),
                         ),
                         h(
                           'button',
@@ -2857,6 +2858,7 @@ window.__ModuleLoader__.load({
                       ),
                 ),
               ),
+              showingHistory ? null : h('p', { style: styles.railEmpty }, t('approvalSendHint')),
               note ? h('p', { style: styles.railEmpty }, note) : null,
             )
 
