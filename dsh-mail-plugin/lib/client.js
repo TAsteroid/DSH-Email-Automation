@@ -262,6 +262,7 @@ window.__ModuleLoader__.load({
         loading: '加载中…',
         failed: '加载失败',
         retry: '重试',
+        refreshStatus: '刷新状态（不会同步邮件）',
         phase0: 'Phase 0 骨架：入口与数据通道已打通，邮件同步尚未实现。',
         settingsBackend: 'Mail Core 地址',
         settingsPoll: '自动同步间隔',
@@ -443,6 +444,7 @@ window.__ModuleLoader__.load({
         loading: 'Loading…',
         failed: 'Failed to load',
         retry: 'Retry',
+        refreshStatus: 'Refresh status (does not sync mail)',
         phase0: 'Phase 0 skeleton: entry point and data channel work; mail sync is not implemented yet.',
         settingsBackend: 'Mail Core URL',
         settingsPoll: 'Auto sync interval',
@@ -2714,6 +2716,11 @@ window.__ModuleLoader__.load({
      * 默认只列待审批；点历史图标切到审批历史；历史里有返回按钮。
      */
     function ApprovalsRail({ t, status, initialMode = 'pending', onRefresh }) {
+      const RAIL_SPEC_APPROVALS = { initial: 280, min: 200, max: 520 }
+      const [width, setWidth] = React.useState(() => storedWidth('approvalsRail', RAIL_SPEC_APPROVALS))
+      const [dragging, setDragging] = React.useState(false)
+      const [hovered, setHovered] = React.useState(false)
+      const dragRef = React.useRef(null)
       const [mode, setMode] = React.useState(initialMode)
       const [busy, setBusy] = React.useState(null)
       const [note, setNote] = React.useState(null)
@@ -2722,6 +2729,47 @@ window.__ModuleLoader__.load({
       const count = (status && status.counters && status.counters.pendingApprovals) || pending.length
       const showingHistory = mode === 'history'
       const items = showingHistory ? history : pending
+
+      React.useEffect(() => {
+        storeWidth('approvalsRail', width)
+      }, [width])
+
+      const handleDown = (event) => {
+        if (typeof event.button === 'number' && event.button !== 0) return
+        event.preventDefault()
+        dragRef.current = { startX: event.clientX, startWidth: width }
+        setDragging(true)
+        if (typeof event.currentTarget.setPointerCapture === 'function') {
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId)
+          } catch {
+            // 捕获失败不影响基本拖动
+          }
+        }
+      }
+
+      const handleMove = (event) => {
+        const session = dragRef.current
+        if (!session) return
+        // 往左拖变宽
+        const next = Math.round(
+          clamp(session.startWidth + (session.startX - event.clientX), RAIL_SPEC_APPROVALS.min, RAIL_SPEC_APPROVALS.max),
+        )
+        setWidth((prev) => (prev === next ? prev : next))
+      }
+
+      const handleUp = (event) => {
+        if (!dragRef.current) return
+        dragRef.current = null
+        setDragging(false)
+        if (typeof event.currentTarget.releasePointerCapture === 'function') {
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          } catch {
+            // 同上
+          }
+        }
+      }
 
       const approveAndSend = async (approval) => {
         if (busy) return
@@ -2813,14 +2861,38 @@ window.__ModuleLoader__.load({
             )
 
       return h(
-        'aside',
-        { style: styles.railPanel, 'aria-label': showingHistory ? t('approvalHistory') : t('approvals') },
+        'div',
+        { style: { display: 'flex', flex: 'none', alignItems: 'stretch' } },
         h(
           'div',
-          { style: styles.railHeader },
-          h('span', { style: styles.railHeaderTitle }, showingHistory ? t('approvalHistory') : t('approvals')),
-          !showingHistory && count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
-          h('span', { style: styles.spacer }),
+          {
+            role: 'separator',
+            'aria-orientation': 'vertical',
+            'aria-label': t('resize'),
+            title: t('resizeHint'),
+            style: styles.handle,
+            onPointerDown: handleDown,
+            onPointerMove: handleMove,
+            onPointerUp: handleUp,
+            onPointerCancel: handleUp,
+            onPointerEnter: () => setHovered(true),
+            onPointerLeave: () => setHovered(false),
+            onDoubleClick: () => setWidth(RAIL_SPEC_APPROVALS.initial),
+          },
+          h('div', { style: styles.handleLine(dragging || hovered) }),
+        ),
+        h(
+          'aside',
+          {
+            style: { ...styles.railPanel, width },
+            'aria-label': showingHistory ? t('approvalHistory') : t('approvals'),
+          },
+          h(
+            'div',
+            { style: styles.railHeader },
+            h('span', { style: styles.railHeaderTitle }, showingHistory ? t('approvalHistory') : t('approvals')),
+            !showingHistory && count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
+            h('span', { style: styles.spacer }),
           showingHistory
             ? h(
                 'button',
@@ -2839,7 +2911,8 @@ window.__ModuleLoader__.load({
                 h(ClockIcon, {}),
               ),
         ),
-        h('div', { style: styles.railBody }, body),
+          h('div', { style: styles.railBody }, body),
+        ),
       )
     }
 
@@ -3272,7 +3345,7 @@ window.__ModuleLoader__.load({
         h('span', { style: styles.pill(ok), title }, h('span', { style: styles.dot(ok) }), label),
         h(
           'button',
-          { type: 'button', style: styles.iconBtn, onClick: onRefresh, title: t('retry'), 'aria-label': t('retry') },
+          { type: 'button', style: styles.iconBtn, onClick: onRefresh, title: t('refreshStatus'), 'aria-label': t('refreshStatus') },
           h(RefreshIcon, {}),
         ),
       )

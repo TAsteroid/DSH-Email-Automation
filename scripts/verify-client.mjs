@@ -359,6 +359,10 @@ function runRealReactPass() {
     check(railPending.includes('t:mail.approvals'), '[真实渲染] 审批栏应显示标题')
     check(railPending.includes('t:mail.emptyApprovals'), '[真实渲染] 待审批空态缺失')
     check(/aria-label="t:mail.approvalHistory"/.test(railPending), '[真实渲染] 待审批模式应有历史按钮')
+    check(
+      railPending.includes('role="separator"') && railPending.includes('aria-orientation="vertical"'),
+      '[真实渲染] 审批栏应可拖动改宽度',
+    )
 
     const railBusy = renderToStaticMarkup(
       h(views.ApprovalsRail, {
