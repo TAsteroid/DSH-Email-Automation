@@ -170,6 +170,7 @@ window.__ModuleLoader__.load({
         knowledge: '知识库',
         settings: '设置',
         accounts: '账户',
+        allAccounts: '全部账户',
         resize: '调整宽度',
         resizeHint: '拖动调整宽度，双击恢复默认',
         noAccount: '尚未配置邮箱账户',
@@ -343,6 +344,7 @@ window.__ModuleLoader__.load({
         knowledge: 'Knowledge',
         settings: 'Settings',
         accounts: 'Accounts',
+        allAccounts: 'All accounts',
         resize: 'Resize',
         resizeHint: 'Drag to resize, double-click to reset',
         noAccount: 'No mailbox configured',
@@ -452,7 +454,6 @@ window.__ModuleLoader__.load({
       ['draftsMail', 'drafts'],
       ['deleted', 'deleted'],
       ['junk', 'junk'],
-      ['historyMail', 'historyMail'],
       ['templates', 'templates'],
       ['contacts', 'contacts'],
       ['ai', 'ai'],
@@ -1866,7 +1867,12 @@ window.__ModuleLoader__.load({
                 h('p', { style: styles.muted }, t('noAccountHint')),
               )
             : accounts.map((account) =>
-                h('div', { key: account.id, style: styles.railItem }, h(MailIcon, { size: 14 }), account.address),
+                h(
+                  'div',
+                  { key: account.id, style: styles.railItem },
+                  h(MailIcon, { size: 14 }),
+                  account.displayName ? account.displayName : account.address,
+                ),
               ),
         ),
         handle('rail'),
@@ -1905,15 +1911,67 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
-    function TodoView({ t }) {
+    /** 待跟进：左账户栏 + 按账户分组的待办列表 + 详情。 */
+    function TodoView({ t, status }) {
+      const accounts = (status && status.accounts) || []
+      const [accountId, setAccountId] = React.useState(null)
       const [selected, setSelected] = React.useState(null)
-      const groups = [{ id: 'todo', title: t('todo'), items: [] }]
+
+      const label = (account) => (account.displayName ? account.displayName : account.address)
+      const visible = accountId === null ? accounts : accounts.filter((account) => account.id === accountId)
+      const groups = visible.map((account) => ({ id: account.id, title: label(account), items: [] }))
+
+      const railButton = (key, text, active, onClick) =>
+        h(
+          'button',
+          {
+            key,
+            type: 'button',
+            onClick,
+            style: {
+              ...styles.railItem,
+              width: '100%',
+              border: 'none',
+              textAlign: 'left',
+              cursor: 'pointer',
+              background: active ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
+            },
+          },
+          accounts.length > 0 && key !== 'all' ? h(MailIcon, { size: 14 }) : null,
+          text,
+        )
+
+      const rail = h(
+        'div',
+        { style: { ...styles.rail, width: '100%', boxSizing: 'border-box' }, 'aria-label': t('accounts') },
+        h('div', { style: styles.railTitle }, t('accounts')),
+        accounts.length === 0
+          ? h(
+              'div',
+              { style: { padding: '4px 8px' } },
+              h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('noAccount')),
+              h('p', { style: styles.muted }, t('noAccountHint')),
+            )
+          : [
+              railButton('all', t('allAccounts'), accountId === null, () => setAccountId(null)),
+              ...accounts.map((account) =>
+                railButton(account.id, label(account), accountId === account.id, () => setAccountId(account.id)),
+              ),
+            ],
+      )
+
       return h(SplitPane, {
-        storageKey: 'todo',
-        spec: PANE_SPEC,
+        storageKey: 'todoAccounts',
+        spec: RAIL_SPEC,
         label: t('resize'),
-        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
-        right: h(DetailPane, { t, titleKey: 'todoDetailTitle', hintKey: 'todoDetailHint' }),
+        left: rail,
+        right: h(SplitPane, {
+          storageKey: 'todo',
+          spec: PANE_SPEC,
+          label: t('resize'),
+          left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
+          right: h(DetailPane, { t, titleKey: 'todoDetailTitle', hintKey: 'todoDetailHint' }),
+        }),
       })
     }
 
@@ -2129,18 +2187,6 @@ window.__ModuleLoader__.load({
         storageKey: 'junk',
         folderPattern: /junk|spam|垃圾/i,
         titleKey: 'junk',
-        emptyHintKey: 'sentEmptyHint',
-      })
-    }
-
-    function HistoryMailView({ t, status, onRefresh }) {
-      return h(MailFolderView, {
-        t,
-        status,
-        onRefresh,
-        storageKey: 'historyMail',
-        folderPattern: /archive|history|历史/i,
-        titleKey: 'historyMail',
         emptyHintKey: 'sentEmptyHint',
       })
     }
@@ -3143,7 +3189,6 @@ window.__ModuleLoader__.load({
       else if (tab === 'draftsMail') content = h(DraftsMailView, { t, status, onRefresh: refresh })
       else if (tab === 'deleted') content = h(DeletedView, { t, status, onRefresh: refresh })
       else if (tab === 'junk') content = h(JunkView, { t, status, onRefresh: refresh })
-      else if (tab === 'historyMail') content = h(HistoryMailView, { t, status, onRefresh: refresh })
       else if (tab === 'templates') content = h(TemplatesView, { t, status, onRefresh: refresh })
       else if (tab === 'contacts') content = h(ContactsView, { t })
       else if (tab === 'ai') content = h(AiWorkbench, { t, status })
@@ -3240,7 +3285,6 @@ window.__ModuleLoader__.load({
         DraftsMailView,
         DeletedView,
         JunkView,
-        HistoryMailView,
         MailFolderView,
         TemplatesView,
         ContactsView,

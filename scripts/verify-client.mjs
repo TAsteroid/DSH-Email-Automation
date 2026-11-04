@@ -341,16 +341,16 @@ function runRealReactPass() {
 
     // 各页骨架：能渲染、且恰好一条分隔条
     const viewCases = [
-      ['待跟进', views.TodoView, 't:mail.todoDetailTitle'],
-      ['草稿箱', views.DraftsView, 't:mail.draftDetailTitle'],
-      ['知识库', views.KnowledgeView, 't:mail.kbContacts'],
-      ['AI 工作台', views.AiWorkbench, 't:mail.aiEmptyTitle'],
+      ['待跟进', views.TodoView, 't:mail.todoDetailTitle', 2],
+      ['草稿箱', views.DraftsView, 't:mail.draftDetailTitle', 1],
+      ['知识库', views.KnowledgeView, 't:mail.kbContacts', 1],
+      ['AI 工作台', views.AiWorkbench, 't:mail.aiEmptyTitle', 1],
     ]
-    for (const [label, View, needle] of viewCases) {
+    for (const [label, View, needle, expectedSplitters] of viewCases) {
       const markup = renderToStaticMarkup(h(View, { t, status: statusPayload }))
       check(markup.includes(needle), `[真实渲染] ${label} 应包含 ${needle}`)
       const splitters = (markup.match(/role="separator"/g) || []).length
-      check(splitters === 1, `[真实渲染] ${label} 应有 1 条分隔条，实际 ${splitters}`)
+      check(splitters === expectedSplitters, `[真实渲染] ${label} 应有 ${expectedSplitters} 条分隔条，实际 ${splitters}`)
     }
 
     // 审批栏：全局常驻，默认只看待审批，历史模式带返回
@@ -535,12 +535,33 @@ function runRealReactPass() {
     const todoTabAt = pageMarkup.indexOf('t:mail.todo')
     check(todoTabAt >= 0 && inboxTabAt > todoTabAt, '[真实渲染] 待跟进应排在收件箱之前')
     check(pageMarkup.includes('t:mail.searchPlaceholder'), '[真实渲染] 顶栏应有搜索框')
-    const orderKeys = ['t:mail.sent', 't:mail.deleted', 't:mail.junk', 't:mail.historyMail', 't:mail.templates', 't:mail.contacts', 't:mail.ai']
+    const orderKeys = ['t:mail.sent', 't:mail.deleted', 't:mail.junk', 't:mail.templates', 't:mail.contacts', 't:mail.ai']
     const positions = orderKeys.map((key) => pageMarkup.indexOf(key))
+    check(pageMarkup.indexOf('t:mail.historyMail') < 0, '[真实渲染] 历史邮件页签已移除')
     check(
       positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])),
-      '[真实渲染] 页签顺序应为 发件箱 < 已删除 < 垃圾邮件 < 历史邮件 < 模板 < 通讯录 < AI 工作台',
+      '[真实渲染] 页签顺序应为 发件箱 < 已删除 < 垃圾邮件 < 模板 < 通讯录 < AI 工作台',
     )
+
+    // 账户显示名优先；待跟进按账户分组
+    const twoAccounts = [
+      { id: 'a1', address: 'one@b.com', displayName: '工作邮箱' },
+      { id: 'a2', address: 'two@b.com', displayName: '' },
+    ]
+    const inboxWithNames = renderToStaticMarkup(
+      h(views.InboxView, { t, status: { ...statusPayload, accounts: twoAccounts } }),
+    )
+    check(inboxWithNames.includes('工作邮箱'), '[真实渲染] 有显示名称时应显示名称')
+    check(!inboxWithNames.includes('one@b.com'), '[真实渲染] 有显示名称时不再显示地址')
+    check(inboxWithNames.includes('two@b.com'), '[真实渲染] 没有显示名称时回落到地址')
+
+    const todoWithAccounts = renderToStaticMarkup(
+      h(views.TodoView, { t, status: { ...statusPayload, accounts: twoAccounts } }),
+    )
+    check(todoWithAccounts.includes('t:mail.allAccounts'), '[真实渲染] 待跟进应有全部账户项')
+    check(todoWithAccounts.includes('工作邮箱'), '[真实渲染] 待跟进账户栏应显示名称')
+    const todoSplitters = (todoWithAccounts.match(/role="separator"/g) || []).length
+    check(todoSplitters === 2, `[真实渲染] 待跟进应有两处分隔条（账户栏与列表），实际 ${todoSplitters}`)
 
     // 通讯录：字段 + Agent 提示词区
     const contactsMarkup = renderToStaticMarkup(h(views.ContactsView, { t }))
