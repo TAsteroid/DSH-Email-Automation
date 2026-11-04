@@ -101,6 +101,61 @@ function handleMethod(method, params) {
       lastSyncAt: '2026-11-04T12:30:00Z',
     }
   }
+  if (method === 'sync.run') {
+    return {
+      accountId: params.accountId,
+      folder: params.folder ?? 'INBOX',
+      uidValidity: 1,
+      fetched: 2,
+      stored: 2,
+      skipped: 0,
+      lastUid: 10,
+      startedAt: '2026-11-04T12:00:00Z',
+      finishedAt: '2026-11-04T12:00:02Z',
+    }
+  }
+  if (method === 'message.list') {
+    return {
+      total: 1,
+      messages: [
+        {
+          id: 'msg_1',
+          accountId: 'acc_1',
+          folder: 'INBOX',
+          uid: 10,
+          subject: '合同确认',
+          fromAddr: 'a@b.com',
+          toAddr: 'me@b.com',
+          date: '2026-11-04T09:12:00Z',
+          snippet: '正文前 200 字',
+          seen: false,
+        },
+      ],
+    }
+  }
+  if (method === 'message.get') {
+    if (params && params.id === 'missing') {
+      const error = new Error('message not found')
+      error.code = 'NOT_FOUND'
+      throw error
+    }
+    return {
+      id: params.id,
+      accountId: 'acc_1',
+      folder: 'INBOX',
+      uid: 10,
+      subject: '合同确认',
+      fromAddr: 'a@b.com',
+      toAddr: 'me@b.com',
+      ccAddr: '',
+      date: '2026-11-04T09:12:00Z',
+      snippet: '正文前 200 字',
+      text: '这是一封测试邮件的正文。',
+      html: '',
+      size: 4812,
+      seen: false,
+    }
+  }
   const error = new Error(`unknown method ${method}`)
   error.code = 'UNKNOWN_METHOD'
   throw error
@@ -181,6 +236,33 @@ if (foldersTool) {
   const value = await foldersTool.execute({ accountId: 'acc_1' }, {})
   check(value.available === true, 'mail_folders 应可用')
   check(value.folders.length === 1 && value.folders[0].name === 'INBOX', 'mail_folders 应返回 INBOX')
+}
+
+// ---- 同步与消息工具 -------------------------------------------------------
+const syncTool = tools.get('mail_sync')
+if (syncTool) {
+  const value = await syncTool.execute({ accountId: 'acc_1' }, {})
+  check(value.available === true, 'mail_sync 应可用')
+  check(value.stored === 2 && value.fetched === 2, 'mail_sync 应透传 Core 的计数')
+  check(syncTool.isConcurrencySafe() === false, 'mail_sync 不应声明并发安全')
+  const blocks = syncTool.output.render({}, value)
+  check(Array.isArray(blocks) && blocks[0].type === 'text', 'mail_sync.render 必须返回 ContentBlock[]')
+}
+
+const messagesTool = tools.get('mail_messages')
+if (messagesTool) {
+  const value = await messagesTool.execute({}, {})
+  check(value.available === true && value.total === 1, 'mail_messages 应返回 1 封邮件')
+  check(value.messages[0].subject === '合同确认', 'mail_messages 应带主题')
+}
+
+const messageTool = tools.get('mail_message')
+if (messageTool) {
+  const value = await messageTool.execute({ id: 'msg_1' }, {})
+  check(value.available === true, 'mail_message 应可用')
+  check(value.text.includes('测试邮件'), 'mail_message 应返回正文')
+  const missing = await messageTool.execute({ id: 'missing' }, {})
+  check(missing.available === false, '未知 id 应返回 available=false 而不是抛错')
 }
 
 // ---- HTTP 守门 ------------------------------------------------------------
@@ -326,6 +408,45 @@ check(
   imapFailure && imapFailure.body && JSON.parse(imapFailure.body).code === 'IMAP_ERROR',
   'IMAP 失败应保留 IMAP_ERROR 码，而不是 CORE_DOWN',
 )
+
+// ---- 同步与消息路由 -------------------------------------------------------
+const messagesRoute = await invoke('/api/dsh-mail/messages', { method: 'POST', body: '{}' })
+check(messagesRoute && messagesRoute.status === 200, `messages 路由应 200，实际 ${messagesRoute && messagesRoute.status}`)
+if (messagesRoute && messagesRoute.body) {
+  const parsed = JSON.parse(messagesRoute.body)
+  check(parsed.value.total === 1 && parsed.value.messages.length === 1, 'messages 路由应透传 Core 结果')
+}
+
+const messageRoute = await invoke('/api/dsh-mail/message', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'msg_1' }),
+})
+check(messageRoute && messageRoute.status === 200, `message 路由应 200，实际 ${messageRoute && messageRoute.status}`)
+
+const missingMessage = await invoke('/api/dsh-mail/message', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'missing' }),
+})
+check(missingMessage && missingMessage.status === 404, `未知 message 应 404，实际 ${missingMessage && missingMessage.status}`)
+check(
+  missingMessage && JSON.parse(missingMessage.body).code === 'NOT_FOUND',
+  'NOT_FOUND 应原样透出',
+)
+
+const syncRoute = await invoke('/api/dsh-mail/sync', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1' }),
+})
+check(syncRoute && syncRoute.status === 200, `sync 路由应 200，实际 ${syncRoute && syncRoute.status}`)
+
+const syncBadLimit = await invoke('/api/dsh-mail/sync', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1', limit: 999 }),
+})
+check(syncBadLimit && syncBadLimit.status === 400, `limit 越界应 400，实际 ${syncBadLimit && syncBadLimit.status}`)
+
+const syncNoAccount = await invoke('/api/dsh-mail/sync', { method: 'POST', body: '{}' })
+check(syncNoAccount && syncNoAccount.status === 400, `缺 accountId 应 400，实际 ${syncNoAccount && syncNoAccount.status}`)
 
 // ---- 定时器 ---------------------------------------------------------------
 check(intervals.length === 1, `应注册 1 个心跳定时器，实际 ${intervals.length}`)

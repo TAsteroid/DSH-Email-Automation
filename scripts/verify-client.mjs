@@ -365,6 +365,35 @@ function runRealReactPass() {
     check(pageMarkup.includes('color-scheme'), '[真实渲染] 应注入 color-scheme 规则')
     check(pageMarkup.includes('role="separator"') === false, '[真实渲染] 首屏加载态不应有分隔条')
 
+    // 收件箱：邮件列表与正文
+    const sampleMessages = [
+      { id: 'm1', subject: '合同确认', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z' },
+      { id: 'm2', subject: '(no subject)', fromAddr: 'c@d.com', date: '2026-11-03T08:00:00Z' },
+    ]
+    const listMarkup = renderToStaticMarkup(
+      h(views.MessageList, { t, messages: sampleMessages, selectedId: 'm1', onSync: () => {}, syncing: false }),
+    )
+    check(listMarkup.includes('合同确认'), '[真实渲染] 邮件列表应显示主题')
+    check(listMarkup.includes('a@b.com'), '[真实渲染] 邮件列表应显示发件人')
+    check(listMarkup.includes('>2<'), '[真实渲染] 邮件列表应显示数量')
+    check((listMarkup.match(/aria-pressed="true"/g) || []).length === 1, '[真实渲染] 应只有一封被选中')
+    check(listMarkup.includes('t:mail.syncNow'), '[真实渲染] 列表头应有同步按钮占位')
+
+    const emptyListMarkup = renderToStaticMarkup(h(views.MessageList, { t, messages: [], selectedId: null }))
+    check(emptyListMarkup.includes('t:mail.noMessages'), '[真实渲染] 空列表应显示空态')
+
+    const detailMarkup = renderToStaticMarkup(
+      h(views.MessageDetail, {
+        t,
+        message: { id: 'm1', subject: '合同确认', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', text: '正文第一行\n第二行' },
+      }),
+    )
+    check(detailMarkup.includes('合同确认'), '[真实渲染] 正文应显示主题')
+    check(detailMarkup.includes('正文第一行'), '[真实渲染] 正文应显示内容')
+
+    const noSelectionMarkup = renderToStaticMarkup(h(views.MessageDetail, { t, message: null }))
+    check(noSelectionMarkup.includes('t:mail.selectMessage'), '[真实渲染] 未选中时应显示占位')
+
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
     for (const key of ['kbContacts', 'kbCompanies', 'kbProjects', 'kbFiles']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)

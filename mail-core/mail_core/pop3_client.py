@@ -53,6 +53,24 @@ def _connect(host: str, port: int, security: str, timeout: float):
     return connection
 
 
+def connect(
+    host: str,
+    port: int,
+    security: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+):
+    """Open a POP3 connection without logging in (the sync layer logs in)."""
+    if security not in SECURITY_MODES:
+        raise Pop3Error(f"unsupported security mode: {security!r}")
+    try:
+        return _connect(host, int(port), security, timeout)
+    except Pop3Error:
+        raise
+    except (poplib.error_proto, OSError, ssl.SSLError, ValueError) as exc:
+        raise Pop3Error(f"connect to {host}:{port} failed: {exc}") from None
+
+
 def test_connection(
     host: str,
     port: int,

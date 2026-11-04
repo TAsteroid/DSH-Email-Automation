@@ -114,6 +114,28 @@ def _connect(host: str, port: int, security: str, timeout: float):
     return connection
 
 
+def connect(
+    host: str,
+    port: int,
+    security: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+):
+    """Open an IMAP connection without logging in.
+
+    Used by the sync layer; callers own ``logout()``.  Raises
+    :class:`ImapError` for an unsupported security mode or connection failure.
+    """
+    if security not in SECURITY_MODES:
+        raise ImapError(f"unsupported security mode: {security!r}")
+    try:
+        return _connect(host, int(port), security, timeout)
+    except ImapError:
+        raise
+    except (imaplib.IMAP4.error, OSError, ssl.SSLError, ValueError) as exc:
+        raise ImapError(f"connect to {host}:{port} failed: {exc}") from None
+
+
 def test_connection(
     host: str,
     port: int,

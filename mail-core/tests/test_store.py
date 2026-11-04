@@ -49,7 +49,7 @@ class StoreTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        self.assertTrue({"accounts", "folders", "sync_state", "meta"} <= tables)
+        self.assertTrue({"accounts", "folders", "sync_state", "messages", "meta"} <= tables)
         journal_mode = self.store._conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(journal_mode.lower(), "wal")
 
@@ -62,8 +62,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(reopened.schema_version, SCHEMA_VERSION)
         self.assertEqual(len(reopened.list_accounts()), 1)
 
-    def test_v1_database_upgrades_to_v2_with_imap_default(self):
-        """An existing v1 database keeps its accounts and defaults to imap."""
+    def test_v1_database_upgrades_to_v3_and_keeps_accounts(self):
+        """An existing v1 database walks v2 -> v3 and keeps its accounts."""
         v1_path = Path(self._tmp.name) / "legacy.db"
         connection = sqlite3.connect(str(v1_path))
         try:
@@ -89,16 +89,36 @@ class StoreTests(unittest.TestCase):
         store = Store(v1_path)
         self.addCleanup(store.close)
 
-        self.assertEqual(store.schema_version, 2)
+        self.assertEqual(store.schema_version, 3)
         account = store.get_account("acc_old")
         self.assertIsNotNone(account)
         self.assertEqual(account["protocol"], "imap")
         self.assertEqual(account["address"], "old@b.com")
 
-        # Re-running the step (and the whole migrate) must not raise.
-        self.assertEqual(store.migrate(), 2)
+        tables = {
+            row["name"]
+            for row in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        self.assertIn("messages", tables)
+        # The new message store accepts rows for the migrated account.
+        self.assertTrue(
+            store.insert_message(
+                account_id="acc_old",
+                folder="INBOX",
+                uidvalidity=7,
+                uid=1,
+                subject="migrated",
+            )
+        )
+
+        # Re-running the upgrade (and each older step) must not raise.
+        self.assertEqual(store.migrate(), 3)
         MIGRATIONS[2](store._conn)
+        store._conn.executescript(MIGRATIONS[3])
         self.assertEqual(store.get_account("acc_old")["protocol"], "imap")
+        self.assertEqual(store.schema_version, 3)
 
     def test_add_and_list_account_without_exposing_secret(self):
         self.store.add_account(**_account(password_blob="ZHVtbXktYmxvYg=="))

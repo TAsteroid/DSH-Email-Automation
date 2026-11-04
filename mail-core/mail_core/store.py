@@ -7,17 +7,20 @@ the service layer (``hasCredential`` stands in for it).
 
 Schema v2 added ``accounts.protocol`` (``imap`` | ``pop3``, default
 ``imap``) so an existing v1 database upgrades without losing its accounts.
+Schema v3 adds the ``messages`` table (synced mail, one row per
+account/folder/UIDVALIDITY/UID) with indexes for the list view.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -81,9 +84,37 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     )
 
 
+_MIGRATION_3 = """
+CREATE TABLE IF NOT EXISTS messages (
+    id          TEXT PRIMARY KEY,
+    account_id  TEXT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+    folder      TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL DEFAULT 0,
+    uid         INTEGER NOT NULL,
+    message_id  TEXT NOT NULL DEFAULT '',
+    subject     TEXT NOT NULL DEFAULT '',
+    from_addr   TEXT NOT NULL DEFAULT '',
+    to_addr     TEXT NOT NULL DEFAULT '',
+    cc_addr     TEXT NOT NULL DEFAULT '',
+    date        TEXT NOT NULL DEFAULT '',
+    snippet     TEXT NOT NULL DEFAULT '',
+    body_text   TEXT NOT NULL DEFAULT '',
+    body_html   TEXT NOT NULL DEFAULT '',
+    size        INTEGER NOT NULL DEFAULT 0,
+    seen        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    UNIQUE (account_id, folder, uidvalidity, uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_date ON messages (account_id, date);
+CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages (account_id, message_id);
+"""
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
+    3: _MIGRATION_3,
 }
 
 
@@ -358,6 +389,154 @@ class Store:
         if row is None or not row["latest"]:
             return ""
         return str(row["latest"])
+
+    # -- messages ----------------------------------------------------------
+
+    @staticmethod
+    def _message_summary(row: sqlite3.Row) -> dict:
+        """Protocol shape for ``message.list`` (never the body)."""
+        return {
+            "id": row["id"],
+            "accountId": row["account_id"],
+            "folder": row["folder"],
+            "uid": int(row["uid"]),
+            "subject": row["subject"],
+            "fromAddr": row["from_addr"],
+            "toAddr": row["to_addr"],
+            "date": row["date"],
+            "snippet": row["snippet"],
+            "seen": bool(row["seen"]),
+        }
+
+    @classmethod
+    def _message_detail(cls, row: sqlite3.Row) -> dict:
+        """Protocol shape for ``message.get``: summary plus bodies and size."""
+        detail = cls._message_summary(row)
+        detail.update(
+            {
+                "ccAddr": row["cc_addr"],
+                "text": row["body_text"],
+                "html": row["body_html"],
+                "size": int(row["size"]),
+            }
+        )
+        return detail
+
+    def insert_message(
+        self,
+        *,
+        account_id: str,
+        folder: str,
+        uidvalidity: int,
+        uid: int,
+        message_id: str = "",
+        subject: str = "",
+        from_addr: str = "",
+        to_addr: str = "",
+        cc_addr: str = "",
+        date: str = "",
+        snippet: str = "",
+        body_text: str = "",
+        body_html: str = "",
+        size: int = 0,
+        seen: bool = False,
+        created_at: Optional[str] = None,
+    ) -> bool:
+        """Store one synced message; returns ``True`` only when it is new.
+
+        ``INSERT OR IGNORE`` plus the ``UNIQUE (account_id, folder,
+        uidvalidity, uid)`` constraint makes re-syncing the same message a
+        no-op, so the boolean is exactly "rowcount == 1".
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO messages (
+                    id, account_id, folder, uidvalidity, uid, message_id,
+                    subject, from_addr, to_addr, cc_addr, date, snippet,
+                    body_text, body_html, size, seen, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"msg_{uuid.uuid4().hex}",
+                    account_id,
+                    folder,
+                    int(uidvalidity),
+                    int(uid),
+                    message_id,
+                    subject,
+                    from_addr,
+                    to_addr,
+                    cc_addr,
+                    date,
+                    snippet,
+                    body_text,
+                    body_html,
+                    int(size),
+                    1 if seen else 0,
+                    created_at or _utc_now(),
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def list_messages(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        folder: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        """Return ``(total, page)`` ordered by ``date`` descending."""
+        clauses: list[str] = []
+        args: list = []
+        if account_id is not None:
+            clauses.append("account_id = ?")
+            args.append(account_id)
+        if folder is not None:
+            clauses.append("folder = ?")
+            args.append(folder)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM messages{where}", args
+        ).fetchone()
+        total = int(total_row["n"])
+
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM messages{where}
+            ORDER BY date DESC, uid DESC, rowid DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*args, int(limit), int(offset)],
+        ).fetchall()
+        return total, [self._message_summary(row) for row in rows]
+
+    def get_message(self, message_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        return self._message_detail(row) if row is not None else None
+
+    def delete_messages(self, account_id: str, folder: str) -> int:
+        """Drop the cached rows of one folder (used when UIDVALIDITY changed)."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM messages WHERE account_id = ? AND folder = ?",
+                (account_id, folder),
+            )
+        return cursor.rowcount
+
+    def count_messages(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
+        return int(row["n"])
+
+    def count_unread_messages(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE seen = 0"
+        ).fetchone()
+        return int(row["n"])
 
     # -- meta --------------------------------------------------------------
 

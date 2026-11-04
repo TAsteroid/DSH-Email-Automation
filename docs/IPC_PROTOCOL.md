@@ -130,9 +130,69 @@ POP3 结果：
 结果：
 
 ```json
-{"counters": {"accounts": 0, "messages": 0, "unread": 0, "drafts": 0, "pendingApprovals": 0, "pendingAi": 0},
- "lastSyncAt": ""}
+{"counters": {"accounts": 1, "messages": 42, "unread": 3, "drafts": 0, "pendingApprovals": 0, "pendingAi": 0},
+ "lastSyncAt": "2026-11-04T12:30:00Z"}
 ```
+
+### `sync.run`
+
+参数：
+
+```json
+{"accountId": "acc_xxx", "folder": "INBOX", "limit": 50}
+```
+
+- `folder` 缺省 `INBOX`；`limit` 缺省 50，上限 200（一次同步最多拉多少封）。
+- POP3 账号忽略 `folder`，`uidValidity` 固定 0。
+
+结果：
+
+```json
+{"accountId": "acc_xxx", "folder": "INBOX", "uidValidity": 12345,
+ "fetched": 12, "stored": 10, "skipped": 2, "lastUid": 4567,
+ "startedAt": "2026-11-04T12:00:00Z", "finishedAt": "2026-11-04T12:00:04Z"}
+```
+
+**幂等要求**：同一封邮件（account + folder + uidValidity + uid）重复同步不得产生第二条记录；`stored` 只统计真正新增的数量。
+
+**UIDVALIDITY 变化**：重置该文件夹游标、按新值重建记录，不得因为旧 uid 冲突而报错。
+
+### `message.list`
+
+参数：
+
+```json
+{"accountId": "acc_xxx", "folder": "INBOX", "limit": 50, "offset": 0}
+```
+
+全部可省略：省略 `accountId` 表示所有账户，省略 `folder` 表示所有文件夹。
+
+结果：
+
+```json
+{"total": 42, "messages": [{
+  "id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
+  "subject": "合同确认", "fromAddr": "a@b.com", "toAddr": "me@b.com",
+  "date": "2026-11-04T09:12:00Z", "snippet": "正文前 200 字…", "seen": false
+}]}
+```
+
+按 `date` 倒序。
+
+### `message.get`
+
+参数：`{"id": "msg_xxx"}`
+
+结果：
+
+```json
+{"id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
+ "subject": "合同确认", "fromAddr": "a@b.com", "toAddr": "me@b.com", "ccAddr": "",
+ "date": "2026-11-04T09:12:00Z", "snippet": "…", "text": "完整纯文本正文",
+ "html": "<p>…</p>", "size": 4812, "seen": false}
+```
+
+`html` 可能为空串；返回值**不包含**附件内容，也不包含原始 MIME。
 
 ### `shutdown`
 

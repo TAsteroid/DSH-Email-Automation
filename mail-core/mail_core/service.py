@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from . import crypto, imap_client, pop3_client, smtp_client
 from . import protocol
+from . import sync
 from .protocol import (
     BAD_REQUEST,
     CREDENTIAL_MISSING,
@@ -70,6 +71,34 @@ def _optional_bool(params: dict, key: str, default: bool) -> bool:
     return value
 
 
+def _optional_int(
+    params: dict,
+    key: str,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: Optional[int] = None,
+) -> int:
+    """Read a non-negative integer, accepting numeric strings like the ports.
+
+    ``maximum`` clamps instead of failing: the protocol makes ``limit`` a cap.
+    """
+    value = params.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise bad_request(f"field {key} must be an integer")
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if not isinstance(value, int):
+        raise bad_request(f"field {key} must be an integer")
+    if value < minimum:
+        raise bad_request(f"field {key} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        return maximum
+    return value
+
+
 def _optional_port(params: dict, key: str, default: Optional[int]) -> int:
     value = params.get(key, default)
     if value is None:
@@ -122,6 +151,9 @@ class Service:
             "account.remove": self._account_remove,
             "account.test": self._account_test,
             "sync.status": self._sync_status,
+            "sync.run": self._sync_run,
+            "message.list": self._message_list,
+            "message.get": self._message_get,
             "shutdown": self._shutdown,
         }
 
@@ -269,14 +301,78 @@ class Service:
     def _sync_status(self, _params: dict) -> dict:
         counters = {
             "accounts": self.store.count_accounts(),
-            # No message store yet: these stay zero until sync lands.
-            "messages": 0,
-            "unread": 0,
+            "messages": self.store.count_messages(),
+            "unread": self.store.count_unread_messages(),
+            # No draft / approval / AI tables yet: these are real zeros.
             "drafts": 0,
             "pendingApprovals": 0,
             "pendingAi": 0,
         }
         return {"counters": counters, "lastSyncAt": self.store.latest_sync_at()}
+
+    def _sync_run(self, params: dict) -> dict:
+        account_id = _require_str(params, "accountId")
+        folder = _optional_str(params, "folder", sync.DEFAULT_FOLDER) or ""
+        if not folder.strip():
+            raise bad_request("field folder must be a non-empty string")
+        limit = _optional_int(
+            params, "limit", sync.DEFAULT_LIMIT, minimum=1, maximum=sync.MAX_LIMIT
+        )
+
+        account = self.store.get_account(account_id)
+        if account is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        blob = self.store.get_credential(account_id)
+        if not blob:
+            raise MailCoreError(
+                CREDENTIAL_MISSING, "no credential stored for this account"
+            )
+        try:
+            password = crypto.decrypt_password(blob)
+        except MailCoreError:
+            raise MailCoreError(
+                CREDENTIAL_MISSING, "stored credential could not be decrypted"
+            ) from None
+
+        return sync.run_sync(
+            self.store, account, password, folder.strip(), limit
+        )
+
+    # -- messages ----------------------------------------------------------
+
+    def _message_list(self, params: dict) -> dict:
+        account_id = params.get("accountId")
+        if account_id is not None:
+            if not isinstance(account_id, str) or not account_id.strip():
+                raise bad_request(
+                    "field accountId must be a non-empty string when given"
+                )
+            account_id = account_id.strip()
+
+        folder = params.get("folder")
+        if folder is not None:
+            if not isinstance(folder, str) or not folder.strip():
+                raise bad_request("field folder must be a non-empty string when given")
+            folder = folder.strip()
+
+        limit = _optional_int(params, "limit", 50, minimum=1, maximum=200)
+        offset = _optional_int(params, "offset", 0, minimum=0)
+
+        total, messages = self.store.list_messages(
+            account_id=account_id,
+            folder=folder,
+            limit=limit,
+            offset=offset,
+        )
+        return {"total": total, "messages": messages}
+
+    def _message_get(self, params: dict) -> dict:
+        message_id = _require_str(params, "id")
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise MailCoreError(NOT_FOUND, "message not found")
+        return message
 
     # -- lifecycle ---------------------------------------------------------
 

@@ -114,6 +114,8 @@ window.__ModuleLoader__.load({
         messages: '邮件',
         noMessages: '暂无邮件',
         noMessagesHint: '同步接通后，这里显示邮件列表：发件人、主题、摘要、标签。',
+        syncNow: '立即同步',
+        noSubject: '（无主题）',
         selectMessage: '选择一封邮件',
         selectMessageHint: '右侧显示正文、线程和 AI 分析结果。',
         aiPanel: 'AI 分析',
@@ -221,6 +223,8 @@ window.__ModuleLoader__.load({
         messages: 'Messages',
         noMessages: 'No messages',
         noMessagesHint: 'Once syncing works, this list shows sender, subject, summary and labels.',
+        syncNow: 'Sync now',
+        noSubject: '(no subject)',
         selectMessage: 'Select a message',
         selectMessageHint: 'Body, thread and AI analysis render on the right.',
         aiPanel: 'AI analysis',
@@ -455,6 +459,38 @@ window.__ModuleLoader__.load({
         width: '100%',
       },
       listItemMeta: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' },
+      msgItem: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+        width: '100%',
+        textAlign: 'left',
+        padding: '9px 16px',
+        border: 'none',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        cursor: 'pointer',
+        fontSize: 13,
+      },
+      msgTitle: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      msgMeta: {
+        fontSize: 11,
+        color: 'var(--dsw-alias-label-tertiary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
+      msgSubject: { fontSize: 16, fontWeight: 600, margin: '0 0 6px' },
+      msgBody: {
+        fontSize: 13,
+        lineHeight: 1.7,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        fontFamily: 'var(--dsw-font-family)',
+        color: 'var(--dsw-alias-label-primary)',
+        margin: 0,
+      },
       detail: { flex: 1, minWidth: 0, overflowY: 'auto', padding: '16px 20px' },
       paneHeader: {
         flex: 'none',
@@ -923,6 +959,81 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 收件箱 ------------------------------------------------------------
+    /** 中间栏：本地索引的邮件列表（按时间倒序）。 */
+    function MessageList({ t, messages, selectedId, onSelect, onSync, syncing }) {
+      return h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
+        h(
+          'div',
+          { style: styles.listHead },
+          t('messages'),
+          h('span', { style: styles.spacer }),
+          h('span', { style: styles.listCount }, String(messages.length)),
+          onSync
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  style: styles.iconBtn,
+                  title: t('syncNow'),
+                  'aria-label': t('syncNow'),
+                  disabled: syncing,
+                  onClick: onSync,
+                },
+                h(RefreshIcon, {}),
+              )
+            : null,
+        ),
+        messages.length === 0
+          ? h(Empty, { title: t('noMessages'), hint: t('noMessagesHint') })
+          : h(
+              'div',
+              { style: { flex: 1, minHeight: 0, overflowY: 'auto' } },
+              messages.map((message) =>
+                h(
+                  'button',
+                  {
+                    key: message.id,
+                    type: 'button',
+                    'aria-pressed': selectedId === message.id,
+                    onClick: () => onSelect && onSelect(message.id),
+                    style:
+                      selectedId === message.id
+                        ? { ...styles.msgItem, background: 'var(--dsw-alias-interactive-bg-hover)' }
+                        : styles.msgItem,
+                  },
+                  h('span', { style: styles.msgTitle }, message.subject || t('noSubject')),
+                  h('span', { style: styles.msgMeta }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
+                ),
+              ),
+            ),
+      )
+    }
+
+    /** 右栏：选中邮件的正文。 */
+    function MessageDetail({ t, message }) {
+      if (!message) {
+        return h(
+          'div',
+          { style: styles.reading, 'aria-label': t('selectMessage') },
+          h(Empty, { title: t('selectMessage'), hint: t('selectMessageHint') }),
+          h(
+            'div',
+            { style: styles.card },
+            h('p', { style: styles.sectionTitle }, t('aiPanel')),
+            h('p', { style: styles.muted }, t('aiPanelHint')),
+          ),
+        )
+      }
+      return h(
+        'article',
+        { style: styles.reading },
+        h('h2', { style: styles.msgSubject }, message.subject || t('noSubject')),
+        h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
+        h('pre', { style: styles.msgBody }, message.text || ''),
+      )
+    }
     function InboxView({ t, status }) {
       const accounts = (status && status.accounts) || []
       const bodyRef = React.useRef(null)
@@ -933,6 +1044,47 @@ window.__ModuleLoader__.load({
       }))
       const [dragging, setDragging] = React.useState(null)
       const [hovered, setHovered] = React.useState(null)
+      const [messages, setMessages] = React.useState([])
+      const [selectedId, setSelectedId] = React.useState(null)
+      const [detail, setDetail] = React.useState(null)
+      const [syncing, setSyncing] = React.useState(false)
+
+      const loadMessages = React.useCallback(async () => {
+        try {
+          const value = await call('/messages', { limit: 100 })
+          setMessages(value && value.messages ? value.messages : [])
+        } catch {
+          setMessages([])
+        }
+      }, [])
+
+      React.useEffect(() => {
+        void loadMessages()
+      }, [loadMessages])
+
+      const selectMessage = async (id) => {
+        setSelectedId(id)
+        setDetail(null)
+        try {
+          setDetail(await call('/message', { id }))
+        } catch {
+          setDetail(null)
+        }
+      }
+
+      const syncNow = async () => {
+        const account = accounts[0]
+        if (!account || syncing) return
+        setSyncing(true)
+        try {
+          await call('/sync', { accountId: account.id, folder: 'INBOX', limit: 50 })
+          await loadMessages()
+        } catch {
+          // 同步失败保留原列表；错误由顶栏的 Core 状态反映
+        } finally {
+          setSyncing(false)
+        }
+      }
 
       React.useEffect(() => {
         if (dragging === null) {
@@ -1054,21 +1206,10 @@ window.__ModuleLoader__.load({
         h(
           'section',
           { style: { ...styles.list, width: layout.list }, 'aria-label': t('messages') },
-          h('div', { style: styles.listHead }, t('messages')),
-          h(Empty, { title: t('noMessages'), hint: t('noMessagesHint') }),
+          h(MessageList, { t, messages, selectedId, onSelect: selectMessage, onSync: syncNow, syncing }),
         ),
         handle('list'),
-        h(
-          'section',
-          { style: styles.reading, 'aria-label': t('selectMessage') },
-          h(Empty, { title: t('selectMessage'), hint: t('selectMessageHint') }),
-          h(
-            'div',
-            { style: styles.card },
-            h('p', { style: styles.sectionTitle }, t('aiPanel')),
-            h('p', { style: styles.muted }, t('aiPanelHint')),
-          ),
-        ),
+        h(MessageDetail, { t, message: detail }),
       )
     }
 
@@ -1653,6 +1794,8 @@ window.__ModuleLoader__.load({
       __test: {
         MailPanel,
         InboxView,
+        MessageList,
+        MessageDetail,
         TodoView,
         DraftsView,
         ApprovalsRail,
