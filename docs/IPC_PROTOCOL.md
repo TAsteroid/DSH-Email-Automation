@@ -459,11 +459,20 @@ POP3 结果：
 
 参数：`{"accountId": "acc_xxx", "folder": "INBOX", "limit": 50}`
 
-结果：`{"accountId": "acc_xxx", "folder": "INBOX", "messages": 12, "attachments": 15}`
+结果：
 
-- 找出 `attachments_synced = 0` 的邮件（v8 之前同步的旧邮件），重新拉**原始邮件**（不是附件本体）、解析 MIME 并写入附件元数据；处理过的邮件置 `attachments_synced = 1`，所以重复调用时 `messages = 0`（幂等）。
-- `folder` 可省略（该账号所有文件夹）；`limit` 缺省 50、上限 200（本次最多处理多少封邮件）。
-- IMAP / POP3 账号都支持；账号不存在 → `NOT_FOUND`；网络失败 → `IMAP_ERROR`。
+```json
+{"accountId": "acc_xxx", "folder": "INBOX",
+ "scanned": 12, "updated": 10, "skipped": 2,
+ "errors": [{"messageId": "msg_xxx", "reason": "FETCH 2812 returned no message body"}]}
+```
+
+- 找出 `attachments_synced = 0` 的邮件（v8 之前同步的旧邮件），重新拉**原始邮件**（不是附件本体）、解析 MIME 并写入附件元数据；成功的邮件置 `attachments_synced = 1`，所以重复调用时 `scanned = 0`（幂等）。
+- `scanned = updated + skipped`：`scanned` 是本批考虑的邮件数，`updated` 是成功写入元数据的邮件数，`skipped` 是失败/跳过数。
+- **逐封容错**：单封邮件失败（服务器上 UID 已不存在导致 `FETCH ... returned no message body`、POP3 已无此邮件、单封解析异常等）只计入 `skipped` 并继续处理其余邮件，**不中断整批**；失败邮件保持 `attachments_synced = 0`，下次 backfill 会自动重试。
+- `errors` 最多返回 5 条，每条形如 `{"messageId": "msg_xxx", "reason": "..."}`；`reason` 不含密码。整批级别的连接 / 登录 / SELECT / UIDL 失败仍然返回 `IMAP_ERROR`。
+- `folder` 可省略（该账号所有文件夹）；`limit` 缺省 50、上限 200（本次最多考虑多少封邮件）。
+- IMAP / POP3 账号都支持；账号不存在 → `NOT_FOUND`；没有可用密码 → `CREDENTIAL_MISSING`。
 
 ### `contact.list`
 

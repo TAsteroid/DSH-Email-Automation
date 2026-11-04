@@ -791,7 +791,12 @@ def backfill_attachment_metadata(
     Messages synced after v8 already carry their attachment metadata, so this
     only touches rows whose ``attachments_synced`` flag is still 0.  The raw
     body is fetched again (attachment *files* are not downloaded here), the
-    MIME parts are parsed, and the message is marked synced either way.
+    MIME parts are parsed, and the message is marked synced.
+
+    Failures are per message: a UID that vanished from the server (the usual
+    cause of ``FETCH ... returned no message body``) or a single unreadable
+    message is counted in ``skipped`` and left marked unsynced for the next
+    run, while the rest of the batch continues.
     """
     receive_protocol = account.get("protocol") or "imap"
     if receive_protocol == "pop3":
@@ -801,15 +806,38 @@ def backfill_attachment_metadata(
     return _backfill_attachments_imap(store, account, password, folder, limit)
 
 
+MAX_BACKFILL_ERRORS = 5
+
+# A single damaged/deleted message must not abort a whole backfill batch, so
+# per-message failures are caught and reported in ``errors`` instead.
+_IMAP_BACKFILL_FAILURES = (MailCoreError,) + _IMAP_FAILURES
+_POP3_BACKFILL_FAILURES = (MailCoreError,) + _POP3_FAILURES
+
+
 def _attachment_backfill_result(
-    account_id: str, folder: str, messages: int, attachments: int
+    account_id: str,
+    folder: str,
+    scanned: int,
+    updated: int,
+    skipped: int,
+    errors: list[dict],
 ) -> dict:
     return {
         "accountId": account_id,
         "folder": folder or "",
-        "messages": messages,
-        "attachments": attachments,
+        "scanned": scanned,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors[:MAX_BACKFILL_ERRORS],
     }
+
+
+def _add_backfill_error(errors: list[dict], message_id: str, reason: str) -> None:
+    """Record at most ``MAX_BACKFILL_ERRORS`` failure details."""
+    if len(errors) < MAX_BACKFILL_ERRORS:
+        errors.append(
+            {"messageId": message_id, "reason": str(reason)[:300]}
+        )
 
 
 def _backfill_attachments_imap(
@@ -822,14 +850,15 @@ def _backfill_attachments_imap(
     account_id = str(account["id"])
     pending = store.pending_attachment_messages(account_id, folder, limit)
     if not pending:
-        return _attachment_backfill_result(account_id, folder or "", 0, 0)
+        return _attachment_backfill_result(account_id, folder or "", 0, 0, 0, [])
 
     # One SELECT per folder; messages arrive grouped by folder from the store.
     by_folder: dict[str, list[dict]] = {}
     for message in pending:
         by_folder.setdefault(message["folder"], []).append(message)
 
-    processed = inserted = 0
+    scanned = updated = skipped = 0
+    errors: list[dict] = []
     connection = None
     try:
         connection = imap_client.connect(
@@ -859,29 +888,47 @@ def _backfill_attachments_imap(
 
             server_uidvalidity = _read_uidvalidity(connection, wire_folder)
             expected = {message["uidvalidity"] for message in messages}
-            if (
+            uidvalidity_changed = (
                 server_uidvalidity is not None
-                and expected
+                and bool(expected)
                 and expected != {server_uidvalidity}
-            ):
-                raise imap_client.ImapError(
-                    f"UIDVALIDITY changed for {folder_name}; run sync.run first"
-                )
+            )
 
             for message in messages:
-                raw, size = _fetch_one(connection, message["uid"])
-                parsed = _parse(
-                    account_id,
-                    folder_name,
-                    message["uidvalidity"],
-                    message["uid"],
-                    raw,
-                    size,
-                )
-                inserted += store.replace_attachments(
-                    message["id"], parsed.get("attachments", [])
-                )
-                processed += 1
+                scanned += 1
+                if uidvalidity_changed:
+                    skipped += 1
+                    _add_backfill_error(
+                        errors,
+                        str(message["id"]),
+                        f"UIDVALIDITY changed for {folder_name}; run sync.run first",
+                    )
+                    continue
+                try:
+                    raw, size = _fetch_one(connection, message["uid"])
+                    parsed = _parse(
+                        account_id,
+                        folder_name,
+                        message["uidvalidity"],
+                        message["uid"],
+                        raw,
+                        size,
+                    )
+                    store.replace_attachments(
+                        str(message["id"]), parsed.get("attachments", [])
+                    )
+                    updated += 1
+                except _IMAP_BACKFILL_FAILURES as exc:
+                    # The UID can be gone (FETCH returns no body) or the server
+                    # can reject one part of the mailbox; keep going with the
+                    # rest and leave this message marked unsynced for a retry.
+                    skipped += 1
+                    reason = (
+                        exc.message
+                        if isinstance(exc, MailCoreError)
+                        else _redact(exc, password)
+                    )
+                    _add_backfill_error(errors, str(message["id"]), reason)
     except MailCoreError:
         raise
     except _IMAP_FAILURES as exc:
@@ -896,7 +943,7 @@ def _backfill_attachments_imap(
                 pass
 
     return _attachment_backfill_result(
-        account_id, folder or "", processed, inserted
+        account_id, folder or "", scanned, updated, skipped, errors
     )
 
 
@@ -910,9 +957,10 @@ def _backfill_attachments_pop3(
     account_id = str(account["id"])
     pending = store.pending_attachment_messages(account_id, folder, limit)
     if not pending:
-        return _attachment_backfill_result(account_id, folder or "", 0, 0)
+        return _attachment_backfill_result(account_id, folder or "", 0, 0, 0, [])
 
-    processed = inserted = 0
+    scanned = updated = skipped = 0
+    errors: list[dict] = []
     connection = None
     try:
         connection = pop3_client.connect(
@@ -940,25 +988,36 @@ def _backfill_attachments_pop3(
             by_uid[_pop3_uid(uidl, message_number)] = message_number
 
         for message in pending:
+            scanned += 1
             message_number = by_uid.get(int(message["uid"]))
             if message_number is None:
+                skipped += 1
+                _add_backfill_error(
+                    errors,
+                    str(message["id"]),
+                    "message not found on the POP3 server",
+                )
                 continue
             try:
                 _status, body_lines, _octets = connection.retr(message_number)
-            except _POP3_FAILURES as exc:
-                raise pop3_client.Pop3Error(
-                    f"RETR {message_number} failed: {_redact(exc, password)}"
-                ) from None
-            raw = b"\r\n".join(body_lines)
-            if body_lines:
-                raw += b"\r\n"
-            parsed = _parse(
-                account_id, message["folder"], 0, message["uid"], raw, len(raw)
-            )
-            inserted += store.replace_attachments(
-                message["id"], parsed.get("attachments", [])
-            )
-            processed += 1
+                raw = b"\r\n".join(body_lines)
+                if body_lines:
+                    raw += b"\r\n"
+                parsed = _parse(
+                    account_id, message["folder"], 0, message["uid"], raw, len(raw)
+                )
+                store.replace_attachments(
+                    str(message["id"]), parsed.get("attachments", [])
+                )
+                updated += 1
+            except _POP3_BACKFILL_FAILURES as exc:
+                skipped += 1
+                reason = (
+                    exc.message
+                    if isinstance(exc, MailCoreError)
+                    else _redact(exc, password)
+                )
+                _add_backfill_error(errors, str(message["id"]), reason)
     except MailCoreError:
         raise
     except _POP3_FAILURES as exc:
@@ -976,5 +1035,5 @@ def _backfill_attachments_pop3(
                     pass
 
     return _attachment_backfill_result(
-        account_id, folder or "", processed, inserted
+        account_id, folder or "", scanned, updated, skipped, errors
     )

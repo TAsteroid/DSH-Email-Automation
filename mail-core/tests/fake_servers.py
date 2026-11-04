@@ -654,7 +654,12 @@ class FakeImapServer(_LoopbackServer):
             except ValueError:
                 self._send(connection, f"{tag} BAD invalid UID\r\n")
                 return
-            raw = self.messages[uid - 1] if 1 <= uid <= len(self.messages) else None
+            raw = (
+                self.messages[uid - 1]
+                if 1 <= uid <= len(self.messages)
+                and uid not in self.deleted_uids.get(self._mailbox, ())
+                else None
+            )
             sections = re.findall(
                 r"BODY(?:\.PEEK)?\[([^\]]*)\]", _spec, re.IGNORECASE
             )

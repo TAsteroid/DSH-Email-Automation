@@ -344,14 +344,131 @@ class AttachmentBackfillTests(unittest.TestCase):
                 "attachment.backfill", {"accountId": account_id}
             )
 
-        self.assertEqual(first["messages"], 1)
-        self.assertEqual(first["attachments"], 3)
-        self.assertEqual(second["messages"], 0)
-        self.assertEqual(second["attachments"], 0)
+        self.assertEqual(first["scanned"], 1)
+        self.assertEqual(first["updated"], 1)
+        self.assertEqual(first["skipped"], 0)
+        self.assertEqual(first["errors"], [])
+        self.assertEqual(second["scanned"], 0)
+        self.assertEqual(second["updated"], 0)
+        self.assertEqual(second["skipped"], 0)
         self.assertEqual(len(self.service.dispatch("attachment.list", {})["attachments"]), 2)
         self.assertEqual(
             self.service.store.count_attachments(message_id), 3
         )
+
+    def test_backfill_skips_missing_server_message_and_keeps_going(self):
+        """A vanished UID is a per-message skip, not a batch failure."""
+        second = _build_message(
+            [TEXT_PART, PDF_PART],
+            subject="second",
+            message_id="<second@example.com>",
+        )
+        with FakeImapServer([MESSAGE, second]) as server:
+            account_id = self.service.dispatch(
+                "account.add",
+                {
+                    "address": "me@example.com",
+                    "imapHost": "127.0.0.1",
+                    "imapPort": server.port,
+                    "imapSecurity": "none",
+                    "username": "me@example.com",
+                    "password": PASSWORD,
+                    "smtpHost": "",
+                },
+            )["id"]
+            self.service.dispatch("sync.run", {"accountId": account_id})
+
+            rows = self.service.store._conn.execute(
+                "SELECT id, uid FROM messages ORDER BY uid ASC"
+            ).fetchall()
+            missing_id = rows[0]["id"]
+            kept_id = rows[1]["id"]
+            self.assertNotEqual(missing_id, kept_id)
+
+            # Simulate a pre-v8 backlog and a UID that no longer exists.
+            self.service.store._conn.execute("DELETE FROM attachments")
+            self.service.store._conn.execute(
+                "UPDATE messages SET attachments_synced = 0"
+            )
+            self.service.store._conn.commit()
+            server.deleted_uids["INBOX"] = {1}
+
+            first = self.service.dispatch(
+                "attachment.backfill", {"accountId": account_id}
+            )
+            # The failed message stays pending for the next attempt.
+            pending = self.service.store.pending_attachment_messages(account_id)
+            self.assertEqual([message["id"] for message in pending], [missing_id])
+            self.assertEqual(
+                self.service.store.count_attachments(kept_id), 1
+            )
+
+            server.deleted_uids.clear()
+            second_run = self.service.dispatch(
+                "attachment.backfill", {"accountId": account_id}
+            )
+
+        self.assertEqual(first["scanned"], 2)
+        self.assertEqual(first["updated"], 1)
+        self.assertEqual(first["skipped"], 1)
+        self.assertEqual(len(first["errors"]), 1)
+        self.assertEqual(first["errors"][0]["messageId"], missing_id)
+        self.assertTrue(first["errors"][0]["reason"])
+        self.assertEqual(second_run["scanned"], 1)
+        self.assertEqual(second_run["updated"], 1)
+        self.assertEqual(second_run["skipped"], 0)
+        self.assertEqual(
+            self.service.store.pending_attachment_messages(account_id), []
+        )
+
+    def test_backfill_errors_are_capped_at_five(self):
+        messages = [
+            _build_message(
+                [TEXT_PART, PDF_PART],
+                subject=f"m{index}",
+                message_id=f"<m{index}@example.com>",
+                date=f"Mon, 0{index} Nov 2026 09:00:00 +0000",
+            )
+            for index in range(1, 7)
+        ]
+        with FakeImapServer(messages) as server:
+            account_id = self.service.dispatch(
+                "account.add",
+                {
+                    "address": "me@example.com",
+                    "imapHost": "127.0.0.1",
+                    "imapPort": server.port,
+                    "imapSecurity": "none",
+                    "username": "me@example.com",
+                    "password": PASSWORD,
+                    "smtpHost": "",
+                },
+            )["id"]
+            self.service.dispatch("sync.run", {"accountId": account_id})
+            self.service.store._conn.execute("DELETE FROM attachments")
+            self.service.store._conn.execute(
+                "UPDATE messages SET attachments_synced = 0"
+            )
+            self.service.store._conn.commit()
+            server.deleted_uids["INBOX"] = set(range(1, 7))
+
+            result = self.service.dispatch(
+                "attachment.backfill", {"accountId": account_id}
+            )
+
+        self.assertEqual(result["scanned"], 6)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(result["skipped"], 6)
+        self.assertEqual(len(result["errors"]), 5)
+        error_ids = [error["messageId"] for error in result["errors"]]
+        self.assertEqual(len(set(error_ids)), 5)
+        pending = {
+            message["id"]
+            for message in self.service.store.pending_attachment_messages(
+                account_id
+            )
+        }
+        self.assertTrue(set(error_ids) <= pending)
 
 
 if __name__ == "__main__":
