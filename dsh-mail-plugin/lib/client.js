@@ -100,6 +100,13 @@ window.__ModuleLoader__.load({
         nav: '邮箱',
         title: '邮箱管理',
         inbox: '收件箱',
+        sent: '发件箱',
+        sentFolderMissing: '没找到「已发送」文件夹，先到设置里点一次「测试连接」把文件夹列表拉下来。',
+        sentEmpty: '发件箱为空',
+        sentEmptyHint: '点右上角同步按钮，从服务器拉取已发送的邮件。',
+        earlierMail: '更早的邮件',
+        clickToExpand: '点击展开',
+        clickToCollapse: '点击收起',
         todo: '待跟进',
         ai: 'AI 工作台',
         drafts: '草稿箱',
@@ -210,6 +217,13 @@ window.__ModuleLoader__.load({
         nav: 'Mail',
         title: 'Mail',
         inbox: 'Inbox',
+        sent: 'Sent',
+        sentFolderMissing: 'No "Sent" folder found. Run "Test connection" in Settings once to load the folder list.',
+        sentEmpty: 'Sent is empty',
+        sentEmptyHint: 'Use the sync button at the top right to fetch sent mail from the server.',
+        earlierMail: 'Earlier message',
+        clickToExpand: 'Click to expand',
+        clickToCollapse: 'Click to collapse',
         todo: 'Follow-ups',
         ai: 'AI workspace',
         drafts: 'Drafts',
@@ -322,6 +336,7 @@ window.__ModuleLoader__.load({
     const TABS = [
       ['inbox', 'inbox'],
       ['todo', 'todo'],
+      ['sent', 'sent'],
       ['ai', 'ai'],
       ['drafts', 'drafts'],
       ['knowledge', 'knowledge'],
@@ -484,6 +499,45 @@ window.__ModuleLoader__.load({
         whiteSpace: 'nowrap',
       },
       msgSubject: { fontSize: 16, fontWeight: 600, margin: '0 0 6px' },
+      thread: { display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 },
+      bubble: {
+        maxWidth: '78%',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+        padding: '8px 12px',
+        borderRadius: 'var(--dsw-radius-md)',
+        border: '1px solid var(--dsw-alias-border-l1)',
+      },
+      bubbleMine: {
+        alignSelf: 'flex-end',
+        background: 'var(--dsw-alias-state-business-primary)',
+        color: 'var(--dsw-alias-label-primary-inverted)',
+        borderColor: 'transparent',
+      },
+      bubbleTheirs: { alignSelf: 'flex-start', background: 'var(--dsw-alias-bg-layer-2)' },
+      bubbleHead: { fontSize: 11, opacity: 0.8, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' },
+      bubbleName: { fontWeight: 500 },
+      bubbleBody: {
+        fontSize: 13,
+        lineHeight: 1.7,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        margin: 0,
+        fontFamily: 'var(--dsw-font-family)',
+        color: 'inherit',
+      },
+      bubbleToggle: {
+        marginTop: 6,
+        fontSize: 11,
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        color: 'inherit',
+        opacity: 0.75,
+        cursor: 'pointer',
+        textAlign: 'left',
+      },
       msgBody: {
         fontSize: 13,
         lineHeight: 1.7,
@@ -914,7 +968,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 左列：分组列表。groups = [{ id, title, items: [{ id, title, meta }] }] */
-    function GroupList({ t, groups, selectedId, onSelect }) {
+    function GroupList({ t, groups, selectedId, onSelect, headerActions }) {
       return h(
         'div',
         { style: styles.listColumn },
@@ -927,6 +981,8 @@ window.__ModuleLoader__.load({
               { style: index > 0 ? { ...styles.listHead, borderTop: '1px solid var(--dsw-alias-border-l2)' } : styles.listHead },
               group.title,
               h('span', { style: styles.listCount }, group.items.length),
+              index === 0 && headerActions ? h('span', { style: styles.spacer }) : null,
+              index === 0 ? headerActions : null,
             ),
             group.items.length === 0
               ? h('p', { style: { ...styles.muted, padding: '8px 16px', margin: 0 } }, t('emptyList'))
@@ -957,6 +1013,129 @@ window.__ModuleLoader__.load({
         'div',
         { style: { ...styles.detail, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
         h(Empty, { title: t(titleKey), hint: t(hintKey) }),
+      )
+    }
+
+    // ---- 正文：把引用历史拆成对话气泡 ---------------------------------------
+    const QUOTE_BOUNDARY = [
+      /^-{2,}\s*(原始邮件|转发邮件|Original Message|Forwarded message)\s*-{2,}\s*$/im,
+      /^-{2,}\s*Original Appointment\s*-{2,}\s*$/im,
+      /^-{5,}\s*$/m,
+      /^On .{4,120} wrote:\s*$/im,
+      /^在 .{4,120} 写道[:：]\s*$/m,
+    ]
+
+    const HEADER_LINE = /^(From|发件人|Sent|Send Time|发送时间|Date|日期|To|收件人|Cc|抄送|Subject|主题)\s*[:：]\s*(.*)$/i
+
+    /** 边界行本身（分割线 / "On ... wrote:"）不算正文，切段后要丢掉。 */
+    const BOUNDARY_LINE =
+      /^(-{2,}\s*(原始邮件|转发邮件|Original Message|Forwarded message|Original Appointment)\s*-{2,}|-{5,}|On .{4,120} wrote:|在 .{4,120} 写道[:：])\s*$/i
+
+    /** 从一段引用里剥出 From/To/Subject/Date 头，剩下的算正文。 */
+    function parseQuoteHeaders(block) {
+      const lines = block.split('\n')
+      const header = {}
+      let index = 0
+      while (index < lines.length) {
+        const match = HEADER_LINE.exec(lines[index].trim())
+        if (!match) break
+        const key = match[1].toLowerCase()
+        const value = match[2].trim()
+        if (/^(from|发件人)$/.test(key)) header.from = header.from || value
+        else if (/^(to|收件人)$/.test(key)) header.to = header.to || value
+        else if (/^(subject|主题)$/.test(key)) header.subject = header.subject || value
+        else if (/^(sent|send time|发送时间|date|日期)$/.test(key)) header.date = header.date || value
+        index += 1
+      }
+      return { header, rest: lines.slice(index).join('\n') }
+    }
+
+    /** 第 0 段是当前邮件；其余是被引用的历史邮件。 */
+    function splitQuoted(text) {
+      const source = String(text || '').replace(/\r\n/g, '\n')
+      const marks = []
+      for (const pattern of QUOTE_BOUNDARY) {
+        const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`
+        const global = new RegExp(pattern.source, flags)
+        let match = global.exec(source)
+        while (match !== null) {
+          if (match.index > 0) marks.push(match.index)
+          match = global.exec(source)
+        }
+      }
+      const cuts = [...new Set(marks)].sort((a, b) => a - b)
+      const parts = []
+      let start = 0
+      for (const cut of cuts) {
+        if (cut <= start) continue
+        parts.push(source.slice(start, cut))
+        start = cut
+      }
+      parts.push(source.slice(start))
+      return parts
+        .map((part) => part.replace(/^\s+|\s+$/g, ''))
+        .filter((part) => part.length > 0)
+        .map((part, index) => {
+          const lines = part.split('\n')
+          // 丢掉开头的空行和边界行，否则引用头解析不到 From/Date
+          while (lines.length > 0 && (lines[0].trim() === '' || BOUNDARY_LINE.test(lines[0].trim()))) {
+            lines.shift()
+          }
+          const { header, rest } = parseQuoteHeaders(lines.join('\n'))
+          const body = rest
+            .split('\n')
+            .map((line) => line.replace(/^\s*>+\s?/, ''))
+            .join('\n')
+            .replace(/^\s+|\s+$/g, '')
+          return { header, body, quoted: index > 0 }
+        })
+    }
+
+    function isMine(header, accountAddress) {
+      if (!header || !header.from || !accountAddress) return false
+      return String(header.from).toLowerCase().includes(String(accountAddress).toLowerCase())
+    }
+
+    /** 对话气泡：最新一封常显，历史引用默认折叠，点一下展开。 */
+    function ThreadBubbles({ t, message, accountAddress }) {
+      const segments = React.useMemo(() => splitQuoted(message.text), [message.text])
+      const [expanded, setExpanded] = React.useState({})
+      const ordered = segments.map((segment, index) => ({ segment, latest: index === 0 })).reverse()
+
+      return h(
+        'div',
+        { style: styles.thread },
+        ordered.map(({ segment, latest }, position) => {
+          const key = `seg-${position}`
+          const open = latest || expanded[key] === true
+          const header = latest ? { from: message.fromAddr, date: message.date } : segment.header
+          const mine = isMine(header, accountAddress)
+          return h(
+            'div',
+            { key, style: { ...styles.bubble, ...(mine ? styles.bubbleMine : styles.bubbleTheirs) } },
+            h(
+              'div',
+              { style: styles.bubbleHead },
+              h('span', { style: styles.bubbleName }, header.from || (latest ? t('selectMessage') : t('earlierMail'))),
+              h('span', null, header.date || ''),
+            ),
+            open ? h('pre', { style: styles.bubbleBody }, segment.body) : null,
+            latest
+              ? null
+              : h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: styles.bubbleToggle,
+                    'aria-expanded': open,
+                    onClick: () => setExpanded((prev) => ({ ...prev, [key]: !prev[key] })),
+                  },
+                  open
+                    ? t('clickToCollapse')
+                    : `${t('clickToExpand')} · ${(segment.body.split('\n').find((line) => line.trim().length > 0) || '').slice(0, 40)}`,
+                ),
+          )
+        }),
       )
     }
 
@@ -1014,7 +1193,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 右栏：选中邮件的正文。 */
-    function MessageDetail({ t, message }) {
+    function MessageDetail({ t, message, accountAddress }) {
       if (!message) {
         return h(
           'div',
@@ -1033,7 +1212,7 @@ window.__ModuleLoader__.load({
         { style: styles.reading },
         h('h2', { style: styles.msgSubject }, message.subject || t('noSubject')),
         h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
-        h('pre', { style: styles.msgBody }, message.text || ''),
+        h(ThreadBubbles, { t, message, accountAddress }),
       )
     }
     function InboxView({ t, status }) {
@@ -1211,7 +1390,7 @@ window.__ModuleLoader__.load({
           h(MessageList, { t, messages, selectedId, onSelect: selectMessage, onSync: syncNow, syncing }),
         ),
         handle('list'),
-        h(MessageDetail, { t, message: detail }),
+        h(MessageDetail, { t, message: detail, accountAddress: accounts.length > 0 ? accounts[0].address : '' }),
       )
     }
 
@@ -1237,6 +1416,121 @@ window.__ModuleLoader__.load({
         label: t('resize'),
         left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
         right: h(DetailPane, { t, titleKey: 'draftDetailTitle', hintKey: 'draftDetailHint' }),
+      })
+    }
+
+    /** 发件箱：左侧已发送邮件标题，右侧正文；文件夹名从服务器解码结果里找。 */
+    function SentView({ t, status }) {
+      const accounts = (status && status.accounts) || []
+      const account = accounts.length > 0 ? accounts[0] : null
+      const [folder, setFolder] = React.useState(null)
+      const [messages, setMessages] = React.useState([])
+      const [selectedId, setSelectedId] = React.useState(null)
+      const [detail, setDetail] = React.useState(null)
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      const accountAddress = account ? account.address : ''
+
+      const load = React.useCallback(
+        async (targetFolder) => {
+          if (!account || !targetFolder) return
+          try {
+            const value = await call('/messages', { accountId: account.id, folder: targetFolder, limit: 100 })
+            setMessages((value && value.messages) || [])
+          } catch (error) {
+            setNote(error.message)
+          }
+        },
+        [account],
+      )
+
+      React.useEffect(() => {
+        let cancelled = false
+        async function boot() {
+          if (!account) {
+            setNote(t('sentFolderMissing'))
+            return
+          }
+          try {
+            const value = await call('/folders', { accountId: account.id })
+            const found = (value.folders || []).find((item) => /sent|已发送/i.test(item.name || ''))
+            if (cancelled) return
+            if (!found) {
+              setNote(t('sentFolderMissing'))
+              return
+            }
+            setNote(null)
+            setFolder(found.name)
+          } catch (error) {
+            if (!cancelled) setNote(error.message)
+          }
+        }
+        void boot()
+        return () => {
+          cancelled = true
+        }
+      }, [account])
+
+      React.useEffect(() => {
+        if (folder) void load(folder)
+      }, [folder, load])
+
+      const select = async (id) => {
+        setSelectedId(id)
+        setDetail(null)
+        try {
+          setDetail(await call('/message', { id }))
+        } catch {
+          setDetail(null)
+        }
+      }
+
+      const syncNow = async () => {
+        if (!account || !folder || busy) return
+        setBusy(true)
+        try {
+          await call('/sync', { accountId: account.id, folder, limit: 50 })
+          await load(folder)
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const items = messages.map((message) => ({
+        id: message.id,
+        title: message.subject || t('noSubject'),
+        meta: `${message.toAddr || ''} · ${message.date || ''}`,
+      }))
+      const groups = [{ id: 'sent', title: folder || t('sent'), items }]
+
+      return h(SplitPane, {
+        storageKey: 'sent',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, {
+          t,
+          groups,
+          selectedId,
+          onSelect: select,
+          headerActions: h(
+            'button',
+            {
+              type: 'button',
+              style: styles.iconBtn,
+              title: t('syncNow'),
+              'aria-label': t('syncNow'),
+              disabled: busy || !folder,
+              onClick: syncNow,
+            },
+            h(RefreshIcon, {}),
+          ),
+        }),
+        right: note
+          ? h('div', { style: styles.detail }, h('p', { style: styles.muted }, note))
+          : h(MessageDetail, { t, message: detail, accountAddress }),
       })
     }
 
@@ -1714,6 +2008,7 @@ window.__ModuleLoader__.load({
       let content
       if (tab === 'inbox') content = h(InboxView, { t, status })
       else if (tab === 'todo') content = h(TodoView, { t, status })
+      else if (tab === 'sent') content = h(SentView, { t, status })
       else if (tab === 'ai') content = h(AiWorkbench, { t, status })
       else if (tab === 'drafts') content = h(DraftsView, { t, status })
       else if (tab === 'knowledge') content = h(KnowledgeView, { t, status })
@@ -1805,8 +2100,11 @@ window.__ModuleLoader__.load({
       __test: {
         MailPanel,
         InboxView,
+        SentView,
         MessageList,
         MessageDetail,
+        ThreadBubbles,
+        splitQuoted,
         TodoView,
         DraftsView,
         ApprovalsRail,

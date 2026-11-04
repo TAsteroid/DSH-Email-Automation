@@ -122,6 +122,21 @@ POP3 结果：
 
 - `smtp` 字段**只在账号配置了 `smtpHost` 时出现**；SMTP 测试失败不使整体失败（收信成功即 `ok: true`），失败原因放 `smtp.detail`。
 - 收信失败返回 `IMAP_ERROR`（POP3 沿用同一个错误码，message 带协议前缀）或 `CREDENTIAL_MISSING`。
+- `folders[].name` 是**解码后的 UTF-8 名字**：IMAP 服务器返回的 modified UTF-7（RFC 3501 §5.1.3，如 `&XfJT0ZAB-`）已在核心层解码成 `已发送`，可直接显示、可按名字匹配。
+
+### `folder.list`
+
+参数：`{"accountId": "acc_xxx"}`
+
+结果：
+
+```json
+{"folders": [{"name": "已发送", "delimiter": "/", "flags": ["\\HasNoChildren"]}]}
+```
+
+- 只读本地 `folders` 表（`account.test` 成功时会落库），**不联网**。
+- `name` 是解码后的 UTF-8 名字，与 `account.test` 返回的一致；`delimiter` 可能是空串（服务器回 `NIL` 时）。
+- 账号不存在返回 `NOT_FOUND`；账号存在但还没有文件夹记录（从没成功跑过 `account.test`）返回空数组 `{"folders": []}`。
 
 ### `sync.status`
 
@@ -143,6 +158,7 @@ POP3 结果：
 ```
 
 - `folder` 缺省 `INBOX`；`limit` 缺省 50，上限 200（一次同步最多拉多少封）。
+- `folder` 用**解码后的 UTF-8 名字**（例如 `已发送`），核心层在发 `SELECT` / `STATUS` 前再编码成 modified UTF-7。
 - POP3 账号忽略 `folder`，`uidValidity` 固定 0。
 
 结果：

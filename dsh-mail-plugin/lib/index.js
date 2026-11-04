@@ -670,6 +670,11 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('account.test', { id }))
     })
 
+    route('/folders', async (body) => {
+      const accountId = requireText(body.accountId, 'accountId')
+      return requireCoreResult(await callCore('folder.list', { accountId }))
+    })
+
     route('/messages', async (body) => {
       const params = {}
       if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()

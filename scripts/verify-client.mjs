@@ -395,6 +395,50 @@ function runRealReactPass() {
     const noSelectionMarkup = renderToStaticMarkup(h(views.MessageDetail, { t, message: null }))
     check(noSelectionMarkup.includes('t:mail.selectMessage'), '[真实渲染] 未选中时应显示占位')
 
+    // 引用拆分与气泡
+    const quotedBody = [
+      '这是当前这封邮件的新内容。',
+      '',
+      '------------------ 原始邮件 ------------------',
+      '发件人: "Serena SONG" <s@b.com>',
+      '发送时间: 2026年10月9日 21:25',
+      '收件人: me@b.com',
+      '主题: Re: 测试',
+      '',
+      '这是被引用的历史内容。',
+      '',
+      'QUOTED-TAIL-MARKER 引用末尾的独有内容',
+    ].join('\n')
+    const segments = views.splitQuoted(quotedBody)
+    check(segments.length === 2, `[拆分] 应切成 2 段，实际 ${segments.length}`)
+    check(segments[0] && segments[0].quoted === false && segments[0].body.includes('新内容'), '[拆分] 第 0 段是当前邮件')
+    check(segments[1] && segments[1].quoted === true, '[拆分] 第 1 段应标记为引用')
+    check(segments[1] && String(segments[1].header.from).includes('Serena'), '[拆分] 应解析出引用发件人')
+    check(segments[1] && String(segments[1].header.date).includes('2026'), '[拆分] 应解析出引用日期')
+    check(segments[1] && segments[1].body.includes('被引用的历史内容'), '[拆分] 引用正文应保留')
+    check(!(segments[1] && segments[1].body.includes('发件人:')), '[拆分] 头部不应混进正文')
+
+    const bubbleMarkup = renderToStaticMarkup(
+      h(views.ThreadBubbles, {
+        t,
+        message: { id: 'm1', text: quotedBody, fromAddr: 'me@b.com', date: '2026-11-04' },
+        accountAddress: 'me@b.com',
+      }),
+    )
+    check(bubbleMarkup.includes('新内容'), '[气泡] 最新一封应展开')
+    check(!bubbleMarkup.includes('QUOTED-TAIL-MARKER'), '[气泡] 历史引用默认折叠（只给预览，不渲染全文）')
+    check(bubbleMarkup.includes('t:mail.clickToExpand'), '[气泡] 折叠气泡应有展开提示')
+    check(bubbleMarkup.includes('Serena'), '[气泡] 折叠时仍显示对方与时间')
+
+    // 发件箱页签位置：待跟进 < 发件箱 < AI 工作台
+    const todoAt = pageMarkup.indexOf('t:mail.todo')
+    const sentAt = pageMarkup.indexOf('t:mail.sent')
+    const aiAt = pageMarkup.indexOf('t:mail.ai')
+    check(todoAt >= 0 && sentAt > todoAt && aiAt > sentAt, '[真实渲染] 发件箱应位于待跟进与 AI 工作台之间')
+
+    const sentMarkup = renderToStaticMarkup(h(views.SentView, { t, status: statusPayload }))
+    check(sentMarkup.includes('t:mail.sent'), '[真实渲染] 发件箱页应渲染')
+
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
     for (const key of ['kbContacts', 'kbCompanies', 'kbProjects', 'kbFiles']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)

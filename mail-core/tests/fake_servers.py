@@ -307,6 +307,7 @@ class FakeImapServer(_LoopbackServer):
         messages: list[bytes] | None = None,
         *,
         uidvalidity: int = 12345,
+        folder_lines: list[bytes] | None = None,
     ) -> None:
         super().__init__()
         self.messages = (
@@ -317,6 +318,12 @@ class FakeImapServer(_LoopbackServer):
             ]
         )
         self.uidvalidity = int(uidvalidity)
+        # Raw ``* LIST`` payloads; the default is the single INBOX line.
+        self.folder_lines = (
+            [bytes(line) for line in folder_lines]
+            if folder_lines is not None
+            else [b'* LIST (\\HasNoChildren) "/" INBOX\r\n']
+        )
         self.logins: list[tuple[str, str]] = []
         self.selected: list[tuple[str, bool]] = []
 
@@ -386,10 +393,8 @@ class FakeImapServer(_LoopbackServer):
                         f"{suffix} {command} completed".strip(),
                     )
                 elif command == "LIST":
-                    self._send(
-                        connection,
-                        b'* LIST (\\HasNoChildren) "/" INBOX\r\n',
-                    )
+                    for line in self.folder_lines:
+                        self._send(connection, line)
                     self._ok(connection, tag, "LIST completed")
                 elif command == "UID":
                     self._handle_uid(connection, tag, arguments)

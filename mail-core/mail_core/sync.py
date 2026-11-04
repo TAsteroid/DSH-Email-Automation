@@ -124,9 +124,10 @@ def run_sync(
 # -- IMAP ------------------------------------------------------------------
 
 
-def _read_uidvalidity(connection, folder: str) -> Optional[int]:
+def _read_uidvalidity(connection, mailbox: str) -> Optional[int]:
     """Read UIDVALIDITY from the SELECT/EXAMINE response.
 
+    ``mailbox`` is the wire token (see :func:`imap_client.encode_mailbox`).
     Falls back to ``STATUS`` for servers that do not include it untagged.
     Returns ``None`` when the server refuses to report one.
     """
@@ -143,7 +144,7 @@ def _read_uidvalidity(connection, folder: str) -> Optional[int]:
             except (TypeError, ValueError):
                 continue
     try:
-        status, data = connection.status(folder, "(UIDVALIDITY)")
+        status, data = connection.status(mailbox, "(UIDVALIDITY)")
         if status == "OK":
             match = _UIDVALIDITY_IN_STATUS.search(_text(data))
             if match:
@@ -210,6 +211,9 @@ def _sync_imap(
     uidvalidity = int(previous_uidvalidity or 0)
     fetched = stored = skipped = 0
     connection = None
+    # ``folder`` is the decoded name used by the database and the UI; the
+    # server only accepts its modified UTF-7 (optionally quoted) form.
+    wire_folder = imap_client.encode_mailbox(folder)
 
     try:
         connection = imap_client.connect(
@@ -225,7 +229,7 @@ def _sync_imap(
             ) from None
 
         try:
-            status, data = connection.select(folder)
+            status, data = connection.select(wire_folder)
         except _IMAP_FAILURES as exc:
             raise imap_client.ImapError(
                 f"SELECT {folder} failed: {_redact(exc, password)}"
@@ -233,7 +237,7 @@ def _sync_imap(
         if status != "OK":
             raise imap_client.ImapError(f"SELECT {folder} failed: {_text(data)}")
 
-        server_uidvalidity = _read_uidvalidity(connection, folder)
+        server_uidvalidity = _read_uidvalidity(connection, wire_folder)
         uidvalidity_reset = (
             server_uidvalidity is not None
             and previous_uidvalidity is not None

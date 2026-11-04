@@ -150,6 +150,7 @@ class Service:
             "account.add": self._account_add,
             "account.remove": self._account_remove,
             "account.test": self._account_test,
+            "folder.list": self._folder_list,
             "sync.status": self._sync_status,
             "sync.run": self._sync_run,
             "sync.reset": self._sync_reset,
@@ -296,6 +297,21 @@ class Service:
                 account["smtpSecurity"],
             )
         return result
+
+    # -- folders -----------------------------------------------------------
+
+    def _folder_list(self, params: dict) -> dict:
+        """Read the cached folder list of one account (no network access).
+
+        The list is filled by ``account.test``; an account that has never
+        been tested successfully simply has no rows yet, which is an empty
+        list rather than an error.  Names are stored decoded, so callers can
+        match ``已发送`` directly.
+        """
+        account_id = _require_str(params, "accountId")
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+        return {"folders": self.store.list_folders(account_id)}
 
     # -- sync --------------------------------------------------------------
 
