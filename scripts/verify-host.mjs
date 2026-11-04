@@ -119,7 +119,15 @@ function handleMethod(method, params) {
     return { accountId: params.accountId, folder: params.folder ?? 'INBOX', removed: 3 }
   }
   if (method === 'folder.list') {
-    return { folders: [{ name: '已发送', delimiter: '/', flags: [] }] }
+    return {
+      folders: [
+        { name: 'INBOX', delimiter: '/', flags: [] },
+        { name: '已发送', delimiter: '/', flags: [] },
+        { name: '草稿', delimiter: '/', flags: [] },
+        { name: '已删除邮件', delimiter: '/', flags: [] },
+        { name: '垃圾邮件', delimiter: '/', flags: [] },
+      ],
+    }
   }
   if (method === 'message.search') {
     return { total: 1, messages: [{ id: 'msg_1', subject: '合同确认', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', snippet: '…«合同»…' }] }
@@ -612,12 +620,11 @@ check(syncAllRoute && syncAllRoute.status === 200, `sync/all 应 200，实际 ${
 if (syncAllRoute && syncAllRoute.body) {
   const parsed = JSON.parse(syncAllRoute.body)
   check(parsed.value.skipped === false, 'sync/all 应真正执行')
-  check(parsed.value.accounts.length === 2, 'sync/all 应同步 INBOX 与已发送两个文件夹')
+  check(parsed.value.accounts.length === 5, `sync/all 应同步 5 个文件夹，实际 ${parsed.value.accounts.length}`)
   const foldersSynced = parsed.value.accounts.map((entry) => entry.folder)
-  check(
-    foldersSynced.includes('INBOX') && foldersSynced.includes('已发送'),
-    `sync/all 应覆盖 INBOX 与已发送，实际 ${JSON.stringify(foldersSynced)}`,
-  )
+  for (const expected of ['INBOX', '已发送', '草稿', '已删除邮件', '垃圾邮件']) {
+    check(foldersSynced.includes(expected), `sync/all 应覆盖 ${expected}`)
+  }
   check(parsed.value.accounts.every((entry) => entry.stored === 2), 'sync/all 应透传 stored 计数')
 }
 

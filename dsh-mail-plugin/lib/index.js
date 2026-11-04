@@ -228,6 +228,28 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 自动同步覆盖的文件夹：收件箱、发件箱、草稿箱、已删除、垃圾邮件。 */
+  const AUTO_SYNC_PATTERNS = [/^INBOX$/i, /sent|已发送/i, /draft|草稿/i, /deleted|trash|已删除|废纸/i, /junk|spam|垃圾/i]
+
+  /** 按服务器返回的真实文件夹名挑出要同步的那些。 */
+  async function autoSyncFolders(accountId) {
+    let names = []
+    try {
+      const folders = await core.request('folder.list', { accountId })
+      names = (folders?.folders ?? []).map((folder) => folder.name || '')
+    } catch {
+      names = []
+    }
+    const targets = []
+    for (const pattern of AUTO_SYNC_PATTERNS) {
+      const found = names.find((name) => pattern.test(name))
+      if (found && !targets.includes(found)) targets.push(found)
+    }
+    if (targets.length === 0) return ['INBOX']
+    if (!targets.some((name) => /^INBOX$/i.test(name))) targets.unshift('INBOX')
+    return targets
+  }
+
   /** 发送成功后把「已发送」补同步一次，否则界面上看不到刚发出的信。 */
   async function syncSentFolders() {
     try {
@@ -263,10 +285,8 @@ export function apply(ctx, config) {
       const list = await core.request('account.list', {})
       for (const account of list?.accounts ?? []) {
         if (account.enabled === false) continue
-        // 收件箱 + 已发送：发件箱页签也要跟着更新，否则刚发出的信看不到
-        const targets = ['INBOX']
-        const sent = await findSentFolder(account.id)
-        if (sent && !targets.includes(sent)) targets.push(sent)
+        // 收件箱 + 发件箱 + 草稿 + 已删除 + 垃圾邮件：各页签都要跟着更新
+        const targets = await autoSyncFolders(account.id)
         for (const folder of targets) {
           try {
             const value = await core.request(
