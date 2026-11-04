@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Mail",
+    "description": "An email workspace for IMAP/SMTP sync, AI analysis, drafts and approvals, exposing mail tools to the DSH Agent."
+  }
+}

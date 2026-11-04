@@ -1,0 +1,10 @@
+{
+  "name": "dsh-mail-plugin-verify",
+  "private": true,
+  "type": "module",
+  "description": "渲染测试依赖，仅用于校验 dsh-mail-plugin 的 client 半部；不属于插件包。",
+  "devDependencies": {
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  }
+}

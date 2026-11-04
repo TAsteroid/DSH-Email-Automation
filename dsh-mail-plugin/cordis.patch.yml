@@ -1,0 +1,13 @@
+# dsh-mail-plugin — 邮箱管理（Phase 0 最小可运行）
+#
+# 本包只插入一行 Host 插件。该行负责：
+#   1. 注册 Agent 工具 mail_status（只读，返回同步状态占位）
+#   2. 注册本机 HTTP 通道 /api/dsh-mail/*（UI 与 Mail Core 的唯一数据通道）
+#   3. 启动进程内轮询定时器（验证 Host 侧后台能力）
+#
+# 配置（可选，行 config 交给 apply 的第二个参数；缺省时用代码内默认值）：
+#   backendUrl: http://127.0.0.1:8765   # Mail Core 基址（Phase 1 起使用）
+#   pollIntervalMs: 300000              # 轮询间隔，最小 60000
+- insert:
+    - id: dsh-mail-plugin
+      name: dsh-mail-plugin

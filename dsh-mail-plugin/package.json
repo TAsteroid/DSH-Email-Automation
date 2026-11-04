@@ -1,0 +1,35 @@
+{
+  "name": "dsh-mail-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 自动化邮箱管理插件：Host 工具 + 本机 HTTP 通道 + 邮箱工作区面板（Phase 0 最小可运行版本）。",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    },
+    "engines": {
+      "dsh": ">=0.2.1-rc.5"
+    }
+  }
+}

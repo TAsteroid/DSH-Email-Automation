@@ -1,0 +1,1687 @@
+/**
+ * dsh-mail-plugin — Client half
+ *
+ * 浏览器全局脚本，**不是 ESM**：不要写 import / export。
+ * 注册一个一级工作区：`main` keyed 面板 + `sidebar.panellist` 图标入口，
+ * 两者 id 必须相同（宿主用侧栏 id 去 main 里取面板）。
+ * 证据：docs/compat/ui.md 第 2 节。
+ *
+ * 页面结构：
+ *   收件箱    三栏（账户 / 列表 / 阅读 + AI 分析），两条分隔条可拖动
+ *   待跟进    两栏（待办标题 / 详情）
+ *   AI 工作台 两栏（事项列表：待处理 + 已处理；右侧卡片横向滑动，上内容下对话）
+ *   草稿箱    两栏（草稿标题 / 详情）
+ *   审批中心  两栏（待审批 + 审批历史 / 详情）
+ *   知识库    两栏（联系人 / 公司 / 项目 / 文件类型 分类 / 条目）
+ *   设置      收窄的单栏
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-mail-plugin',
+  factory(require) {
+    const React = require('react')
+    const h = React.createElement
+
+    const NS = 'mail'
+    const PANEL_ID = 'mail-workspace'
+    const API = '/api/dsh-mail'
+
+    // ---- 列宽 --------------------------------------------------------------
+    const LAYOUT_KEY = 'dsh-mail:layouts'
+    const LEGACY_LAYOUT_KEY = 'dsh-mail:layout'
+    const RAIL_DEFAULT = 200
+    const RAIL_MIN = 140
+    const RAIL_MAX = 360
+    const LIST_DEFAULT = 320
+    const LIST_MIN = 240
+    const LIST_MAX = 640
+    const READING_MIN = 320
+    const DETAIL_MIN = 360
+    const HANDLE = 5
+
+    const RAIL_SPEC = { initial: RAIL_DEFAULT, min: RAIL_MIN, max: RAIL_MAX }
+    const LIST_SPEC = { initial: LIST_DEFAULT, min: LIST_MIN, max: LIST_MAX }
+    const PANE_SPEC = { initial: 300, min: 220, max: 520 }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value))
+    }
+
+    /** 两栏页面：左列宽度夹进 [min, min(max, 容器宽 - 右列下限)]。 */
+    function clampPane(value, spec, minRight, total) {
+      const available = total > 0 ? total - minRight - HANDLE : spec.max
+      return Math.round(clamp(value, spec.min, Math.max(spec.min, Math.min(spec.max, available))))
+    }
+
+    /** 收件箱三栏：左列还要给中间列和阅读区留位置，语义与 clampPane 略有不同。 */
+    function clampWidth(which, value, otherWidth, total) {
+      const isRail = which === 'rail'
+      const spec = isRail ? RAIL_SPEC : LIST_SPEC
+      const available = total > 0 ? total - otherWidth - READING_MIN - HANDLE * 2 : spec.max
+      return Math.round(clamp(value, spec.min, Math.max(spec.min, Math.min(spec.max, available))))
+    }
+
+    function readStoredWidths() {
+      try {
+        const raw = window.localStorage.getItem(LAYOUT_KEY)
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          if (parsed && typeof parsed === 'object') return parsed
+        }
+        // 兼容上一版只存 { rail, list } 的键
+        const legacy = window.localStorage.getItem(LEGACY_LAYOUT_KEY)
+        if (legacy) {
+          const parsed = JSON.parse(legacy)
+          if (parsed && typeof parsed === 'object') return { rail: parsed.rail, list: parsed.list }
+        }
+      } catch {
+        // 存储不可用时退回默认宽度
+      }
+      return {}
+    }
+
+    function storeWidth(name, width) {
+      try {
+        const all = readStoredWidths()
+        all[name] = width
+        window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(all))
+      } catch {
+        // 写不进去不影响使用
+      }
+    }
+
+    function storedWidth(name, spec) {
+      const stored = readStoredWidths()[name]
+      return Number.isFinite(stored) ? clamp(stored, spec.min, spec.max) : spec.initial
+    }
+
+    // ---- 文案 --------------------------------------------------------------
+    const messages = {
+      zh: {
+        nav: '邮箱',
+        title: '邮箱管理',
+        inbox: '收件箱',
+        todo: '待跟进',
+        ai: 'AI 工作台',
+        drafts: '草稿箱',
+        approvals: '审批中心',
+        knowledge: '知识库',
+        settings: '设置',
+        accounts: '账户',
+        resize: '调整宽度',
+        resizeHint: '拖动调整宽度，双击恢复默认',
+        noAccount: '尚未配置邮箱账户',
+        noAccountHint: 'Phase 1 接入 IMAP 后，账户与文件夹会显示在这里。',
+        messages: '邮件',
+        noMessages: '暂无邮件',
+        noMessagesHint: '同步接通后，这里显示邮件列表：发件人、主题、摘要、标签。',
+        selectMessage: '选择一封邮件',
+        selectMessageHint: '右侧显示正文、线程和 AI 分析结果。',
+        aiPanel: 'AI 分析',
+        aiPanelHint: '摘要、分类、实体、金额与待办会显示在这里。',
+        emptyList: '暂无',
+        pendingAi: '待处理',
+        todoDetailTitle: '待办详情',
+        todoDetailHint: '选中左侧待办后，这里显示事项内容、来源邮件、承诺期限和负责人。',
+        draftDetailTitle: '草稿详情',
+        draftDetailHint: '收件人、主题、正文预览与审批状态显示在这里。',
+        approvalPending: '待审批',
+        approvalHistory: '审批历史',
+        approvalHistoryEmpty: '暂无审批历史',
+        approvalHistoryHint: '已批准或已拒绝的操作会留在这里。',
+        back: '返回',
+        approvalDetailTitle: '审批详情',
+        approvalDetailHint: '操作类型、目标账户、收件人、正文、附件、影响范围与有效期显示在这里。',
+        kbContacts: '联系人',
+        kbCompanies: '公司',
+        kbProjects: '项目',
+        kbFiles: '文件类型',
+        kbDetailTitle: '知识库条目',
+        kbDetailHint: '选择左侧分类后，这里显示该分类下的条目。',
+        aiQueue: '待处理',
+        aiDone: '已处理',
+        aiEmptyTitle: '暂无待处理事项',
+        aiEmptyHint: '新邮件经 AI 处理后，事项会以卡片出现在这里：上方是待处理内容，下方是与 Agent 的对话栏。',
+        aiDoneEmpty: '暂无已处理事项',
+        prevCard: '上一张',
+        nextCard: '下一张',
+        cardPendingContent: '待处理内容',
+        cardChat: '与 Agent 的对话',
+        cardChatEmpty: '还没有对话',
+        cardChatPlaceholder: '让 Agent 处理这件事…',
+        actDone: '处理完成',
+        actLater: '稍后',
+        actDelete: '删除',
+        backend: '邮件服务',
+        connected: '已连接',
+        offline: '未连接',
+        coreState: 'Mail Core',
+        coreVersion: 'Core 版本',
+        coreDb: '数据库',
+        coreDataDir: '数据目录',
+        coreError: 'Core 错误',
+        accountsEmpty: '还没有配置任何邮箱账户',
+        accountAdd: '添加邮箱账户',
+        accountAddress: '邮箱地址',
+        accountDisplayName: '显示名称（可选）',
+        accountHostImap: 'IMAP 服务器',
+        accountHostPop3: 'POP3 服务器',
+        accountImapPort: '端口',
+        accountSecurity: '加密方式',
+        protocolLabel: '收信协议',
+        protocolImap: 'IMAP',
+        protocolPop3: 'POP3',
+        smtpSection: '发信（SMTP）',
+        smtpHost: 'SMTP 服务器',
+        smtpPort: 'SMTP 端口',
+        smtpSecurity: 'SMTP 加密',
+        smtpOptionalHint: '可以留空：不填就只能收信、不能发信。',
+        accountUsername: '用户名',
+        accountPassword: '密码 / 应用专用密码',
+        passwordHint: '保存时用 Windows DPAPI 加密，插件进程拿不到明文。',
+        accountSubmit: '保存账户',
+        accountSubmitting: '保存中…',
+        accountSaved: '账户已保存',
+        accountFailed: '保存失败',
+        accountTest: '测试连接',
+        accountTesting: '连接中…',
+        accountRemove: '删除',
+        accountTestOk: '连接成功，文件夹数',
+        accountTestFailed: '连接失败',
+        accountNoCredential: '无凭据',
+        securitySsl: 'SSL',
+        securityStarttls: 'STARTTLS',
+        securityNone: '不加密',
+        loading: '加载中…',
+        failed: '加载失败',
+        retry: '重试',
+        phase0: 'Phase 0 骨架：入口与数据通道已打通，邮件同步尚未实现。',
+        settingsBackend: 'Mail Core 地址',
+        settingsPoll: '轮询间隔',
+        settingsCreds: '凭据存储',
+        settingsCredsValue: 'Windows DPAPI（由 Mail Core 管理）',
+        settingsAccounts: '邮箱账户',
+        settingsAccountsValue: '尚未配置',
+        minute: '分钟',
+      },
+      en: {
+        nav: 'Mail',
+        title: 'Mail',
+        inbox: 'Inbox',
+        todo: 'Follow-ups',
+        ai: 'AI workspace',
+        drafts: 'Drafts',
+        approvals: 'Approvals',
+        knowledge: 'Knowledge',
+        settings: 'Settings',
+        accounts: 'Accounts',
+        resize: 'Resize',
+        resizeHint: 'Drag to resize, double-click to reset',
+        noAccount: 'No mailbox configured',
+        noAccountHint: 'Accounts and folders appear here once IMAP is wired up in Phase 1.',
+        messages: 'Messages',
+        noMessages: 'No messages',
+        noMessagesHint: 'Once syncing works, this list shows sender, subject, summary and labels.',
+        selectMessage: 'Select a message',
+        selectMessageHint: 'Body, thread and AI analysis render on the right.',
+        aiPanel: 'AI analysis',
+        aiPanelHint: 'Summary, category, entities, amounts and action items appear here.',
+        emptyList: 'None',
+        pendingAi: 'Pending',
+        todoDetailTitle: 'Follow-up detail',
+        todoDetailHint: 'Pick a follow-up on the left to see the item, its source mail, due date and owner.',
+        draftDetailTitle: 'Draft detail',
+        draftDetailHint: 'Recipients, subject, body preview and approval state appear here.',
+        approvalPending: 'Awaiting approval',
+        approvalHistory: 'Approval history',
+        approvalHistoryEmpty: 'No approval history',
+        approvalHistoryHint: 'Approved and rejected actions stay here.',
+        back: 'Back',
+        approvalDetailTitle: 'Approval detail',
+        approvalDetailHint: 'Action type, target account, recipients, body, attachments, impact and expiry appear here.',
+        kbContacts: 'Contacts',
+        kbCompanies: 'Companies',
+        kbProjects: 'Projects',
+        kbFiles: 'File types',
+        kbDetailTitle: 'Knowledge entries',
+        kbDetailHint: 'Pick a category on the left to list its entries here.',
+        aiQueue: 'Pending',
+        aiDone: 'Done',
+        aiEmptyTitle: 'Nothing pending',
+        aiEmptyHint: 'After AI processes new mail, items appear here as cards: pending content on top, a chat with the Agent below.',
+        aiDoneEmpty: 'Nothing processed yet',
+        prevCard: 'Previous',
+        nextCard: 'Next',
+        cardPendingContent: 'Pending content',
+        cardChat: 'Chat with the Agent',
+        cardChatEmpty: 'No messages yet',
+        cardChatPlaceholder: 'Ask the Agent to handle this…',
+        actDone: 'Mark done',
+        actLater: 'Later',
+        actDelete: 'Delete',
+        backend: 'Mail service',
+        connected: 'connected',
+        offline: 'offline',
+        coreState: 'Mail Core',
+        coreVersion: 'Core version',
+        coreDb: 'Database',
+        coreDataDir: 'Data directory',
+        coreError: 'Core error',
+        accountsEmpty: 'No mailbox accounts yet',
+        accountAdd: 'Add mailbox account',
+        accountAddress: 'Address',
+        accountDisplayName: 'Display name (optional)',
+        accountHostImap: 'IMAP host',
+        accountHostPop3: 'POP3 host',
+        accountImapPort: 'Port',
+        accountSecurity: 'Encryption',
+        protocolLabel: 'Incoming protocol',
+        protocolImap: 'IMAP',
+        protocolPop3: 'POP3',
+        smtpSection: 'Sending (SMTP)',
+        smtpHost: 'SMTP host',
+        smtpPort: 'SMTP port',
+        smtpSecurity: 'SMTP encryption',
+        smtpOptionalHint: 'Optional: leave it empty to read mail without sending.',
+        accountUsername: 'Username',
+        accountPassword: 'Password / app password',
+        passwordHint: 'Encrypted with Windows DPAPI before storage; the plugin process never sees the plaintext.',
+        accountSubmit: 'Save account',
+        accountSubmitting: 'Saving…',
+        accountSaved: 'Account saved',
+        accountFailed: 'Save failed',
+        accountTest: 'Test connection',
+        accountTesting: 'Connecting…',
+        accountRemove: 'Remove',
+        accountTestOk: 'Connected, folders',
+        accountTestFailed: 'Connection failed',
+        accountNoCredential: 'no credential',
+        securitySsl: 'SSL',
+        securityStarttls: 'STARTTLS',
+        securityNone: 'None',
+        polls: 'polls',
+        loading: 'Loading…',
+        failed: 'Failed to load',
+        retry: 'Retry',
+        phase0: 'Phase 0 skeleton: entry point and data channel work; mail sync is not implemented yet.',
+        settingsBackend: 'Mail Core URL',
+        settingsPoll: 'Poll interval',
+        settingsCreds: 'Credential storage',
+        settingsCredsValue: 'Windows DPAPI (managed by Mail Core)',
+        settingsAccounts: 'Mailbox accounts',
+        settingsAccountsValue: 'Not configured',
+        minute: 'min',
+      },
+    }
+
+    const TABS = [
+      ['inbox', 'inbox'],
+      ['todo', 'todo'],
+      ['ai', 'ai'],
+      ['drafts', 'drafts'],
+      ['knowledge', 'knowledge'],
+      ['settings', 'settings'],
+    ]
+
+    const CARD_WIDTH = 520
+
+    // ---- 样式（只用主题 token） --------------------------------------------
+    const styles = {
+      panel: {
+        boxSizing: 'border-box',
+        height: '100%',
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        color: 'var(--dsw-alias-label-primary)',
+        background: 'var(--dsw-alias-bg-base)',
+        fontFamily: 'var(--dsw-font-family)',
+      },
+      topbar: { flex: 'none', display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px 10px' },
+      title: { fontSize: 16, fontWeight: 600, margin: 0 },
+      spacer: { flex: 1 },
+      pill: (ok) => ({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '3px 10px',
+        borderRadius: 999,
+        fontSize: 12,
+        color: 'var(--dsw-alias-label-secondary)',
+        background: 'var(--dsw-alias-bg-layer-2)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+      }),
+      dot: (ok) => ({
+        width: 7,
+        height: 7,
+        borderRadius: 4,
+        background: ok ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
+      }),
+      badge: (active) => ({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '3px 10px',
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 500,
+        color: active ? '#fff' : 'var(--dsw-alias-label-secondary)',
+        background: active ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-bg-layer-2)',
+        border: `1px solid ${active ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-border-l2)'}`,
+      }),
+      iconBtn: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 28,
+        height: 28,
+        borderRadius: 'var(--dsw-radius-sm)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-secondary)',
+        cursor: 'pointer',
+      },
+      nav: { flex: 'none', display: 'flex', gap: 2, padding: '0 20px', borderBottom: '1px solid var(--dsw-alias-border-l2)' },
+      tab: (active) => ({
+        background: 'transparent',
+        border: 'none',
+        padding: '8px 12px',
+        cursor: 'pointer',
+        fontSize: 13,
+        color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+        fontWeight: active ? 500 : 400,
+        boxShadow: active ? 'inset 0 -2px 0 var(--dsw-alias-state-business-primary)' : 'none',
+      }),
+      body: { flex: 1, minHeight: 0, display: 'flex' },
+      handle: {
+        width: HANDLE,
+        flex: 'none',
+        cursor: 'col-resize',
+        touchAction: 'none',
+        display: 'flex',
+        alignItems: 'stretch',
+        justifyContent: 'center',
+        background: 'transparent',
+      },
+      handleLine: (active) => ({
+        width: 1,
+        background: active ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-border-l2)',
+        transition: 'background 120ms',
+      }),
+      column: { flex: 'none', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+      rail: { flex: 'none', overflowY: 'auto', padding: '12px 8px' },
+      railTitle: {
+        fontSize: 11,
+        letterSpacing: '0.04em',
+        textTransform: 'uppercase',
+        color: 'var(--dsw-alias-label-tertiary)',
+        padding: '4px 8px 8px',
+      },
+      railItem: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '6px 8px',
+        fontSize: 13,
+        borderRadius: 'var(--dsw-radius-sm)',
+        color: 'var(--dsw-alias-label-secondary)',
+      },
+      list: { flex: 'none', overflowY: 'auto', display: 'flex', flexDirection: 'column' },
+      listColumn: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' },
+      listHead: {
+        flex: 'none',
+        padding: '12px 16px 8px',
+        fontSize: 11,
+        letterSpacing: '0.04em',
+        textTransform: 'uppercase',
+        color: 'var(--dsw-alias-label-tertiary)',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+      },
+      listCount: { color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
+      listItem: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+        padding: '9px 16px',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+        cursor: 'pointer',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 13,
+        textAlign: 'left',
+        border: 'none',
+        width: '100%',
+      },
+      listItemMeta: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' },
+      detail: { flex: 1, minWidth: 0, overflowY: 'auto', padding: '16px 20px' },
+      paneHeader: {
+        flex: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 16px',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+      },
+      paneHeaderText: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' },
+      reading: { flex: 1, minWidth: 0, overflowY: 'auto', padding: '16px 20px' },
+      empty: { margin: 'auto', textAlign: 'center', padding: '40px 24px', color: 'var(--dsw-alias-label-tertiary)' },
+      emptyIcon: {
+        width: 40,
+        height: 40,
+        margin: '0 auto 12px',
+        borderRadius: 10,
+        border: '1px dashed var(--dsw-alias-border-l3)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'var(--dsw-alias-label-tertiary)',
+      },
+      emptyTitle: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', margin: '0 0 4px' },
+      emptyHint: { fontSize: 12, margin: 0, lineHeight: 1.6 },
+      card: {
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-md)',
+        background: 'var(--dsw-alias-bg-layer-1)',
+        padding: 16,
+        marginBottom: 12,
+      },
+      row: {
+        display: 'flex',
+        alignItems: 'baseline',
+        justifyContent: 'space-between',
+        gap: 16,
+        padding: '7px 0',
+        fontSize: 13,
+      },
+      rowKey: { color: 'var(--dsw-alias-label-secondary)' },
+      rowVal: { color: 'var(--dsw-alias-label-primary)', textAlign: 'right' },
+      sectionTitle: { fontSize: 13, fontWeight: 500, margin: '0 0 10px' },
+      muted: { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, margin: '4px 0 0' },
+      error: { color: 'var(--dsw-alias-state-error-primary)', fontSize: 13, margin: '0 0 8px' },
+      errBox: { padding: '16px 20px' },
+      btn: {
+        marginTop: 8,
+        padding: '5px 12px',
+        borderRadius: 'var(--dsw-radius-sm)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 12,
+        cursor: 'pointer',
+      },
+      btnSmall: {
+        padding: '3px 10px',
+        borderRadius: 'var(--dsw-radius-sm)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-secondary)',
+        fontSize: 11,
+        cursor: 'pointer',
+      },
+      btnDisabled: {
+        padding: '3px 10px',
+        borderRadius: 'var(--dsw-radius-sm)',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-tertiary)',
+        fontSize: 11,
+        cursor: 'default',
+        opacity: 0.6,
+      },
+      carousel: {
+        flex: 1,
+        minHeight: 0,
+        display: 'flex',
+        gap: 12,
+        overflowX: 'auto',
+        overflowY: 'hidden',
+        padding: '16px 20px',
+        scrollSnapType: 'x mandatory',
+      },
+      aiCard: {
+        width: CARD_WIDTH,
+        flex: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-md)',
+        background: 'var(--dsw-alias-bg-layer-1)',
+        overflow: 'hidden',
+        scrollSnapAlign: 'start',
+      },
+      aiCardHead: {
+        flex: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 14px',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+      },
+      aiCardTitle: { fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      aiCardTop: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '12px 14px' },
+      aiCardBottom: {
+        flex: '0 0 46%',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        borderTop: '1px solid var(--dsw-alias-border-l2)',
+        background: 'var(--dsw-alias-bg-base)',
+      },
+      chatList: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px 14px' },
+      chatInputRow: { flex: 'none', display: 'flex', gap: 8, padding: '10px 14px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+      input: {
+        flex: 1,
+        background: 'transparent',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-sm)',
+        padding: '6px 10px',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 12,
+      },
+      settingsBox: { maxWidth: 720, margin: '0 auto' },
+      railPanel: {
+        width: 280,
+        flex: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        borderLeft: '1px solid var(--dsw-alias-border-l2)',
+        background: 'var(--dsw-alias-bg-layer-1)',
+      },
+      railHeader: {
+        flex: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '10px 12px',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+      },
+      railHeaderTitle: { fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
+      railCount: {
+        minWidth: 18,
+        padding: '0 6px',
+        borderRadius: 999,
+        fontSize: 11,
+        lineHeight: '16px',
+        textAlign: 'center',
+        color: '#fff',
+        background: 'var(--dsw-alias-state-error-primary)',
+      },
+      railBody: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 0' },
+      railEmpty: { padding: '16px 14px', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 },
+      accountRow: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 0',
+        borderTop: '1px solid var(--dsw-alias-border-l1)',
+      },
+      dangerBtn: {
+        padding: '3px 10px',
+        borderRadius: 'var(--dsw-radius-sm)',
+        border: '1px solid var(--dsw-alias-state-error-primary)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-state-error-primary)',
+        fontSize: 11,
+        cursor: 'pointer',
+      },
+      formGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
+      formSubhead: {
+        margin: '6px 0 0',
+        paddingTop: 10,
+        borderTop: '1px solid var(--dsw-alias-border-l1)',
+        fontSize: 12,
+        fontWeight: 500,
+        color: 'var(--dsw-alias-label-secondary)',
+      },
+      field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
+      label: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+      textInput: {
+        background: 'transparent',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-sm)',
+        padding: '7px 10px',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 13,
+        fontFamily: 'inherit',
+      },
+    }
+
+    // 原生 <select> 的弹出列表由浏览器绘制，内联样式管不到，只能靠 color-scheme 跟随主题
+    const SELECT_CSS = [
+      '.dsh-mail-select{color-scheme:light;}',
+      'body[data-ds-dark-theme] .dsh-mail-select{color-scheme:dark;}',
+      '.dsh-mail-select option{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
+    ].join('')
+
+    // ---- 数据通道 ----------------------------------------------------------
+    async function call(path, body, signal) {
+      const res = await fetch(API + path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body ?? {}),
+        signal,
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok || json === null || json.ok === false) {
+        throw new Error((json && json.message) || `HTTP ${res.status}`)
+      }
+      return json.value
+    }
+
+    // ---- 图标 --------------------------------------------------------------
+    function MailIcon({ size = 16 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': true,
+        },
+        h('rect', { x: 1.5, y: 3, width: 13, height: 10, rx: 2 }),
+        h('path', { d: 'M2 4l6 4.5L14 4' }),
+      )
+    }
+
+    function RefreshIcon({ size = 14 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': true,
+        },
+        h('path', { d: 'M13.5 8a5.5 5.5 0 1 1-1.7-3.97' }),
+        h('path', { d: 'M13.5 2.5v3h-3' }),
+      )
+    }
+
+    /** 时钟：与宿主「自动化任务」侧栏入口同款字形（描边圆 + 指向 12 与 4 点的指针）。 */
+    function ClockIcon({ size = 14 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': true,
+        },
+        h('circle', { cx: 8, cy: 8, r: 6.1 }),
+        h('path', { d: 'M8 4.5V8l2.6 2.2' }),
+      )
+    }
+
+    /** 返回：左向折角。 */
+    function BackIcon({ size = 14 }) {
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': true,
+        },
+        h('path', { d: 'M9.8 3.4L5.2 8l4.6 4.6' }),
+      )
+    }
+
+    // ---- 基础块 ------------------------------------------------------------
+    function Empty({ title, hint }) {
+      return h(
+        'div',
+        { style: styles.empty },
+        h('div', { style: styles.emptyIcon }, h(MailIcon, { size: 18 })),
+        h('p', { style: styles.emptyTitle }, title),
+        h('p', { style: styles.emptyHint }, hint),
+      )
+    }
+
+    function Row({ label, value }) {
+      return h(
+        'div',
+        { style: styles.row },
+        h('span', { style: styles.rowKey }, label),
+        h('span', { style: styles.rowVal }, value),
+      )
+    }
+
+    function EmptyPane({ title, hint }) {
+      return h(
+        'div',
+        { style: { ...styles.reading, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+        h(Empty, { title, hint }),
+      )
+    }
+
+    /** 两栏布局：左列宽度可拖动，右列吃掉剩余空间。 */
+    function SplitPane({ storageKey, spec, minRight = DETAIL_MIN, label, left, right }) {
+      const containerRef = React.useRef(null)
+      const dragRef = React.useRef(null)
+      const [width, setWidth] = React.useState(() => storedWidth(storageKey, spec))
+      const [dragging, setDragging] = React.useState(false)
+      const [hovered, setHovered] = React.useState(false)
+
+      React.useEffect(() => {
+        if (!dragging) storeWidth(storageKey, width)
+      }, [width, dragging, storageKey])
+
+      // 挂载后按实际容器宽度收一次，避免从宽窗口切到窄窗口时挤掉右侧
+      React.useEffect(() => {
+        const total = containerRef.current ? containerRef.current.clientWidth : 0
+        if (!total) return
+        setWidth((prev) => clampPane(prev, spec, minRight, total))
+      }, [])
+
+      const down = (event) => {
+        if (typeof event.button === 'number' && event.button !== 0) return
+        event.preventDefault()
+        dragRef.current = {
+          startX: event.clientX,
+          startWidth: width,
+          total: containerRef.current ? containerRef.current.clientWidth : 0,
+        }
+        setDragging(true)
+        if (typeof event.currentTarget.setPointerCapture === 'function') {
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId)
+          } catch {
+            // 捕获失败不影响基本拖动
+          }
+        }
+      }
+
+      const move = (event) => {
+        const session = dragRef.current
+        if (!session) return
+        const next = clampPane(session.startWidth + (event.clientX - session.startX), spec, minRight, session.total)
+        setWidth((prev) => (prev === next ? prev : next))
+      }
+
+      const up = (event) => {
+        if (!dragRef.current) return
+        dragRef.current = null
+        setDragging(false)
+        if (typeof event.currentTarget.releasePointerCapture === 'function') {
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          } catch {
+            // 同上
+          }
+        }
+      }
+
+      const nudge = (event) => {
+        const step = event.key === 'ArrowRight' ? 16 : event.key === 'ArrowLeft' ? -16 : 0
+        if (step === 0) return
+        event.preventDefault()
+        const total = containerRef.current ? containerRef.current.clientWidth : 0
+        setWidth((prev) => clampPane(prev + step, spec, minRight, total))
+      }
+
+      return h(
+        'div',
+        {
+          ref: containerRef,
+          style: { display: 'flex', flex: 1, minHeight: 0, userSelect: dragging ? 'none' : undefined },
+        },
+        h('div', { style: { ...styles.column, width } }, left),
+        h(
+          'div',
+          {
+            role: 'separator',
+            'aria-orientation': 'vertical',
+            'aria-label': label,
+            'aria-valuenow': width,
+            tabIndex: 0,
+            title: label,
+            style: styles.handle,
+            onPointerDown: down,
+            onPointerMove: move,
+            onPointerUp: up,
+            onPointerCancel: up,
+            onPointerEnter: () => setHovered(true),
+            onPointerLeave: () => setHovered(false),
+            onDoubleClick: () => setWidth(spec.initial),
+            onKeyDown: nudge,
+          },
+          h('div', { style: styles.handleLine(dragging || hovered) }),
+        ),
+        h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }, right),
+      )
+    }
+
+    /** 左列：分组列表。groups = [{ id, title, items: [{ id, title, meta }] }] */
+    function GroupList({ t, groups, selectedId, onSelect }) {
+      return h(
+        'div',
+        { style: styles.listColumn },
+        groups.map((group, index) =>
+          h(
+            'div',
+            { key: group.id },
+            h(
+              'div',
+              { style: index > 0 ? { ...styles.listHead, borderTop: '1px solid var(--dsw-alias-border-l2)' } : styles.listHead },
+              group.title,
+              h('span', { style: styles.listCount }, group.items.length),
+            ),
+            group.items.length === 0
+              ? h('p', { style: { ...styles.muted, padding: '8px 16px', margin: 0 } }, t('emptyList'))
+              : group.items.map((item) =>
+                  h(
+                    'button',
+                    {
+                      key: item.id,
+                      type: 'button',
+                      'aria-pressed': selectedId === item.id,
+                      onClick: () => onSelect && onSelect(item.id),
+                      style:
+                        selectedId === item.id
+                          ? { ...styles.listItem, background: 'var(--dsw-alias-interactive-bg-hover)' }
+                          : styles.listItem,
+                    },
+                    h('span', null, item.title),
+                    item.meta ? h('span', { style: styles.listItemMeta }, item.meta) : null,
+                  ),
+                ),
+          ),
+        ),
+      )
+    }
+
+    function DetailPane({ t, titleKey, hintKey }) {
+      return h(
+        'div',
+        { style: { ...styles.detail, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+        h(Empty, { title: t(titleKey), hint: t(hintKey) }),
+      )
+    }
+
+    // ---- 收件箱 ------------------------------------------------------------
+    function InboxView({ t, status }) {
+      const accounts = (status && status.accounts) || []
+      const bodyRef = React.useRef(null)
+      const dragRef = React.useRef(null)
+      const [layout, setLayout] = React.useState(() => ({
+        rail: storedWidth('rail', RAIL_SPEC),
+        list: storedWidth('list', LIST_SPEC),
+      }))
+      const [dragging, setDragging] = React.useState(null)
+      const [hovered, setHovered] = React.useState(null)
+
+      React.useEffect(() => {
+        if (dragging === null) {
+          storeWidth('rail', layout.rail)
+          storeWidth('list', layout.list)
+        }
+      }, [layout, dragging])
+
+      React.useEffect(() => {
+        const total = bodyRef.current ? bodyRef.current.clientWidth : 0
+        if (!total) return
+        setLayout((prev) => {
+          const rail = clampWidth('rail', prev.rail, prev.list, total)
+          const list = clampWidth('list', prev.list, rail, total)
+          return rail === prev.rail && list === prev.list ? prev : { rail, list }
+        })
+      }, [])
+
+      const beginDrag = (which) => (event) => {
+        if (typeof event.button === 'number' && event.button !== 0) return
+        event.preventDefault()
+        dragRef.current = {
+          which,
+          startX: event.clientX,
+          startWidth: layout[which],
+          otherWidth: which === 'rail' ? layout.list : layout.rail,
+          total: bodyRef.current ? bodyRef.current.clientWidth : 0,
+        }
+        setDragging(which)
+        if (typeof event.currentTarget.setPointerCapture === 'function') {
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId)
+          } catch {
+            // 捕获失败不影响基本拖动
+          }
+        }
+      }
+
+      const moveDrag = (event) => {
+        const session = dragRef.current
+        if (!session) return
+        const delta = event.clientX - session.startX
+        const next = clampWidth(session.which, session.startWidth + delta, session.otherWidth, session.total)
+        setLayout((prev) => (prev[session.which] === next ? prev : { ...prev, [session.which]: next }))
+      }
+
+      const endDrag = (event) => {
+        if (!dragRef.current) return
+        dragRef.current = null
+        setDragging(null)
+        if (typeof event.currentTarget.releasePointerCapture === 'function') {
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          } catch {
+            // 同上
+          }
+        }
+      }
+
+      const nudge = (which) => (event) => {
+        const step = event.key === 'ArrowRight' ? 16 : event.key === 'ArrowLeft' ? -16 : 0
+        if (step === 0) return
+        event.preventDefault()
+        setLayout((prev) => {
+          const other = which === 'rail' ? prev.list : prev.rail
+          const total = bodyRef.current ? bodyRef.current.clientWidth : 0
+          const next = clampWidth(which, prev[which] + step, other, total)
+          return next === prev[which] ? prev : { ...prev, [which]: next }
+        })
+      }
+
+      const handle = (which) => {
+        const active = dragging === which || (dragging === null && hovered === which)
+        return h(
+          'div',
+          {
+            role: 'separator',
+            'aria-orientation': 'vertical',
+            'aria-label': t('resize'),
+            'aria-valuenow': layout[which],
+            tabIndex: 0,
+            title: t('resizeHint'),
+            style: styles.handle,
+            onPointerDown: beginDrag(which),
+            onPointerMove: moveDrag,
+            onPointerUp: endDrag,
+            onPointerCancel: endDrag,
+            onPointerEnter: () => setHovered(which),
+            onPointerLeave: () => setHovered(null),
+            onDoubleClick: () => setLayout((prev) => ({ ...prev, [which]: which === 'rail' ? RAIL_DEFAULT : LIST_DEFAULT })),
+            onKeyDown: nudge(which),
+          },
+          h('div', { style: styles.handleLine(active) }),
+        )
+      }
+
+      return h(
+        'div',
+        {
+          ref: bodyRef,
+          style: { display: 'flex', flex: 1, minHeight: 0, userSelect: dragging ? 'none' : undefined },
+        },
+        h(
+          'aside',
+          { style: { ...styles.rail, width: layout.rail }, 'aria-label': t('accounts') },
+          h('div', { style: styles.railTitle }, t('accounts')),
+          accounts.length === 0
+            ? h(
+                'div',
+                { style: { padding: '4px 8px' } },
+                h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('noAccount')),
+                h('p', { style: styles.muted }, t('noAccountHint')),
+              )
+            : accounts.map((account) =>
+                h('div', { key: account.id, style: styles.railItem }, h(MailIcon, { size: 14 }), account.address),
+              ),
+        ),
+        handle('rail'),
+        h(
+          'section',
+          { style: { ...styles.list, width: layout.list }, 'aria-label': t('messages') },
+          h('div', { style: styles.listHead }, t('messages')),
+          h(Empty, { title: t('noMessages'), hint: t('noMessagesHint') }),
+        ),
+        handle('list'),
+        h(
+          'section',
+          { style: styles.reading, 'aria-label': t('selectMessage') },
+          h(Empty, { title: t('selectMessage'), hint: t('selectMessageHint') }),
+          h(
+            'div',
+            { style: styles.card },
+            h('p', { style: styles.sectionTitle }, t('aiPanel')),
+            h('p', { style: styles.muted }, t('aiPanelHint')),
+          ),
+        ),
+      )
+    }
+
+    // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
+    function TodoView({ t }) {
+      const [selected, setSelected] = React.useState(null)
+      const groups = [{ id: 'todo', title: t('todo'), items: [] }]
+      return h(SplitPane, {
+        storageKey: 'todo',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
+        right: h(DetailPane, { t, titleKey: 'todoDetailTitle', hintKey: 'todoDetailHint' }),
+      })
+    }
+
+    function DraftsView({ t }) {
+      const [selected, setSelected] = React.useState(null)
+      const groups = [{ id: 'drafts', title: t('drafts'), items: [] }]
+      return h(SplitPane, {
+        storageKey: 'drafts',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
+        right: h(DetailPane, { t, titleKey: 'draftDetailTitle', hintKey: 'draftDetailHint' }),
+      })
+    }
+
+    /**
+     * 全部页签共用的最右侧审批栏：
+     * 默认只列待审批；点历史图标切到审批历史；历史里有返回按钮。
+     */
+    function ApprovalsRail({ t, status, initialMode = 'pending' }) {
+      const [mode, setMode] = React.useState(initialMode)
+      const pending = (status && status.approvals && status.approvals.pending) || []
+      const history = (status && status.approvals && status.approvals.history) || []
+      const count = (status && status.counters && status.counters.pendingApprovals) || pending.length
+      const showingHistory = mode === 'history'
+      const items = showingHistory ? history : pending
+
+      const body =
+        items.length === 0
+          ? h(
+              'div',
+              null,
+              h('p', { style: styles.railEmpty }, showingHistory ? t('approvalHistoryEmpty') : t('emptyApprovals')),
+              h(
+                'p',
+                { style: { ...styles.railEmpty, paddingTop: 0 } },
+                showingHistory ? t('approvalHistoryHint') : t('emptyApprovalsHint'),
+              ),
+            )
+          : items.map((item) =>
+              h(
+                'div',
+                { key: item.id, style: styles.listItem },
+                h('span', null, item.title),
+                item.meta ? h('span', { style: styles.listItemMeta }, item.meta) : null,
+              ),
+            )
+
+      return h(
+        'aside',
+        { style: styles.railPanel, 'aria-label': showingHistory ? t('approvalHistory') : t('approvals') },
+        h(
+          'div',
+          { style: styles.railHeader },
+          h('span', { style: styles.railHeaderTitle }, showingHistory ? t('approvalHistory') : t('approvals')),
+          !showingHistory && count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
+          h('span', { style: styles.spacer }),
+          showingHistory
+            ? h(
+                'button',
+                { type: 'button', style: styles.iconBtn, title: t('back'), 'aria-label': t('back'), onClick: () => setMode('pending') },
+                h(BackIcon, {}),
+              )
+            : h(
+                'button',
+                {
+                  type: 'button',
+                  style: styles.iconBtn,
+                  title: t('approvalHistory'),
+                  'aria-label': t('approvalHistory'),
+                  onClick: () => setMode('history'),
+                },
+                h(ClockIcon, {}),
+              ),
+        ),
+        h('div', { style: styles.railBody }, body),
+      )
+    }
+
+    function KnowledgeView({ t }) {
+      const [selected, setSelected] = React.useState('contacts')
+      const groups = [
+        { id: 'contacts', title: t('kbContacts'), items: [] },
+        { id: 'companies', title: t('kbCompanies'), items: [] },
+        { id: 'projects', title: t('kbProjects'), items: [] },
+        { id: 'files', title: t('kbFiles'), items: [] },
+      ]
+      return h(SplitPane, {
+        storageKey: 'knowledge',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
+        right: h(DetailPane, { t, titleKey: 'kbDetailTitle', hintKey: 'kbDetailHint' }),
+      })
+    }
+
+    // ---- AI 工作台 ---------------------------------------------------------
+    /** 单张卡片：上半待处理内容，下半与 Agent 的对话栏。 */
+    function AiCard({ t, item, onAct }) {
+      return h(
+        'article',
+        { style: styles.aiCard, 'aria-label': item.title },
+        h(
+          'div',
+          { style: styles.aiCardHead },
+          h('span', { style: styles.aiCardTitle }, item.title),
+          h('span', { style: styles.spacer }),
+          h('button', { type: 'button', style: styles.btnSmall, onClick: () => onAct && onAct('done', item) }, t('actDone')),
+          h('button', { type: 'button', style: styles.btnSmall, onClick: () => onAct && onAct('later', item) }, t('actLater')),
+          h('button', { type: 'button', style: styles.btnSmall, onClick: () => onAct && onAct('delete', item) }, t('actDelete')),
+        ),
+        h(
+          'div',
+          { style: styles.aiCardTop },
+          h('p', { style: styles.sectionTitle }, t('cardPendingContent')),
+          h('p', { style: styles.muted }, item.summary || t('emptyList')),
+        ),
+        h(
+          'div',
+          { style: styles.aiCardBottom },
+          h(
+            'div',
+            { style: styles.chatList },
+            h('p', { style: styles.sectionTitle }, t('cardChat')),
+            h('p', { style: styles.muted }, t('cardChatEmpty')),
+          ),
+          h(
+            'div',
+            { style: styles.chatInputRow },
+            h('input', {
+              style: styles.input,
+              placeholder: t('cardChatPlaceholder'),
+              'aria-label': t('cardChat'),
+              disabled: true,
+            }),
+          ),
+        ),
+      )
+    }
+
+    function AiWorkbench({ t, status }) {
+      const [selected, setSelected] = React.useState(null)
+      const carouselRef = React.useRef(null)
+      const pending = (status && status.ai && status.ai.pending) || []
+      const done = (status && status.ai && status.ai.done) || []
+      const groups = [
+        { id: 'pending', title: t('aiQueue'), items: pending },
+        { id: 'done', title: t('aiDone'), items: done },
+      ]
+
+      const scrollCards = (direction) => {
+        const node = carouselRef.current
+        if (!node || typeof node.scrollBy !== 'function') return
+        node.scrollBy({ left: direction * (CARD_WIDTH + 12), behavior: 'smooth' })
+      }
+
+      const right =
+        pending.length === 0
+          ? h(EmptyPane, { title: t('aiEmptyTitle'), hint: t('aiEmptyHint') })
+          : h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
+              h(
+                'div',
+                { style: styles.paneHeader },
+                h('span', { style: styles.paneHeaderText }, `${t('aiQueue')} · ${pending.length}`),
+                h('span', { style: styles.spacer }),
+                h('button', { type: 'button', style: styles.btnSmall, onClick: () => scrollCards(-1) }, t('prevCard')),
+                h('button', { type: 'button', style: styles.btnSmall, onClick: () => scrollCards(1) }, t('nextCard')),
+              ),
+              h(
+                'div',
+                { ref: carouselRef, style: styles.carousel },
+                pending.map((item) => h(AiCard, { key: item.id, t, item, onAct: () => {} })),
+              ),
+            )
+
+      return h(SplitPane, {
+        storageKey: 'ai',
+        spec: PANE_SPEC,
+        label: t('resize'),
+        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
+        right,
+      })
+    }
+
+    // ---- 设置 --------------------------------------------------------------
+    function AccountRow({ t, account, onChanged }) {
+      const [busy, setBusy] = React.useState(null)
+      const [note, setNote] = React.useState(null)
+
+      const test = async () => {
+        setBusy('test')
+        setNote(null)
+        try {
+          const value = await call('/accounts/test', { id: account.id })
+          setNote(`${t('accountTestOk')} ${(value.folders || []).length}`)
+        } catch (error) {
+          setNote(`${t('accountTestFailed')}: ${error.message}`)
+        } finally {
+          setBusy(null)
+        }
+      }
+
+      const remove = async () => {
+        setBusy('remove')
+        setNote(null)
+        try {
+          await call('/accounts/remove', { id: account.id })
+          if (onChanged) onChanged()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(null)
+        }
+      }
+
+      return h(
+        'div',
+        { style: styles.accountRow },
+        h(
+          'div',
+          { style: { flex: 1, minWidth: 0 } },
+          h('div', { style: { fontSize: 13 } }, account.displayName ? `${account.displayName} · ${account.address}` : account.address),
+          h(
+            'div',
+            { style: { ...styles.muted, margin: 0 } },
+            `${account.imapHost}:${account.imapPort} ${account.imapSecurity}${
+              account.hasCredential ? '' : ` · ${t('accountNoCredential')}`
+            }`,
+          ),
+          note ? h('div', { style: { ...styles.muted, margin: 0 } }, note) : null,
+        ),
+        h(
+          'button',
+          { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: test },
+          busy === 'test' ? t('accountTesting') : t('accountTest'),
+        ),
+        h(
+          'button',
+          { type: 'button', style: styles.dangerBtn, disabled: busy !== null, onClick: remove },
+          t('accountRemove'),
+        ),
+      )
+    }
+
+    // 端口按「协议 × 加密方式」推断，与 Core / Host 保持一致
+    const PORT_DEFAULTS = {
+      imap: { ssl: '993', starttls: '143', none: '143' },
+      pop3: { ssl: '995', starttls: '110', none: '110' },
+      smtp: { ssl: '465', starttls: '587', none: '25' },
+    }
+
+    function portTable(channel) {
+      return PORT_DEFAULTS[channel] || PORT_DEFAULTS.imap
+    }
+
+    function defaultPort(channel, security) {
+      const table = portTable(channel)
+      return table[security] || table.ssl
+    }
+
+    /** 端口仍停留在某个默认值时，才跟着协议/加密方式自动改，避免覆盖用户手填的端口。 */
+    function isDefaultPort(channel, value) {
+      return Object.values(portTable(channel)).includes(String(value ?? '').trim())
+    }
+
+    function AccountForm({ t, onSaved }) {
+      const blank = {
+        address: '',
+        displayName: '',
+        protocol: 'imap',
+        imapHost: '',
+        imapPort: defaultPort('imap', 'ssl'),
+        imapSecurity: 'ssl',
+        username: '',
+        password: '',
+        smtpHost: '',
+        smtpPort: defaultPort('smtp', 'ssl'),
+        smtpSecurity: 'ssl',
+      }
+      const [draft, setDraft] = React.useState(blank)
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const [saved, setSaved] = React.useState(false)
+
+      const update = (key) => (event) => {
+        const value = event.target.value
+        setDraft((prev) => {
+          const next = { ...prev, [key]: value }
+          if (key === 'protocol' && isDefaultPort(prev.protocol, prev.imapPort)) {
+            next.imapPort = defaultPort(value, prev.imapSecurity)
+          }
+          if (key === 'imapSecurity' && isDefaultPort(prev.protocol, prev.imapPort)) {
+            next.imapPort = defaultPort(prev.protocol, value)
+          }
+          if (key === 'smtpSecurity' && isDefaultPort('smtp', prev.smtpPort)) {
+            next.smtpPort = defaultPort('smtp', value)
+          }
+          return next
+        })
+      }
+
+      const submit = async (event) => {
+        event.preventDefault()
+        setBusy(true)
+        setError(null)
+        setSaved(false)
+        try {
+          await call('/accounts/add', {
+            ...draft,
+            imapPort: Number(draft.imapPort),
+            smtpPort: Number(draft.smtpPort),
+          })
+          setDraft(blank)
+          setSaved(true)
+          if (onSaved) onSaved()
+        } catch (e) {
+          setError(e.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const field = (labelKey, key, extra) =>
+        h(
+          'label',
+          { style: styles.field },
+          h('span', { style: styles.label }, t(labelKey)),
+          h('input', { style: styles.textInput, value: draft[key], onChange: update(key), ...extra }),
+        )
+
+      const selectField = (labelKey, key, options) =>
+        h(
+          'label',
+          { style: styles.field },
+          h('span', { style: styles.label }, t(labelKey)),
+          h(
+            'select',
+            { className: 'dsh-mail-select', style: styles.textInput, value: draft[key], onChange: update(key) },
+            options.map(([value, labelKey2]) => h('option', { key: value, value }, t(labelKey2))),
+          ),
+        )
+
+      const SECURITY_OPTIONS = [
+        ['ssl', 'securitySsl'],
+        ['starttls', 'securityStarttls'],
+        ['none', 'securityNone'],
+      ]
+
+      return h(
+        'form',
+        { style: { marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }, onSubmit: submit },
+        h('p', { style: { ...styles.sectionTitle, margin: 0 } }, t('accountAdd')),
+        h(
+          'div',
+          { style: styles.formGrid },
+          field('accountAddress', 'address', { type: 'email', required: true, autoComplete: 'off' }),
+          field('accountDisplayName', 'displayName', { autoComplete: 'off' }),
+          selectField('protocolLabel', 'protocol', [
+            ['imap', 'protocolImap'],
+            ['pop3', 'protocolPop3'],
+          ]),
+          field(draft.protocol === 'pop3' ? 'accountHostPop3' : 'accountHostImap', 'imapHost', {
+            required: true,
+            placeholder: draft.protocol === 'pop3' ? 'pop3.example.com' : 'imap.example.com',
+          }),
+          field('accountImapPort', 'imapPort', { type: 'number', min: 1, max: 65535 }),
+          selectField('accountSecurity', 'imapSecurity', SECURITY_OPTIONS),
+          field('accountUsername', 'username', { required: true, autoComplete: 'off' }),
+          field('accountPassword', 'password', { type: 'password', required: true, autoComplete: 'new-password' }),
+        ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('passwordHint')),
+        h('p', { style: styles.formSubhead }, t('smtpSection')),
+        h(
+          'div',
+          { style: styles.formGrid },
+          field('smtpHost', 'smtpHost', { placeholder: 'smtp.example.com', autoComplete: 'off' }),
+          field('smtpPort', 'smtpPort', { type: 'number', min: 1, max: 65535 }),
+          selectField('smtpSecurity', 'smtpSecurity', SECURITY_OPTIONS),
+        ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('smtpOptionalHint')),
+        error !== null ? h('p', { style: styles.error }, `${t('accountFailed')}: ${error}`) : null,
+        saved ? h('p', { style: { ...styles.muted, margin: 0 } }, t('accountSaved')) : null,
+        h(
+          'button',
+          { type: 'submit', style: { ...styles.btn, alignSelf: 'flex-start' }, disabled: busy },
+          busy ? t('accountSubmitting') : t('accountSubmit'),
+        ),
+      )
+    }
+
+    function SettingsView({ t, status, onRefresh }) {
+      const core = (status && status.core) || {}
+      const intervalMs = (status && status.syncIntervalMs) || 300000
+      const accounts = (status && status.accounts) || []
+      return h(
+        'div',
+        { style: styles.reading },
+        h(
+          'div',
+          { style: { ...styles.card, ...styles.settingsBox } },
+          h('p', { style: styles.sectionTitle }, t('settings')),
+          h(Row, { label: t('coreState'), value: core.state || '—' }),
+          h(Row, { label: t('coreVersion'), value: core.version || '—' }),
+          h(Row, { label: t('coreDb'), value: core.dbPath || '—' }),
+          h(Row, { label: t('coreDataDir'), value: core.dataDir || '—' }),
+          h(Row, { label: t('settingsPoll'), value: `${Math.round(intervalMs / 60000)} ${t('minute')}` }),
+          h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),
+          core.error
+            ? h('p', { style: { ...styles.error, marginTop: 8 } }, `${t('coreError')}: ${core.error.code} · ${core.error.message}`)
+            : null,
+        ),
+        h(
+          'div',
+          { style: { ...styles.card, ...styles.settingsBox } },
+          h('p', { style: styles.sectionTitle }, t('settingsAccounts')),
+          accounts.length === 0 ? h('p', { style: { ...styles.muted, margin: 0 } }, t('accountsEmpty')) : null,
+          accounts.map((account) => h(AccountRow, { key: account.id, t, account, onChanged: onRefresh })),
+        ),
+        h('div', { style: { ...styles.card, ...styles.settingsBox } }, h(AccountForm, { t, onSaved: onRefresh })),
+      )
+    }
+
+    // ---- 顶栏 --------------------------------------------------------------
+    function TopBar({ t, status, onRefresh }) {
+      const core = (status && status.core) || null
+      const ok = Boolean(core && core.state === 'ready')
+      const pending = (status && status.counters && status.counters.pendingAi) || 0
+      const label = core
+        ? ok
+          ? `Mail Core v${core.version || '?'}`
+          : `Mail Core ${core.state}`
+        : t('coreState')
+      const title = core && core.error ? `${core.error.code}: ${core.error.message}` : core ? core.dbPath : ''
+      return h(
+        'header',
+        { style: styles.topbar },
+        h('h1', { style: styles.title }, t('title')),
+        h('span', { style: styles.spacer }),
+        h('span', { style: styles.badge(pending > 0), title: t('pendingAi') }, `${t('pendingAi')} ${pending}`),
+        h('span', { style: styles.pill(ok), title }, h('span', { style: styles.dot(ok) }), label),
+        h(
+          'button',
+          { type: 'button', style: styles.iconBtn, onClick: onRefresh, title: t('retry'), 'aria-label': t('retry') },
+          h(RefreshIcon, {}),
+        ),
+      )
+    }
+
+    // ---- 面板 --------------------------------------------------------------
+    function MailPanel({ t }) {
+      const [tab, setTab] = React.useState('inbox')
+      const [status, setStatus] = React.useState(null)
+      const [error, setError] = React.useState(null)
+
+      const load = React.useCallback(
+        (signal) =>
+          call('/status', {}, signal)
+            .then((value) => {
+              setStatus(value)
+              setError(null)
+            })
+            .catch((e) => {
+              if (!signal || !signal.aborted) setError(e.message)
+            }),
+        [],
+      )
+
+      React.useEffect(() => {
+        const ac = new AbortController()
+        load(ac.signal)
+        return () => ac.abort()
+      }, [load])
+
+      const refresh = () => load(new AbortController().signal)
+
+      let content
+      if (tab === 'inbox') content = h(InboxView, { t, status })
+      else if (tab === 'todo') content = h(TodoView, { t, status })
+      else if (tab === 'ai') content = h(AiWorkbench, { t, status })
+      else if (tab === 'drafts') content = h(DraftsView, { t, status })
+      else if (tab === 'knowledge') content = h(KnowledgeView, { t, status })
+      else content = h(SettingsView, { t, status, onRefresh: refresh })
+
+      return h(
+        'div',
+        { style: styles.panel },
+        h('style', { dangerouslySetInnerHTML: { __html: SELECT_CSS } }),
+        h(TopBar, { t, status, onRefresh: refresh }),
+        h(
+          'nav',
+          { style: styles.nav, role: 'tablist', 'aria-label': t('title') },
+          TABS.map(([id, key]) =>
+            h(
+              'button',
+              {
+                key: id,
+                type: 'button',
+                role: 'tab',
+                'aria-selected': tab === id,
+                style: styles.tab(tab === id),
+                onClick: () => setTab(id),
+              },
+              t(key),
+            ),
+          ),
+        ),
+        error !== null
+          ? h(
+              'div',
+              { style: styles.errBox, role: 'alert' },
+              h('p', { style: styles.error }, `${t('failed')}: ${error}`),
+              h('button', { type: 'button', style: styles.btn, onClick: refresh }, t('retry')),
+            )
+          : status === null
+            ? h('p', { style: { padding: '20px', fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' } }, t('loading'))
+            : h(
+                'div',
+                { style: styles.body },
+                h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } }, content),
+                h(ApprovalsRail, { t, status }),
+              ),
+      )
+    }
+
+    function apply(ctx) {
+      const t = ctx.locale ? ctx.locale.bind(NS) : (key) => key
+
+      if (ctx.locale && typeof ctx.locale.register === 'function') {
+        ctx.effect(() => {
+          const offs = [ctx.locale.register(NS, 'zh', messages.zh), ctx.locale.register(NS, 'en', messages.en)]
+          return () => offs.forEach((off) => off())
+        }, 'mail: locale dictionaries')
+      }
+
+      // 一级工作区面板：keyed main，key = 侧栏 entry id
+      ctx.slots.inject('main', () =>
+        ctx.slots.register(
+          {
+            name: 'main',
+            key: PANEL_ID,
+            locale: NS,
+            inject: () => ({ t }),
+          },
+          MailPanel,
+        ),
+      )
+
+      // 侧栏图标入口：list，id 必须与 main.key 相同
+      ctx.slots.inject('sidebar.panellist', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.panellist',
+            id: PANEL_ID,
+            order: 30,
+            label: () => t('nav'),
+            locale: NS,
+          },
+          MailIcon,
+        ),
+      )
+    }
+
+    return {
+      inject: ['slots', 'locale'],
+      apply,
+      // 仅用于本地渲染测试（scripts/verify-client.mjs）；宿主只读 inject / apply。
+      __test: {
+        MailPanel,
+        InboxView,
+        TodoView,
+        DraftsView,
+        ApprovalsRail,
+        KnowledgeView,
+        AiWorkbench,
+        AiCard,
+        SettingsView,
+        AccountForm,
+        AccountRow,
+        EmptyPane,
+        TopBar,
+        SplitPane,
+        MailIcon,
+        PANEL_ID,
+        clampPane,
+        clampWidth,
+        LAYOUT: {
+          RAIL_DEFAULT,
+          RAIL_MIN,
+          RAIL_MAX,
+          LIST_DEFAULT,
+          LIST_MIN,
+          LIST_MAX,
+          READING_MIN,
+          DETAIL_MIN,
+          HANDLE,
+          PANE_SPEC,
+        },
+      },
+    }
+  },
+})

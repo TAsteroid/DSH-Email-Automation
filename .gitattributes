@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# 二进制/生成物
+*.db binary
+*.png binary
+*.webp binary
+*.ico binary
