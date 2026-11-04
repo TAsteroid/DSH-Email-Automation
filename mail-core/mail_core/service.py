@@ -8,13 +8,14 @@ stack trace nor request data can reach stdout).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import attachments, backup, crypto, delete, drafts, imap_client, pop3_client, sender, smtp_client
+from . import attachments, backup, crypto, delete, drafts, imap_client, pop3_client, sender, smtp_client, summaries
 from . import protocol
 from . import sync
 from .protocol import (
@@ -37,6 +38,8 @@ from .store import (
     CONTACT_FIELDS,
     DECIDED_BY_VALUES,
     DECIDED_VIA_VALUES,
+    SUMMARY_CATEGORIES,
+    TODO_STATES,
     Store,
     utc_now,
 )
@@ -195,6 +198,11 @@ class Service:
             "message.search": self._message_search,
             "message.delete": self._message_delete,
             "message.restore": self._message_restore,
+            "todo.list": self._todo_list,
+            "todo.set": self._todo_set,
+            "summary.save": self._summary_save,
+            "summary.list": self._summary_list,
+            "summary.context": self._summary_context,
             "thread.list": self._thread_list,
             "thread.get": self._thread_get,
             "history.backfill": self._history_backfill,
@@ -597,6 +605,109 @@ class Service:
 
         account, password = self._account_credentials(account_id)
         return delete.restore_imap(self.store, account, password, message, target)
+
+    # -- follow-ups (todo) -------------------------------------------------
+
+    def _todo_list(self, params: dict) -> dict:
+        """Messages flagged for follow-up (default: the pending queue)."""
+        account_id = _optional_id(params, "accountId")
+        state = _optional_str(params, "state", "pending")
+        if state not in TODO_STATES:
+            raise bad_request("field state must be one of: '', 'pending', 'done'")
+        limit = _optional_int(params, "limit", 50, minimum=1, maximum=200)
+        return {
+            "todos": self.store.list_todos(
+                account_id=account_id, state=state, limit=limit
+            )
+        }
+
+    def _todo_set(self, params: dict) -> dict:
+        """Set (or clear, with ``''``) one message's follow-up state."""
+        message_id = _require_str(params, "messageId")
+        state = params.get("state")
+        if not isinstance(state, str) or state not in TODO_STATES:
+            raise bad_request("field state must be one of: '', 'pending', 'done'")
+        if self.store.get_message(message_id) is None:
+            raise MailCoreError(NOT_FOUND, "message not found")
+        if not self.store.set_todo_state(message_id, state):
+            raise MailCoreError(NOT_FOUND, "message not found")
+        return {"messageId": message_id, "state": state}
+
+    # -- Agent summaries ---------------------------------------------------
+
+    def _summary_save(self, params: dict) -> dict:
+        """Append one Agent summary; the category must be one of the fixed 8."""
+        message_id = _require_str(params, "messageId")
+        category = _require_str(params, "category")
+        if category not in SUMMARY_CATEGORIES:
+            raise bad_request(
+                "field category must be one of: "
+                + " / ".join(SUMMARY_CATEGORIES)
+            )
+        text = params.get("summary")
+        if not isinstance(text, str) or not text.strip():
+            raise bad_request("field summary must be a non-empty string")
+
+        key_points = params.get("keyPoints")
+        if key_points is None:
+            key_points = []
+        if not isinstance(key_points, list) or not all(
+            isinstance(item, str) for item in key_points
+        ):
+            raise bad_request("field keyPoints must be an array of strings")
+
+        entities = params.get("entities")
+        if entities is None:
+            entities = {}
+        if not isinstance(entities, dict):
+            raise bad_request("field entities must be an object")
+        try:
+            json.dumps(entities, ensure_ascii=False)
+        except (TypeError, ValueError):
+            raise bad_request("field entities must be JSON-serializable") from None
+
+        model = _optional_str(params, "model", "")
+        session_id = _optional_str(params, "sessionId", "")
+
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise MailCoreError(NOT_FOUND, "message not found")
+        stored = self.store.add_summary(
+            message_id=message_id,
+            thread_id=str(message.get("threadId") or ""),
+            category=category,
+            summary=text,
+            key_points=key_points,
+            entities=entities,
+            model=model,
+            session_id=session_id,
+        )
+        return {"id": stored["id"], "createdAt": stored["createdAt"]}
+
+    def _summary_list(self, params: dict) -> dict:
+        message_id = _optional_id(params, "messageId")
+        thread_id = _optional_id(params, "threadId")
+        category = params.get("category")
+        if category is not None:
+            if not isinstance(category, str) or category not in SUMMARY_CATEGORIES:
+                raise bad_request(
+                    "field category must be one of: "
+                    + " / ".join(SUMMARY_CATEGORIES)
+                )
+        limit = _optional_int(params, "limit", 50, minimum=1, maximum=200)
+        return {
+            "summaries": self.store.list_summaries(
+                message_id=message_id,
+                thread_id=thread_id,
+                category=category,
+                limit=limit,
+            )
+        }
+
+    def _summary_context(self, params: dict) -> dict:
+        """Everything an Agent needs before summarising one message."""
+        message_id = _require_str(params, "messageId")
+        return summaries.build_context(self.store, message_id)
 
     # -- threads -----------------------------------------------------------
 

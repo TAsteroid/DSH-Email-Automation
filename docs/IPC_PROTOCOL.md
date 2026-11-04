@@ -59,12 +59,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 8}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 9}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据。**它和 `protocol` 无关**：v8 只新增表和列，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结。**它和 `protocol` 无关**：v9 只新增列、表和索引，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -183,6 +183,8 @@ POP3 结果：
 ```
 
 **幂等要求**：同一封邮件（account + folder + uidValidity + uid）重复同步不得产生第二条记录；`stored` 只统计真正新增的数量。
+
+**待跟进自动登记**：普通模式（非 `mode="backfill"`）只对 **INBOX** 生效。每个账号的第一次普通 INBOX 同步是**基线**：这批邮件 `todo_state` 保持空串（不登记），同步成功后把账号的 `todoBaselineDone` 置 1；之后新插入的 INBOX 邮件一律 `todo_state="pending"`。其它文件夹的普通同步、`history.backfill`、`sync.run mode="backfill"` 和 `attachment.backfill` 都**不登记**。重复同步已存在的邮件不会改变它已有的待跟进状态。
 
 **UIDVALIDITY 变化**：重置该文件夹游标、按新值重建记录，不得因为旧 uid 冲突而报错。
 
@@ -303,6 +305,107 @@ POP3 结果：
 - 任一步校验失败 → `IMAP_ERROR`，**本地行保留**（同 `message.delete` 的 fail-closed 规则）；响应 message 不含密码。
 - 成功 → 删除本地行（下一次同步目标文件夹会重新入库），返回 `{"restored": true, "folder": "<目标>"}`。
 - `id` 不存在 → `NOT_FOUND`。
+
+### `todo.list`
+
+参数（全部可省略）：
+
+```json
+{"accountId": "acc_xxx", "state": "pending", "limit": 50}
+```
+
+结果：
+
+```json
+{"todos": [{
+  "messageId": "msg_xxx", "subject": "季度报告", "fromAddr": "a@b.com",
+  "date": "2026-11-04T09:12:00Z", "folder": "INBOX", "todoState": "pending",
+  "hasSummary": true, "attachmentCount": 1
+}]}
+```
+
+- `state` 缺省 `pending`；只接受 `""` | `"pending"` | `"done"`（空串是「从未登记」的独立状态，不是「全部」），非法值 → `BAD_REQUEST`。
+- 按邮件 `date` **倒序**；`limit` 缺省 50、上限 200（小于 1 → `BAD_REQUEST`）。
+- `accountId` 可省略（所有账户）；账号不存在返回空数组。
+- `hasSummary`：这封邮件是否已有 Agent 总结；`attachmentCount`：非 inline 附件数量（与 `attachment.list` 默认口径一致）。
+- 数据来源是本地 `messages` 表，不联网。
+
+### `todo.set`
+
+参数：`{"messageId": "msg_xxx", "state": "done"}`
+
+结果：`{"messageId": "msg_xxx", "state": "done"}`
+
+- `state` 必填，只接受 `""` | `"pending"` | `"done"`，非法值 → `BAD_REQUEST`。
+- `messageId` 不存在 → `NOT_FOUND`；设置同时刷新 `todoUpdatedAt`。
+- 普通同步只负责「新邮件自动登记为 pending」，从不覆盖用户手动设置的状态。
+
+### `summary.save`
+
+参数：
+
+```json
+{"messageId": "msg_xxx", "category": "会议安排",
+ "summary": "会议确认了交付时间。", "keyPoints": ["周五交付"],
+ "entities": {"company": "示例公司"}, "model": "deepseek-chat",
+ "sessionId": "sess_xxx"}
+```
+
+结果：`{"id": "sum_xxx", "createdAt": "2026-11-04T12:00:00Z"}`
+
+- `messageId` / `category` / `summary` 必填；`messageId` 不存在 → `NOT_FOUND`。
+- `category` 必须是固定 8 类之一：`报价询价` `合同协议` `会议安排` `项目进展` `发票付款` `人事招聘` `通知公告` `其他`；其它值 → `BAD_REQUEST`。
+- `summary` 必须是非空字符串；`keyPoints` 可省略（字符串数组，缺省 `[]`）；`entities` 可省略（JSON 对象，缺省 `{}`）；`model` / `sessionId` 可省略（空串）。
+- `threadId` 由核心层按邮件当前所属线程自动写入，调用方无需传。
+- 总结是**追加**的：同一封邮件可以保存多次（保留历史），删除邮件时其总结级联删除。
+
+### `summary.list`
+
+参数（全部可省略）：
+
+```json
+{"messageId": "msg_xxx", "threadId": "acc_xxx:<root@b.com>",
+ "category": "会议安排", "limit": 50}
+```
+
+结果：
+
+```json
+{"summaries": [{
+  "id": "sum_xxx", "messageId": "msg_xxx", "threadId": "acc_xxx:<root@b.com>",
+  "category": "会议安排", "summary": "…", "keyPoints": ["…"],
+  "entities": {"company": "示例公司"}, "model": "deepseek-chat",
+  "sessionId": "sess_xxx", "subject": "季度报告",
+  "createdAt": "2026-11-04T12:00:00Z"
+}]}
+```
+
+- 三个过滤条件可任意组合；按 `createdAt` **倒序**，`limit` 缺省 50、上限 200。
+- `category` 非法值 → `BAD_REQUEST`。
+- 只读本地 `summaries` 表，不同步到服务器。
+
+### `summary.context`
+
+参数：`{"messageId": "msg_xxx"}`
+
+结果：
+
+```json
+{"message": { ...与 message.get 相同... },
+ "thread": [ ...同 threadId 的其它邮件（message.list 形状）... ],
+ "related": [ ...message.list 形状 + "reason": "同一对话" ... ],
+ "summaries": [{"messageId": "msg_xxx", "subject": "季度报告",
+   "category": "会议安排", "summary": "…", "keyPoints": ["…"],
+   "createdAt": "2026-11-04T12:00:00Z"}],
+ "attachments": [{"id": "att_xxx", "filename": "报告.pdf", "size": 2048,
+   "fetchedAt": ""}]}
+```
+
+- 这是 Agent **写总结前的上下文包**：`message` 是完整正文；`thread` 是同一 `threadId` 的其它邮件（按日期升序）；`related` 是关联邮件（已去重、排除自己），`reason` 取值按优先级为 `同一对话` → `主题相关` → `同一发件人` → `同一公司`，最多 20 条。
+- `related` 的搜索口径：主题核心（去掉 `Re:` / `Fwd:` / `回复:` / `转发:` 等前缀后）包含匹配、发件人地址匹配、通讯录里该发件人的公司匹配（公司为空则不搜）。
+- `summaries` 是**本封 + 同线程 + related 邮件**已有的历史总结，按 `createdAt` 升序（先看历史）；字段固定为 `messageId` / `subject` / `category` / `summary` / `keyPoints` / `createdAt`。
+- `attachments` 只列非 inline 附件的元数据（`attachment.list` 默认口径）；`fetchedAt` 为空串表示还没下载。
+- `messageId` 不存在 → `NOT_FOUND`；全程只读本地库，不联网。
 
 ### `thread.list`
 
@@ -729,3 +832,4 @@ POP3 结果：
 - v6 只给 `approvals` **新增** `decided_via`、`decided_by` 两列，默认空串，不改旧表结构、不丢旧数据；已有决定迁移后审计字段为空（v5 记录本来就没有来源信息，不回填猜测值）。迁移幂等，老库（v1~v5）启动时自动升级。
 - v7 只给 `messages` **新增** `thread_id`、`in_reply_to`、`refs` 三列（`refs` 是 `References` 头；`references` 是 SQL 关键字，故列名缩短）以及两个线程索引，不改旧表结构、不删旧邮件；迁移后对 `thread_id = ''` 的旧行按线程规则回填一次（幂等，重复迁移不再改动已回填的行）。老库（v1~v6）启动时先自动备份再逐级升级。新增字段都可空串，旧插件忽略 `threadId` 即可继续工作。
 - v8 只**新增** `attachments` 表（`message_id` 外键指向 `messages.id`，`ON DELETE CASCADE`）和 `messages.attachments_synced` 标记列（旧邮件默认 0，表示附件元数据尚未提取），不改旧表结构、不删旧邮件、不在库里存附件内容。旧邮件用 `attachment.backfill` 补；新同步邮件在同一事务内写入附件行。老库（v1~v7）启动时先自动备份再升级；附件文件只落在 `<data-dir>/attachments/`。
+- v9 只**新增**：`messages.todo_state` / `messages.todo_updated_at` 两列、`accounts.todo_baseline_done` 标记列、`summaries` 表及其三个索引（另加 `messages(todo_state, date)` 列表索引）。旧数据 `todo_state` 为空串（不会被当成待办），`todo_baseline_done=0`（下一轮普通 INBOX 同步成为基线）；`summaries.message_id` 外键指向 `messages.id`，邮件删除时总结级联删除。老库（v1~v8）启动时先自动备份再升级；迁移幂等。

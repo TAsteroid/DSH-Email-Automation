@@ -645,6 +645,35 @@ function runRealReactPass() {
     )
     check(todoWithAttachment.includes('报价表.xlsx'), '[真实渲染] 待跟进应列出待处理附件')
 
+    // 邮件事项：总结 / 已处理
+    const todoWithMail = renderToStaticMarkup(
+      h(views.TodoView, {
+        t,
+        status: {
+          ...statusPayload,
+          accounts: twoAccounts,
+          todos: {
+            pending: [
+              { messageId: 'msg_1', accountId: 'a1', subject: '报价回复', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', hasSummary: false },
+            ],
+          },
+        },
+      }),
+    )
+    check(todoWithMail.includes('报价回复'), '[真实渲染] 待跟进应列出待处理邮件')
+
+    const mailTodoCard = renderToStaticMarkup(
+      h(views.MailTodoCard, {
+        t,
+        item: { subject: '报价回复', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z' },
+        busy: false,
+        onSummary: () => {},
+        onDone: () => {},
+      }),
+    )
+    check(mailTodoCard.includes('t:mail.todoSummary'), '[真实渲染] 邮件事项应有总结按钮')
+    check(mailTodoCard.includes('t:mail.todoDone'), '[真实渲染] 邮件事项应有已处理按钮')
+
     const attachmentCard = renderToStaticMarkup(
       h(views.AttachmentCard, {
         t,

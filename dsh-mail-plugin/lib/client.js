@@ -170,7 +170,11 @@ window.__ModuleLoader__.load({
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
         deleteMail: '删除',
-        attachmentHint: '下载后 Agent 才能读取附件内容；未下载前库里只有文件名和大小。',
+        todoSummary: '总结',
+        todoDone: '已处理',
+        todoSummarized: '已总结',
+        todoSummaryHint: '会把邮件交给 Agent：先拉上下文，有历史总结会先问你如何处理。',
+        todoSessionFailed: '无法打开会话，已把提示词复制到剪贴板',
         attachmentTitle: '附件待处理',
         attachmentAnalyze: '下载并准备分析',
         attachmentFetched: '已下载',
@@ -381,6 +385,11 @@ window.__ModuleLoader__.load({
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
 
         deleteMail: 'Delete',
+        todoSummary: 'Summarize',
+        todoDone: 'Mark done',
+        todoSummarized: 'Summarized',
+        todoSummaryHint: 'Hands the mail to the agent: it loads context first and asks how to handle any existing summary.',
+        todoSessionFailed: 'Could not open a session; the prompt was copied to the clipboard',
         attachmentHint: 'The agent can only read an attachment after it is downloaded; before that we store only the filename and size.',
         attachmentTitle: 'Attachments to review',
         attachmentAnalyze: 'Download for analysis',
@@ -2164,8 +2173,27 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 邮件事项卡片：总结 / 已处理。 */
+    function MailTodoCard({ t, item, onSummary, onDone, busy }) {
+      return h(
+        'article',
+        { style: { ...styles.aiCard, width: '100%', height: '100%' }, 'aria-label': item.subject || item.messageId },
+        h('p', { style: styles.sectionTitle }, t('aiQueue')),
+        h('h3', { style: styles.msgSubject }, item.subject || t('noSubject')),
+        h('p', { style: styles.muted }, `${item.fromAddr || ''} · ${item.date || ''}`),
+        item.hasSummary ? h('p', { style: styles.muted }, t('todoSummarized')) : null,
+        h(
+          'div',
+          { style: styles.formActions },
+          h('button', { type: 'button', style: styles.btn, disabled: busy, onClick: onSummary }, t('todoSummary')),
+          h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: onDone }, t('todoDone')),
+        ),
+        h('p', { style: styles.muted }, t('todoSummaryHint')),
+      )
+    }
+
     /** 待跟进：账户栏 + 待处理/已处理列表 + 右侧卡片工作台（原 AI 工作台）。 */
-    function TodoView({ t, status, accountId, onSelectAccount }) {
+    function TodoView({ t, status, accountId, onSelectAccount, onRefresh }) {
       const accounts = (status && status.accounts) || []
       const ai = (status && status.ai) || { pending: [], done: [] }
       const [items, setItems] = React.useState({ pending: ai.pending || [], done: ai.done || [] })
@@ -2198,11 +2226,26 @@ window.__ModuleLoader__.load({
         fetchedAt: item.fetchedAt || '',
       }))
 
+      // 邮件事项：同步进来的新邮件自动登记为待处理
+      const mailTodos = ((status && status.todos && status.todos.pending) || []).map((item) => ({
+        id: `todo_${item.messageId}`,
+        messageId: item.messageId,
+        kind: 'mail',
+        accountId: item.accountId || '',
+        subject: item.subject || '',
+        fromAddr: item.fromAddr || '',
+        date: item.date || '',
+        hasSummary: Boolean(item.hasSummary),
+        title: item.subject || t('noSubject'),
+        meta: `${item.fromAddr || ''} · ${item.date || ''}`,
+      }))
+
       const groups = [
         ...visible.map((account) => ({
           id: `${account.id}-pending`,
           title: `${label(account)} · ${t('aiQueue')}`,
           items: [
+            ...mailTodos.filter((item) => !item.accountId || item.accountId === account.id),
             ...attachments.filter((item) => !item.accountId || item.accountId === account.id),
             ...(items.pending || [])
               .filter((item) => !item.accountId || item.accountId === account.id)
@@ -2213,12 +2256,86 @@ window.__ModuleLoader__.load({
       ]
 
       const selected =
+        mailTodos.find((item) => item.id === selectedId) ||
         attachments.find((item) => item.id === selectedId) ||
         [...(items.pending || []), ...(items.done || [])].find((item) => item.id === selectedId) ||
         null
 
       const [fetching, setFetching] = React.useState(false)
       const [fetched, setFetched] = React.useState(null)
+      const [todoBusy, setTodoBusy] = React.useState(false)
+      const [note, setNote] = React.useState(null)
+
+      /** 把邮件交给 Agent：能复用已有关联会话就复用，否则新建并发送提示词。 */
+      const openSummarySession = async (item) => {
+        const prompt = [
+          `请总结这封邮件（messageId: ${item.messageId}，主题：${item.subject || '(无主题)'}，发件人：${item.fromAddr || '未知'}）。`,
+          '',
+          '步骤：',
+          '1. 先调用 mail_triage_context 拉取上下文（同线程、相关邮件、历史总结、附件）。',
+          '2. 若 hasHistory 为 true：先把历史总结列出来，并询问我如何处理（合并 / 覆盖 / 保留旧版），等我回答后再继续。',
+          '3. 总结完成后调用 mail_summary_save，category 只能从【报价询价/合同协议/会议安排/项目进展/发票付款/人事招聘/通知公告/其他】中选择。',
+          '4. 我确认处理完毕后，调用 mail_mark_done。',
+        ].join('\n')
+
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
+          if (!sessions || !uiWorkspace) throw new Error('session services unavailable')
+
+          const key = 'dsh-mail:sessions'
+          let map = {}
+          try {
+            map = JSON.parse(localStorage.getItem(key) || '{}') || {}
+          } catch {
+            map = {}
+          }
+
+          const known = map[item.messageId]
+          const snapshot = sessions.list && sessions.list.getSnapshot ? sessions.list.getSnapshot() : null
+          if (known && (!snapshot || !snapshot.byId || snapshot.byId[known])) {
+            uiWorkspace.openSession(known)
+            return
+          }
+
+          const sessionId = await sessions.create({})
+          await sessions.using(sessionId, { source: 'controllerOperation' }, async (reference) => {
+            const binding = reference.binding || (reference.ready ? await reference.ready : null)
+            if (binding && binding.session) {
+              await binding.session.prompt([{ type: 'text', text: prompt }], 'queue')
+            }
+          })
+          map[item.messageId] = sessionId
+          try {
+            localStorage.setItem(key, JSON.stringify(map))
+          } catch {
+            // 存不下就每次新建，不影响功能
+          }
+          uiWorkspace.openSession(sessionId)
+        } catch {
+          try {
+            if (typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(prompt)
+          } catch {
+            // 剪贴板也不可用时只能让用户看到失败提示
+          }
+          setNote(t('todoSessionFailed'))
+        }
+      }
+
+      const markDone = async (item) => {
+        if (todoBusy) return
+        setTodoBusy(true)
+        try {
+          await call('/todo/set', { messageId: item.messageId, state: 'done' })
+          setSelectedId(null)
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setTodoBusy(false)
+        }
+      }
+
       const fetchAttachment = async () => {
         if (!selected || selected.kind !== 'attachment' || fetching) return
         setFetching(true)
@@ -2226,6 +2343,7 @@ window.__ModuleLoader__.load({
         try {
           const value = await call('/attachments/fetch', { id: selected.attachmentId })
           setFetched(value || {})
+          if (onRefresh) onRefresh()
         } catch (error) {
           setFetched({ error: error.message })
         } finally {
@@ -2257,12 +2375,25 @@ window.__ModuleLoader__.load({
           right: selected
             ? h(
                 'div',
-                { style: styles.cardHost },
-                selected.kind === 'attachment'
-                  ? h(AttachmentCard, { t, item: selected, fetching, result: fetched, onFetch: fetchAttachment })
-                  : h(AiCard, { t, item: selected, onAct: act, fluid: true }),
+                { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
+                h(
+                  'div',
+                  { style: styles.cardHost },
+                  selected.kind === 'attachment'
+                    ? h(AttachmentCard, { t, item: selected, fetching, result: fetched, onFetch: fetchAttachment })
+                    : selected.kind === 'mail'
+                      ? h(MailTodoCard, {
+                          t,
+                          item: selected,
+                          busy: todoBusy,
+                          onSummary: () => openSummarySession(selected),
+                          onDone: () => markDone(selected),
+                        })
+                      : h(AiCard, { t, item: selected, onAct: act, fluid: true }),
+                ),
+                note ? h('p', { style: { ...styles.muted, padding: '0 20px 12px' } }, note) : null,
               )
-            : h(EmptyPane, { title: t('aiEmptyTitle'), hint: t('aiEmptyHint') }),
+            : h(EmptyPane, { title: t('aiEmptyTitle'), hint: note || t('aiEmptyHint') }),
         }),
       })
     }
@@ -3834,7 +3965,8 @@ window.__ModuleLoader__.load({
       if (query.trim().length > 0) content = h(SearchView, { t, query: query.trim(), status })
       else if (tab === 'inbox')
         content = h(InboxView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
-      else if (tab === 'todo') content = h(TodoView, { t, status, accountId, onSelectAccount: setAccountId })
+      else if (tab === 'todo')
+        content = h(TodoView, { t, status, accountId, onSelectAccount: setAccountId, onRefresh: refresh })
       else if (tab === 'sent')
         content = h(SentView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
       else if (tab === 'draftsMail')
@@ -3958,6 +4090,7 @@ window.__ModuleLoader__.load({
         MailPanel,
         ConfirmDialog,
         AttachmentCard,
+        MailTodoCard,
         InboxView,
         AccountRail,
         SentView,

@@ -143,6 +143,8 @@ def _insert(
     uidvalidity: int,
     uid: int,
     parsed: dict,
+    *,
+    todo_state: str = "",
 ) -> bool:
     return store.insert_message(
         account_id=account_id,
@@ -162,6 +164,7 @@ def _insert(
         body_html=parsed["html"],
         size=parsed["size"],
         attachments=parsed.get("attachments", []),
+        todo_state=todo_state,
     )
 
 
@@ -254,6 +257,21 @@ def _fetch_one(connection, uid: int) -> tuple[bytes, int]:
     return raw, size if size is not None else len(raw)
 
 
+def _todo_registration(store: Store, account_id: str, folder: str) -> tuple[bool, str]:
+    """Decide whether this normal sync registers follow-ups, and with what state.
+
+    Only the INBOX is auto-registered: the account's first normal INBOX sync
+    is a *baseline* (its mail is not "new", so ``todo_state`` stays empty) and
+    flips ``todo_baseline_done``; every later INBOX sync inserts new mail as
+    ``pending``.  Backfills never call this, so historical imports stay empty.
+    """
+    if folder.strip().upper() != "INBOX":
+        return False, ""
+    if not store.get_todo_baseline_done(account_id):
+        return True, ""
+    return True, "pending"
+
+
 def _sync_imap(
     store: Store,
     account: dict,
@@ -263,6 +281,7 @@ def _sync_imap(
 ) -> dict:
     account_id = str(account["id"])
     started_at = _now()
+    register_todos, todo_state = _todo_registration(store, account_id, folder)
     state = store.get_sync_state(account_id, folder) or {}
     previous_uidvalidity = state.get("uidvalidity")
     last_uid = int(state.get("lastUid") or 0)
@@ -329,7 +348,15 @@ def _sync_imap(
         for uid in uids:
             raw, size = _fetch_one(connection, uid)
             parsed = _parse(account_id, folder, uidvalidity, uid, raw, size)
-            inserted = _insert(store, account_id, folder, uidvalidity, uid, parsed)
+            inserted = _insert(
+                store,
+                account_id,
+                folder,
+                uidvalidity,
+                uid,
+                parsed,
+                todo_state=todo_state,
+            )
             fetched += 1
             if inserted:
                 stored += 1
@@ -373,6 +400,10 @@ def _sync_imap(
         status="idle",
         error="",
     )
+    if register_todos:
+        # First successful normal INBOX sync becomes the baseline; later ones
+        # register new arrivals as pending (see ``_todo_registration``).
+        store.set_todo_baseline_done(account_id)
     return _result(
         account_id,
         folder,
@@ -426,6 +457,7 @@ def _sync_pop3(
 ) -> dict:
     account_id = str(account["id"])
     started_at = _now()
+    register_todos, todo_state = _todo_registration(store, account_id, folder)
     state = store.get_sync_state(account_id, folder) or {}
     last_uid = int(state.get("lastUid") or 0)
     fetched = stored = skipped = 0
@@ -468,7 +500,9 @@ def _sync_pop3(
             if body_lines:
                 raw += b"\r\n"
             parsed = _parse(account_id, folder, 0, uid, raw, len(raw))
-            inserted = _insert(store, account_id, folder, 0, uid, parsed)
+            inserted = _insert(
+                store, account_id, folder, 0, uid, parsed, todo_state=todo_state
+            )
             fetched += 1
             if inserted:
                 stored += 1
@@ -515,6 +549,8 @@ def _sync_pop3(
         status="idle",
         error="",
     )
+    if register_todos:
+        store.set_todo_baseline_done(account_id)
     return _result(
         account_id,
         folder,

@@ -28,6 +28,9 @@ upgrade backfills ``thread_id`` for mail synced before threading existed.
 Schema v8 adds attachment metadata (``attachments``, one row per MIME part,
 cascade-deleted with its message) and ``messages.attachments_synced`` so
 pre-v8 mail can be re-parsed for attachments without refetching it twice.
+Schema v9 adds the follow-up state (``messages.todo_state`` /
+``messages.todo_updated_at``, ``accounts.todo_baseline_done``) and the
+append-only Agent ``summaries`` table, cascade-deleted with its message.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -342,6 +345,64 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
         )
 
 
+# Schema v9: follow-up state and Agent summaries.  ``messages.todo_state`` is
+# the per-message follow-up flag (``''`` = never registered, ``pending`` =
+# needs attention, ``done`` = handled); ``todo_updated_at`` records the last
+# change.  ``accounts.todo_baseline_done`` marks the first normal INBOX sync:
+# its messages are a baseline (not "new mail") and only later arrivals are
+# auto-registered as pending.  ``summaries`` is append-only Agent output bound
+# to a message; key points and entities are JSON text so the schema never has
+# to change when the Agent enriches them.
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    for name, definition in (
+        ("todo_state", "TEXT NOT NULL DEFAULT ''"),
+        ("todo_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if name not in message_columns:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
+
+    account_columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+    if "todo_baseline_done" not in account_columns:
+        conn.execute(
+            "ALTER TABLE accounts ADD COLUMN todo_baseline_done "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS summaries (
+            id         TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+            thread_id  TEXT NOT NULL DEFAULT '',
+            category   TEXT NOT NULL DEFAULT '',
+            summary    TEXT NOT NULL,
+            key_points TEXT NOT NULL DEFAULT '[]',
+            entities   TEXT NOT NULL DEFAULT '{}',
+            model      TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_summaries_message "
+        "ON summaries (message_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_summaries_thread "
+        "ON summaries (thread_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_summaries_category "
+        "ON summaries (category)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_todo "
+        "ON messages (todo_state, date)"
+    )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -351,6 +412,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     6: _migrate_to_v6,
     7: _migrate_to_v7,
     8: _migrate_to_v8,
+    9: _migrate_to_v9,
 }
 
 
@@ -369,6 +431,23 @@ APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired")
 # call carries.
 DECIDED_VIA_VALUES = ("prompt", "policy-never", "api")
 DECIDED_BY_VALUES = ("user", "agent")
+
+# Follow-up states (schema v9).  The empty string means "not registered"
+# (baseline sync or mail imported by a backfill); the today list defaults to
+# ``pending``.
+TODO_STATES = ("", "pending", "done")
+
+# Fixed Agent summary categories (schema v9); validated by the service layer.
+SUMMARY_CATEGORIES = (
+    "报价询价",
+    "合同协议",
+    "会议安排",
+    "项目进展",
+    "发票付款",
+    "人事招聘",
+    "通知公告",
+    "其他",
+)
 
 # Protocol timestamps are fixed-width UTC, so plain string comparison is also
 # chronological (``now >= expires_at`` is the approval expiry test).
@@ -632,6 +711,21 @@ class Store:
         row = self._conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()
         return int(row["n"])
 
+    def get_todo_baseline_done(self, account_id: str) -> bool:
+        """Whether the account's first normal INBOX sync has been recorded."""
+        row = self._conn.execute(
+            "SELECT todo_baseline_done FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        return bool(row["todo_baseline_done"]) if row is not None else False
+
+    def set_todo_baseline_done(self, account_id: str, done: bool = True) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE accounts SET todo_baseline_done = ? WHERE id = ?",
+                (1 if done else 0, account_id),
+            )
+        return cursor.rowcount > 0
+
     # -- folders -----------------------------------------------------------
 
     def replace_folders(self, account_id: str, folders: Iterable[dict]) -> int:
@@ -878,6 +972,7 @@ class Store:
         size: int = 0,
         seen: bool = False,
         attachments: Optional[Iterable[dict]] = None,
+        todo_state: str = "",
         created_at: Optional[str] = None,
     ) -> bool:
         """Store one synced message; returns ``True`` only when it is new.
@@ -889,6 +984,9 @@ class Store:
         caller does not pass one.  ``attachments`` (the MIME metadata from
         :func:`mail_core.mime_parse.parse_message`) is written in the same
         transaction and marks the message as attachment-synced.
+        ``todo_state`` is ``pending`` only for mail that arrived after the
+        account's baseline sync (see ``sync``); everything else, including
+        backfill imports, leaves it empty.
         """
         row_id = f"msg_{uuid.uuid4().hex}"
         if not message_id:
@@ -900,6 +998,7 @@ class Store:
                 account_id, message_id, references, in_reply_to
             )
         timestamp = created_at or utc_now()
+        todo_updated_at = timestamp if todo_state else ""
         attachment_rows = self._attachment_rows(
             row_id, attachments or (), timestamp
         )
@@ -911,8 +1010,8 @@ class Store:
                     thread_id, in_reply_to, refs,
                     subject, from_addr, to_addr, cc_addr, date, snippet,
                     body_text, body_html, size, seen, attachments_synced,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    todo_state, todo_updated_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row_id,
@@ -935,6 +1034,8 @@ class Store:
                     int(size),
                     1 if seen else 0,
                     1,
+                    todo_state,
+                    todo_updated_at,
                     timestamp,
                 ),
             )
@@ -1394,6 +1495,254 @@ class Store:
             "subject": rows[0]["subject"],
             "messages": [self._message_summary(row) for row in rows],
         }
+
+    # -- follow-ups (todo) -------------------------------------------------
+
+    @staticmethod
+    def _todo_item(row: sqlite3.Row) -> dict:
+        """Protocol shape for ``todo.list`` (no body, no message detail)."""
+        return {
+            "messageId": row["id"],
+            "subject": row["subject"],
+            "fromAddr": row["from_addr"],
+            "date": row["date"],
+            "folder": row["folder"],
+            "todoState": row["todo_state"],
+            "hasSummary": bool(row["has_summary"]),
+            "attachmentCount": int(row["attachment_count"] or 0),
+        }
+
+    def list_todos(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        state: str = "pending",
+        limit: int = 50,
+    ) -> list[dict]:
+        """Messages in one follow-up state, newest mail first.
+
+        ``hasSummary`` and ``attachmentCount`` are computed in the same query
+        so the follow-up list can render badges without extra round trips;
+        inline MIME resources are not counted as attachments.
+        """
+        clauses = ["m.todo_state = ?"]
+        args: list[object] = [state]
+        if account_id is not None:
+            clauses.append("m.account_id = ?")
+            args.append(account_id)
+        where = " AND ".join(clauses)
+        rows = self._conn.execute(
+            f"""
+            SELECT m.id, m.subject, m.from_addr, m.date, m.folder, m.todo_state,
+                   EXISTS(
+                       SELECT 1 FROM summaries s WHERE s.message_id = m.id
+                   ) AS has_summary,
+                   (
+                       SELECT COUNT(*) FROM attachments a
+                       WHERE a.message_id = m.id AND a.inline = 0
+                   ) AS attachment_count
+            FROM messages m
+            WHERE {where}
+            ORDER BY m.date DESC, m.rowid DESC
+            LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        return [self._todo_item(row) for row in rows]
+
+    def set_todo_state(self, message_id: str, state: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET todo_state = ?, todo_updated_at = ? "
+                "WHERE id = ?",
+                (state, utc_now(), message_id),
+            )
+        return cursor.rowcount > 0
+
+    def messages_matching_subject(
+        self, core: str, *, exclude_id: str = "", limit: int = 20
+    ) -> list[dict]:
+        """Messages whose subject contains the normalised core (LIKE)."""
+        if not core:
+            return []
+        clauses = ["subject LIKE ? ESCAPE '\\'"]
+        args: list[object] = [_like_pattern(core)]
+        if exclude_id:
+            clauses.append("id <> ?")
+            args.append(exclude_id)
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM messages
+            WHERE {' AND '.join(clauses)}
+            ORDER BY date DESC, rowid DESC
+            LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        return [self._message_summary(row) for row in rows]
+
+    def messages_from_addresses(
+        self,
+        addresses: Iterable[str],
+        *,
+        exclude_id: str = "",
+        limit: int = 20,
+    ) -> list[dict]:
+        """Messages sent by any of ``addresses`` (substring on ``from_addr``)."""
+        patterns: list[str] = []
+        for address in addresses:
+            text = str(address or "").strip()
+            if text:
+                pattern = _like_pattern(text)
+                if pattern not in patterns:
+                    patterns.append(pattern)
+        if not patterns:
+            return []
+        clauses = ["(" + " OR ".join("from_addr LIKE ? ESCAPE '\\'" for _ in patterns) + ")"]
+        args: list[object] = list(patterns)
+        if exclude_id:
+            clauses.append("id <> ?")
+            args.append(exclude_id)
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM messages
+            WHERE {' AND '.join(clauses)}
+            ORDER BY date DESC, rowid DESC
+            LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        return [self._message_summary(row) for row in rows]
+
+    # -- summaries ---------------------------------------------------------
+
+    @staticmethod
+    def _summary_to_dict(row: sqlite3.Row) -> dict:
+        try:
+            key_points = json.loads(row["key_points"]) if row["key_points"] else []
+        except (TypeError, json.JSONDecodeError):
+            key_points = []
+        try:
+            entities = json.loads(row["entities"]) if row["entities"] else {}
+        except (TypeError, json.JSONDecodeError):
+            entities = {}
+        item = {
+            "id": row["id"],
+            "messageId": row["message_id"],
+            "threadId": row["thread_id"],
+            "category": row["category"],
+            "summary": row["summary"],
+            "keyPoints": key_points if isinstance(key_points, list) else [],
+            "entities": entities if isinstance(entities, dict) else {},
+            "model": row["model"],
+            "sessionId": row["session_id"],
+            "createdAt": row["created_at"],
+        }
+        try:
+            item["subject"] = row["subject"]
+        except (IndexError, KeyError):
+            pass
+        return item
+
+    def add_summary(
+        self,
+        *,
+        message_id: str,
+        thread_id: str = "",
+        category: str = "",
+        summary: str,
+        key_points: Optional[Iterable[str]] = None,
+        entities: Optional[dict] = None,
+        model: str = "",
+        session_id: str = "",
+        created_at: Optional[str] = None,
+    ) -> dict:
+        """Append one Agent summary; returns the stored row."""
+        summary_id = f"sum_{uuid.uuid4().hex}"
+        timestamp = created_at or utc_now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO summaries (
+                    id, message_id, thread_id, category, summary,
+                    key_points, entities, model, session_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    summary_id,
+                    message_id,
+                    thread_id,
+                    category,
+                    summary,
+                    json.dumps(list(key_points or []), ensure_ascii=False),
+                    json.dumps(dict(entities or {}), ensure_ascii=False),
+                    model,
+                    session_id,
+                    timestamp,
+                ),
+            )
+        return self.get_summary(summary_id) or {
+            "id": summary_id,
+            "createdAt": timestamp,
+        }
+
+    def get_summary(self, summary_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            """
+            SELECT s.*, m.subject FROM summaries s
+            JOIN messages m ON m.id = s.message_id
+            WHERE s.id = ?
+            """,
+            (summary_id,),
+        ).fetchone()
+        return self._summary_to_dict(row) if row is not None else None
+
+    def list_summaries(
+        self,
+        *,
+        message_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        category: Optional[str] = None,
+        message_ids: Optional[Iterable[str]] = None,
+        limit: int = 50,
+        ascending: bool = False,
+    ) -> list[dict]:
+        """Summaries newest first (or chronologically for context building)."""
+        clauses: list[str] = []
+        args: list[object] = []
+        if message_id is not None:
+            clauses.append("s.message_id = ?")
+            args.append(message_id)
+        if thread_id is not None:
+            clauses.append("s.thread_id = ?")
+            args.append(thread_id)
+        if category is not None:
+            clauses.append("s.category = ?")
+            args.append(category)
+        if message_ids is not None:
+            ids = [str(item) for item in message_ids]
+            if not ids:
+                return []
+            placeholders = ", ".join("?" for _ in ids)
+            clauses.append(f"s.message_id IN ({placeholders})")
+            args.extend(ids)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = "ASC" if ascending else "DESC"
+        rows = self._conn.execute(
+            f"""
+            SELECT s.*, m.subject FROM summaries s
+            JOIN messages m ON m.id = s.message_id
+            {where}
+            ORDER BY s.created_at {order}, s.id {order}
+            LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        return [self._summary_to_dict(row) for row in rows]
+
+    def count_summaries(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM summaries").fetchone()
+        return int(row["n"])
 
     # -- contacts ----------------------------------------------------------
 

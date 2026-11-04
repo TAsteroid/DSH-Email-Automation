@@ -204,6 +204,25 @@ function handleMethod(method, params) {
   if (method === 'attachment.fetch') {
     return { id: params.id, path: 'C:\\data\\attachments\\msg_1\\报价表.xlsx', size: 2048, sha256: 'abc123', fetchedAt: '2026-11-04T12:00:00Z' }
   }
+  if (method === 'todo.list') {
+    return {
+      todos: [
+        { messageId: 'msg_1', accountId: 'acc_1', subject: '报价回复', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', folder: 'INBOX', todoState: 'pending', hasSummary: true, attachmentCount: 1 },
+      ],
+    }
+  }
+  if (method === 'todo.set') return { messageId: params.messageId, state: params.state }
+  if (method === 'summary.save') return { id: 'sum_1', createdAt: '2026-11-04T12:00:00Z' }
+  if (method === 'summary.list') return { summaries: [{ id: 'sum_1', messageId: 'msg_1', category: '合同协议', summary: '旧总结', createdAt: '2026-11-03T00:00:00Z' }] }
+  if (method === 'summary.context') {
+    return {
+      message: { id: params.messageId, subject: '报价回复', fromAddr: 'a@b.com' },
+      thread: [{ id: 'msg_0', subject: '报价回复' }],
+      related: [{ id: 'msg_2', subject: '报价回复（续）', reason: '同一发件人：a@b.com' }],
+      summaries: [{ messageId: 'msg_1', category: '合同协议', summary: '旧总结', keyPoints: [] }],
+      attachments: [{ id: 'att_1', filename: '报价表.xlsx', size: 2048, fetchedAt: '' }],
+    }
+  }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -825,6 +844,47 @@ if (attachmentTool) {
   const listed = await attachmentTool.execute({ messageId: 'msg_1' }, { agent: { id: 'sess_1' } })
   check(listed.available === true && listed.attachments.length === 1, 'mail_attachments 应列出附件')
   check(listed.attachments[0].fetched === false, '未下载的附件 fetched 应为 false')
+}
+
+// ---- 待办与总结 -----------------------------------------------------------
+const todoRoute = await invoke('/api/dsh-mail/todo', { method: 'POST', body: JSON.stringify({ state: 'pending' }) })
+check(todoRoute && todoRoute.status === 200, `todo 应 200，实际 ${todoRoute && todoRoute.status}`)
+if (todoRoute && todoRoute.body) {
+  const parsed = JSON.parse(todoRoute.body)
+  check(parsed.value.todos.length === 1 && parsed.value.todos[0].hasSummary === true, 'todo 应返回事项与总结标记')
+}
+
+const todoSetNoId = await invoke('/api/dsh-mail/todo/set', { method: 'POST', body: JSON.stringify({ state: 'done' }) })
+check(todoSetNoId && todoSetNoId.status === 400, `todo/set 缺 id 应 400，实际 ${todoSetNoId && todoSetNoId.status}`)
+
+const contextNoId = await invoke('/api/dsh-mail/summary/context', { method: 'POST', body: '{}' })
+check(contextNoId && contextNoId.status === 400, `summary/context 缺 id 应 400，实际 ${contextNoId && contextNoId.status}`)
+
+const summaryRoute = await invoke('/api/dsh-mail/summary', { method: 'POST', body: JSON.stringify({ messageId: 'msg_1' }) })
+check(summaryRoute && summaryRoute.status === 200, `summary 应 200，实际 ${summaryRoute && summaryRoute.status}`)
+
+const triageTool = tools.get('mail_triage_context')
+if (triageTool) {
+  const triage = await triageTool.execute({ messageId: 'msg_1' }, { agent: { id: 'sess_1' } })
+  check(triage.available === true && triage.hasHistory === true, 'mail_triage_context 应标记 hasHistory')
+  check(triage.related.length === 1 && triage.related[0].reason, '相关邮件应带命中原因')
+  check(triage.attachments.length === 1, '应带出附件')
+}
+
+const summarySaveTool = tools.get('mail_summary_save')
+if (summarySaveTool) {
+  const badCategory = await summarySaveTool.execute({ messageId: 'msg_1', category: '乱写的', summary: 'x' }, { agent: { id: 'sess_1' } })
+  check(badCategory.available === false && String(badCategory.reason).includes('category'), '非法分类应拒绝')
+  check(Array.isArray(badCategory.categories) && badCategory.categories.length === 8, '应返回 8 个固定分类')
+
+  const saved = await summarySaveTool.execute({ messageId: 'msg_1', category: '合同协议', summary: '总结内容' }, { agent: { id: 'sess_1' } })
+  check(saved.available === true && saved.id === 'sum_1', '合法分类应保存成功')
+}
+
+const markDoneTool = tools.get('mail_mark_done')
+if (markDoneTool) {
+  const done = await markDoneTool.execute({ messageId: 'msg_1' }, { agent: { id: 'sess_1' } })
+  check(done.available === true && done.state === 'done', 'mail_mark_done 应把事项标为 done')
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

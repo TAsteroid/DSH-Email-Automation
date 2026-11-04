@@ -421,6 +421,7 @@ export function apply(ctx, config) {
     const approvals = ready ? await callCore('approval.list') : { available: false, reason: readyError }
     const drafts = ready ? await callCore('draft.list', {}) : { available: false, reason: readyError }
     const attachments = ready ? await callCore('attachment.list', { pendingOnly: true }) : { available: false, reason: readyError }
+    const todos = ready ? await callCore('todo.list', { state: 'pending', limit: 100 }) : { available: false, reason: readyError }
     const counters = (sync.available && sync.value?.counters) || {
       accounts: 0,
       messages: 0,
@@ -457,6 +458,9 @@ export function apply(ctx, config) {
       counters,
       attachments: {
         pending: (attachments.available && attachments.value?.attachments) || [],
+      },
+      todos: {
+        pending: (todos.available && todos.value?.todos) || [],
       },
       lastSyncAt: (sync.available && sync.value?.lastSyncAt) || '',
     }
@@ -1448,6 +1452,173 @@ export function apply(ctx, config) {
     'mail: register mail_attachments tool',
   )
 
+  // ---- 待办总结三件套 -------------------------------------------------------
+
+  const SUMMARY_CATEGORIES = ['报价询价', '合同协议', '会议安排', '项目进展', '发票付款', '人事招聘', '通知公告', '其他']
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_triage_context',
+        description:
+          'Load everything needed to summarize one mail: the message itself, the rest of its thread, related mails (same subject/sender/company), any summaries that already exist, and downloaded attachments. Call this before writing a summary.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            messageId: { type: 'string', description: 'Defaults to the message the user selected' },
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              message: { type: 'object', additionalProperties: true },
+              thread: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              related: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              summaries: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              attachments: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              hasHistory: { type: 'boolean' },
+            },
+            required: ['available', 'hasHistory'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `context unavailable: ${value.reason ?? 'unknown'}` }]
+            const lines = [
+              `thread: ${value.thread.length} · related: ${value.related.length} · summaries: ${value.summaries.length} · attachments: ${value.attachments.length}`,
+            ]
+            if (value.hasHistory) {
+              lines.push('历史总结存在，必须先向用户列出来并询问如何处理：')
+              for (const item of value.summaries) lines.push(`- [${item.category}] ${item.summary}`)
+            }
+            return [{ type: 'text', text: lines.join('\n') }]
+          },
+        },
+        timeoutMs: 60_000,
+        isConcurrencySafe: () => true,
+        async execute(args) {
+          const messageId = typeof args.messageId === 'string' && args.messageId.trim() ? args.messageId.trim() : uiState.messageId
+          if (!messageId) return { available: false, reason: 'no messageId given and nothing is selected', hasHistory: false }
+          const result = await callCore('summary.context', { messageId }, { timeoutMs: 60_000 })
+          if (!result.available) return { available: false, reason: result.reason.message, hasHistory: false }
+          const value = result.value || {}
+          return {
+            available: true,
+            reason: '',
+            message: value.message || {},
+            thread: value.thread || [],
+            related: value.related || [],
+            summaries: value.summaries || [],
+            attachments: value.attachments || [],
+            hasHistory: (value.summaries || []).length > 0,
+          }
+        },
+      }),
+    'mail: register mail_triage_context tool',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_summary_save',
+        description: `Store a summary for one mail. category must be one of: ${'报价询价/合同协议/会议安排/项目进展/发票付款/人事招聘/通知公告/其他'}.`,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            messageId: { type: 'string', description: 'Defaults to the selected message' },
+            category: { type: 'string', description: 'One of the fixed categories' },
+            summary: { type: 'string' },
+            keyPoints: { type: 'array', items: { type: 'string' } },
+            entities: { type: 'object', additionalProperties: true },
+          },
+          required: ['category', 'summary'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              id: { type: 'string' },
+              createdAt: { type: 'string' },
+              categories: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `summary not saved: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `summary ${value.id} saved` }]
+          },
+        },
+        timeoutMs: 30_000,
+        isConcurrencySafe: () => false,
+        async execute(args) {
+          const messageId = typeof args.messageId === 'string' && args.messageId.trim() ? args.messageId.trim() : uiState.messageId
+          if (!messageId) return { available: false, reason: 'no messageId given and nothing is selected', id: '', createdAt: '', categories: SUMMARY_CATEGORIES }
+          if (!SUMMARY_CATEGORIES.includes(args.category)) {
+            return { available: false, reason: `category must be one of ${SUMMARY_CATEGORIES.join('/')}`, id: '', createdAt: '', categories: SUMMARY_CATEGORIES }
+          }
+          const result = await callCore('summary.save', {
+            messageId,
+            category: args.category,
+            summary: args.summary,
+            keyPoints: Array.isArray(args.keyPoints) ? args.keyPoints : [],
+            entities: args.entities && typeof args.entities === 'object' ? args.entities : {},
+          })
+          if (!result.available) return { available: false, reason: result.reason.message, id: '', createdAt: '', categories: SUMMARY_CATEGORIES }
+          return { available: true, reason: '', id: result.value?.id ?? '', createdAt: result.value?.createdAt ?? '', categories: SUMMARY_CATEGORIES }
+        },
+      }),
+    'mail: register mail_summary_save tool',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_mark_done',
+        description: 'Mark one mail as handled in the follow-up list. Call it once the user confirms the work on that mail is finished.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            messageId: { type: 'string', description: 'Defaults to the selected message' },
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              messageId: { type: 'string' },
+              state: { type: 'string' },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `not marked: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `marked ${value.messageId} as ${value.state}` }]
+          },
+        },
+        timeoutMs: 20_000,
+        isConcurrencySafe: () => false,
+        async execute(args) {
+          const messageId = typeof args.messageId === 'string' && args.messageId.trim() ? args.messageId.trim() : uiState.messageId
+          if (!messageId) return { available: false, reason: 'no messageId given and nothing is selected', messageId: '', state: '' }
+          const result = await callCore('todo.set', { messageId, state: 'done' })
+          if (!result.available) return { available: false, reason: result.reason.message, messageId, state: '' }
+          return { available: true, reason: '', messageId, state: result.value?.state ?? 'done' }
+        },
+      }),
+    'mail: register mail_mark_done tool',
+  )
+
   // 3) 本机 HTTP 通道
   ctx.effect(() => {
     const disposers = []
@@ -1716,6 +1887,35 @@ export function apply(ctx, config) {
       if (typeof body.folder === 'string' && body.folder.trim()) params.folder = body.folder.trim()
       if (body.limit !== undefined) params.limit = Number(body.limit)
       return requireCoreResult(await callCore('attachment.backfill', params, { timeoutMs: SYNC_TIMEOUT_MS }))
+    })
+
+    // ---- 待办 / 总结 --------------------------------------------------------
+    route('/todo', async (body) => {
+      const params = {}
+      if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
+      if (typeof body.state === 'string') params.state = body.state
+      if (body.limit !== undefined) params.limit = Number(body.limit)
+      return requireCoreResult(await callCore('todo.list', params))
+    })
+
+    route('/todo/set', async (body) => {
+      const messageId = requireText(body.messageId, 'messageId')
+      const state = typeof body.state === 'string' ? body.state : ''
+      return requireCoreResult(await callCore('todo.set', { messageId, state }))
+    })
+
+    route('/summary', async (body) => {
+      const params = {}
+      if (typeof body.messageId === 'string' && body.messageId.trim()) params.messageId = body.messageId.trim()
+      if (typeof body.threadId === 'string' && body.threadId.trim()) params.threadId = body.threadId.trim()
+      if (typeof body.category === 'string' && body.category.trim()) params.category = body.category.trim()
+      if (body.limit !== undefined) params.limit = Number(body.limit)
+      return requireCoreResult(await callCore('summary.list', params))
+    })
+
+    route('/summary/context', async (body) => {
+      const messageId = requireText(body.messageId, 'messageId')
+      return requireCoreResult(await callCore('summary.context', { messageId }, { timeoutMs: 60_000 }))
     })
 
     // ---- 界面上下文（读取用户当前操作位置，不需审批）------------------------
