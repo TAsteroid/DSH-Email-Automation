@@ -19,7 +19,7 @@ import { createCoreClient } from './core-client.js'
 export const name = 'dsh-mail-plugin'
 
 /** 硬依赖：缺任何一个就不会激活，避免半死状态。 */
-export const inject = ['tools', 'webServer', 'timer', 'subprocess']
+export const inject = ['tools', 'webServer', 'timer', 'subprocess', 'configEditor']
 
 /**
  * 配置从 profile 的 patch 行读取，这里做防御式解析（缺省/类型不对都回落到默认）。
@@ -77,9 +77,12 @@ function resolvePython(config) {
   return 'python'
 }
 
+/** 自动同步间隔（毫秒）。0 表示关闭自动同步；其余不得低于 60 秒。 */
 function syncIntervalMs(config) {
   const raw = Number(config?.syncIntervalMs)
-  return Number.isFinite(raw) && raw > 0 ? Math.max(MIN_INTERVAL_MS, raw) : 300_000
+  if (!Number.isFinite(raw)) return 300_000
+  if (raw <= 0) return 0
+  return Math.max(MIN_INTERVAL_MS, raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +222,21 @@ export function apply(ctx, config) {
       const draft = byId.get(approval.draftId) || {}
       return { ...approval, subject: draft.subject ?? '', to: draft.to ?? '' }
     })
+  }
+
+  /** 找到本插件在 Loader 里的配置行，用于把自动同步间隔写回 profile。 */
+  function findConfigEntry() {
+    try {
+      const entries = ctx.configEditor.entries()
+      return (
+        entries.find((entry) => {
+          const label = `${entry?.id ?? ''} ${entry?.name ?? ''} ${entry?.packageName ?? ''}`
+          return label.includes('dsh-mail-plugin')
+        }) || null
+      )
+    } catch {
+      return null
+    }
   }
 
   async function snapshot() {    const coreStatus = core.status()
@@ -857,6 +875,24 @@ export function apply(ctx, config) {
     route('/ping', async () => ({ pong: true, at: new Date().toISOString() }))
     route('/status', async () => snapshot())
 
+    // ---- 插件配置（自动同步间隔）------------------------------------------
+    route('/config', async () => {
+      const ms = syncIntervalMs(config)
+      return { syncIntervalMs: ms, syncIntervalMinutes: Math.round(ms / 60_000) }
+    })
+
+    route('/config/sync-interval', async (body) => {
+      const minutes = Number(body.minutes)
+      if (!Number.isInteger(minutes) || minutes < 0) {
+        throw Object.assign(new Error('minutes must be a non-negative integer'), { code: 'BAD_REQUEST' })
+      }
+      const ms = minutes === 0 ? 0 : Math.max(MIN_INTERVAL_MS, minutes * 60_000)
+      const entry = findConfigEntry()
+      if (!entry) throw new Error('mail plugin config entry not found; edit cordis.patch.yml manually')
+      await ctx.configEditor.edit(entry, (current) => ({ ...current, syncIntervalMs: ms }))
+      return { syncIntervalMs: ms, syncIntervalMinutes: Math.round(ms / 60_000) }
+    })
+
     route('/accounts', async () => ({ accounts: requireCoreResult(await callCore('account.list'))?.accounts ?? [] }))
 
     route('/accounts/add', async (body) => {
@@ -1036,7 +1072,7 @@ export function apply(ctx, config) {
     }
   }, 'mail: http bridge')
 
-  // 4) 心跳：刷新 Core 状态 + 轮询兜底同步（IDLE 尚未实现，先按间隔拉）
+  // 4) 心跳：刷新 Core 状态 + 自动同步兜底（IDLE 尚未实现，先按间隔拉）
   let syncing = false
   ctx.effect(() => {
     const tick = async () => {
@@ -1074,9 +1110,14 @@ export function apply(ctx, config) {
       }
     }
     void tick()
+    const interval = syncIntervalMs(config)
+    if (interval <= 0) {
+      log('auto sync disabled (interval = 0): 只做一次启动检查')
+      return undefined
+    }
     return ctx.timer.interval(() => {
       void tick()
-    }, syncIntervalMs(config))
+    }, interval)
   }, 'mail: heartbeat timer')
 
   log(`phase1 ready; python=${python}; coreDir=${coreDir}; dataDir=${dataDir}`)

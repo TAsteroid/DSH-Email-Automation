@@ -264,7 +264,12 @@ window.__ModuleLoader__.load({
         retry: '重试',
         phase0: 'Phase 0 骨架：入口与数据通道已打通，邮件同步尚未实现。',
         settingsBackend: 'Mail Core 地址',
-        settingsPoll: '轮询间隔',
+        settingsPoll: '自动同步间隔',
+        settingsSyncInterval: '自动同步间隔',
+        settingsSyncIntervalHint: '单位分钟，填整数；0 表示不自动同步。只同步收件箱，界面仍需手动刷新。',
+        save: '保存',
+        syncIntervalInvalid: '请输入不小于 0 的整数',
+        syncIntervalSaved: '已保存',
         settingsCreds: '凭据存储',
         settingsCredsValue: 'Windows DPAPI（由 Mail Core 管理）',
         settingsAccounts: '邮箱账户',
@@ -440,7 +445,12 @@ window.__ModuleLoader__.load({
         retry: 'Retry',
         phase0: 'Phase 0 skeleton: entry point and data channel work; mail sync is not implemented yet.',
         settingsBackend: 'Mail Core URL',
-        settingsPoll: 'Poll interval',
+        settingsPoll: 'Auto sync interval',
+        settingsSyncInterval: 'Auto sync interval',
+        settingsSyncIntervalHint: 'Integer minutes; 0 disables automatic sync. Only INBOX is synced; the panel still needs a manual refresh.',
+        save: 'Save',
+        syncIntervalInvalid: 'Enter an integer >= 0',
+        syncIntervalSaved: 'Saved',
         settingsCreds: 'Credential storage',
         settingsCredsValue: 'Windows DPAPI (managed by Mail Core)',
         settingsAccounts: 'Mailbox accounts',
@@ -2833,7 +2843,8 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function KnowledgeView({ t }) {
+    function KnowledgeView({ t, status, accountId, onSelectAccount }) {
+      const accounts = (status && status.accounts) || []
       const [selected, setSelected] = React.useState('contacts')
       const groups = [
         { id: 'contacts', title: t('kbContacts'), items: [] },
@@ -2841,13 +2852,24 @@ window.__ModuleLoader__.load({
         { id: 'projects', title: t('kbProjects'), items: [] },
         { id: 'files', title: t('kbFiles'), items: [] },
       ]
-      return h(SplitPane, {
+      const content = h(SplitPane, {
         storageKey: 'knowledge',
         spec: PANE_SPEC,
         label: t('resize'),
         left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
         right: h(DetailPane, { t, titleKey: 'kbDetailTitle', hintKey: 'kbDetailHint' }),
       })
+      return h(
+        'div',
+        { style: { display: 'flex', flex: 1, minHeight: 0 } },
+        h(SplitPane, {
+          storageKey: 'knowledge-accounts',
+          spec: RAIL_SPEC,
+          label: t('resize'),
+          left: h(AccountRail, { t, accounts, accountId, onSelect: onSelectAccount }),
+          right: content,
+        }),
+      )
     }
 
     // ---- AI 工作台 ---------------------------------------------------------
@@ -3109,9 +3131,67 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 自动同步间隔：整数分钟，0 = 不自动同步；写回 profile 配置。 */
+    function SyncIntervalField({ t, status, onRefresh }) {
+      const stored = status && typeof status.syncIntervalMs === 'number' ? status.syncIntervalMs : 300000
+      const current = Math.round(stored / 60000)
+      const [minutes, setMinutes] = React.useState(String(current))
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      React.useEffect(() => {
+        setMinutes(String(Math.round(stored / 60000)))
+      }, [stored])
+
+      const save = async (event) => {
+        event.preventDefault()
+        const value = Number(minutes)
+        if (!Number.isInteger(value) || value < 0) {
+          setNote(t('syncIntervalInvalid'))
+          return
+        }
+        setBusy(true)
+        setNote(null)
+        try {
+          await call('/config/sync-interval', { minutes: value })
+          setNote(t('syncIntervalSaved'))
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(
+        'form',
+        { onSubmit: save },
+        h(
+          'div',
+          { style: styles.row },
+          h('span', { style: styles.rowKey }, t('settingsSyncInterval')),
+          h(
+            'span',
+            { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+            h('input', {
+              type: 'number',
+              min: 0,
+              step: 1,
+              value: minutes,
+              onChange: (event) => setMinutes(event.target.value),
+              style: { ...styles.textInput, width: 88, padding: '4px 8px' },
+            }),
+            h('span', { style: styles.rowKey }, t('minute')),
+            h('button', { type: 'submit', style: styles.btnSmall, disabled: busy }, t('save')),
+          ),
+        ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('settingsSyncIntervalHint')),
+        note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
+      )
+    }
+
     function SettingsView({ t, status, onRefresh }) {
       const core = (status && status.core) || {}
-      const intervalMs = (status && status.syncIntervalMs) || 300000
       const accounts = (status && status.accounts) || []
       return h(
         'div',
@@ -3124,7 +3204,7 @@ window.__ModuleLoader__.load({
           h(Row, { label: t('coreVersion'), value: core.version || '—' }),
           h(Row, { label: t('coreDb'), value: core.dbPath || '—' }),
           h(Row, { label: t('coreDataDir'), value: core.dataDir || '—' }),
-          h(Row, { label: t('settingsPoll'), value: `${Math.round(intervalMs / 60000)} ${t('minute')}` }),
+          h(SyncIntervalField, { t, status, onRefresh }),
           h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),
           core.error
             ? h('p', { style: { ...styles.error, marginTop: 8 } }, `${t('coreError')}: ${core.error.code} · ${core.error.message}`)
@@ -3248,7 +3328,8 @@ window.__ModuleLoader__.load({
         content = h(TemplatesView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
       else if (tab === 'contacts') content = h(ContactsView, { t, status, accountId, onSelectAccount: setAccountId })
       else if (tab === 'ai') content = h(AiWorkbench, { t, status })
-      else if (tab === 'knowledge') content = h(KnowledgeView, { t, status })
+      else if (tab === 'knowledge')
+        content = h(KnowledgeView, { t, status, accountId, onSelectAccount: setAccountId })
       else content = h(SettingsView, { t, status, onRefresh: refresh })
 
       return h(

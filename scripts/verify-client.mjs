@@ -289,7 +289,9 @@ function runRealReactPass() {
     const settings = renderToStaticMarkup(h(views.SettingsView, { t, status: statusPayload }))
     check(settings.includes('C:\\data\\mail.db'), '[真实渲染] 设置页应回显 Core 数据库路径')
     check(settings.includes('t:mail.settingsCredsValue'), '[真实渲染] 设置页应说明凭据存储')
-    check(settings.includes('5 t:mail.minute'), '[真实渲染] 同步间隔应换算成分钟（300000ms → 5）')
+    check(settings.includes('t:mail.settingsSyncInterval'), '[真实渲染] 设置页应显示自动同步间隔')
+    check(/value="5"/.test(settings), '[真实渲染] 同步间隔应回显 5 分钟')
+    check(settings.includes('t:mail.settingsSyncIntervalHint'), '[真实渲染] 同步间隔应有 0=关闭 的说明')
     check(settings.includes('t:mail.accountAdd'), '[真实渲染] 设置页应有添加账户表单')
     check(settings.includes('t:mail.passwordHint'), '[真实渲染] 设置页应说明密码如何保存')
     check(settings.includes('type="password"'), '[真实渲染] 密码输入框应为 password 类型')
@@ -343,7 +345,7 @@ function runRealReactPass() {
     const viewCases = [
       ['待跟进', views.TodoView, 't:mail.aiEmptyTitle', 2],
       ['草稿箱', views.DraftsView, 't:mail.draftDetailTitle', 1],
-      ['知识库', views.KnowledgeView, 't:mail.kbContacts', 1],
+      ['知识库', views.KnowledgeView, 't:mail.kbContacts', 2],
     ]
     for (const [label, View, needle, expectedSplitters] of viewCases) {
       const markup = renderToStaticMarkup(h(View, { t, status: statusPayload }))

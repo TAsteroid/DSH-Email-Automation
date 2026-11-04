@@ -25,6 +25,7 @@ const check = (condition, message) => {
 
 // ---- 假 Mail Core ---------------------------------------------------------
 const received = []
+const configEdits = []
 let tornDown = false
 
 function makeFakeChild() {
@@ -202,8 +203,7 @@ const tools = new Map()
 const routes = new Map()
 const intervals = []
 
-const ctx = {
-  effect: (fn) => {
+const ctx = {  effect: (fn) => {
     const result = fn()
     return () => (typeof result === 'function' ? result() : undefined)
   },
@@ -227,6 +227,12 @@ const ctx = {
   },
   subprocess: {
     spawn: () => makeFakeChild(),
+  },
+  configEditor: {
+    entries: () => [{ id: 'dsh-mail-plugin', name: 'dsh-mail-plugin' }],
+    edit: async (entry, change) => {
+      configEdits.push({ entry, next: change({ syncIntervalMs: 300_000 }) })
+    },
   },
   logger: { info: () => {} },
 }
@@ -609,6 +615,41 @@ check(syncBadLimit && syncBadLimit.status === 400, `limit 越界应 400，实际
 
 const syncNoAccount = await invoke('/api/dsh-mail/sync', { method: 'POST', body: '{}' })
 check(syncNoAccount && syncNoAccount.status === 400, `缺 accountId 应 400，实际 ${syncNoAccount && syncNoAccount.status}`)
+
+// ---- 插件配置（自动同步间隔）----------------------------------------------
+const configRoute = await invoke('/api/dsh-mail/config', { method: 'POST', body: '{}' })
+check(configRoute && configRoute.status === 200, `config 应 200，实际 ${configRoute && configRoute.status}`)
+if (configRoute && configRoute.body) {
+  const parsed = JSON.parse(configRoute.body)
+  check(parsed.value.syncIntervalMs === 60_000, '配置 1000ms 应被抬到下限 60000ms')
+  check(parsed.value.syncIntervalMinutes === 1, '应换算成 1 分钟')
+}
+
+const setInterval1 = await invoke('/api/dsh-mail/config/sync-interval', {
+  method: 'POST',
+  body: JSON.stringify({ minutes: 3 }),
+})
+check(setInterval1 && setInterval1.status === 200, `设置间隔应 200，实际 ${setInterval1 && setInterval1.status}`)
+check(configEdits.length === 1 && configEdits[0].next.syncIntervalMs === 180_000, '应把 3 分钟换算成 180000ms 写回配置')
+
+const setZero = await invoke('/api/dsh-mail/config/sync-interval', {
+  method: 'POST',
+  body: JSON.stringify({ minutes: 0 }),
+})
+check(setZero && setZero.status === 200, `0 应允许（关闭自动同步），实际 ${setZero && setZero.status}`)
+check(configEdits.length === 2 && configEdits[1].next.syncIntervalMs === 0, '0 分钟应写回 syncIntervalMs=0')
+
+const setNegative = await invoke('/api/dsh-mail/config/sync-interval', {
+  method: 'POST',
+  body: JSON.stringify({ minutes: -1 }),
+})
+check(setNegative && setNegative.status === 400, `负数应 400，实际 ${setNegative && setNegative.status}`)
+
+const setFraction = await invoke('/api/dsh-mail/config/sync-interval', {
+  method: 'POST',
+  body: JSON.stringify({ minutes: 1.5 }),
+})
+check(setFraction && setFraction.status === 400, `小数应 400，实际 ${setFraction && setFraction.status}`)
 
 // ---- 定时器 ---------------------------------------------------------------
 check(intervals.length === 1, `应注册 1 个心跳定时器，实际 ${intervals.length}`)
