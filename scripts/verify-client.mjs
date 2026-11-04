@@ -460,6 +460,23 @@ function runRealReactPass() {
     check(railWithPending.includes('报价回复'), '[真实渲染] 待审批应显示草稿主题')
     check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应有「复制发送指令」')
     check(railWithPending.includes('t:mail.approvalSendHint'), '[真实渲染] 应说明发送需经 Agent 审批')
+
+    // 审批历史要显示批准方式
+    const historyStatus = {
+      ...statusPayload,
+      approvals: {
+        pending: [],
+        history: [
+          { id: 'apr_h1', subject: '报价回复', to: 'x@b.com', status: 'approved', decidedVia: 'prompt', decidedBy: 'user' },
+          { id: 'apr_h2', subject: '另一封', to: 'y@b.com', status: 'approved', decidedVia: 'policy-never', decidedBy: '' },
+        ],
+      },
+    }
+    const historyMarkup = renderToStaticMarkup(
+      h(views.ApprovalsRail, { t, status: historyStatus, initialMode: 'history' }),
+    )
+    check(historyMarkup.includes('t:mail.decidedByUser'), '[真实渲染] 历史应显示「用户批准」')
+    check(historyMarkup.includes('t:mail.decidedByPolicy'), '[真实渲染] 历史应显示「策略放行」')
     check(railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批应有「拒绝」')
 
     const agentMarkup = renderToStaticMarkup(h(views.AgentMailComposer, { t, message: baseMessage }))

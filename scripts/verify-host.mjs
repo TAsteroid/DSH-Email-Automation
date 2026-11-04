@@ -27,7 +27,9 @@ const check = (condition, message) => {
 const received = []
 const configEdits = []
 const approvalRequests = []
+const approveCalls = []
 let approvalOutcome = 'allowed-once'
+let approvalPolicyConfig = 'ask'
 let tornDown = false
 
 function makeFakeChild() {
@@ -161,7 +163,10 @@ function handleMethod(method, params) {
     }
   }
   if (method === 'approval.request') return { id: 'apr_new', draftId: params.draftId, contentHash: 'h1', expiresAt: '2026-11-05T10:00:00Z' }
-  if (method === 'approval.approve') return { approved: true }
+  if (method === 'approval.approve') {
+    approveCalls.push(params)
+    return { approved: true }
+  }
   if (method === 'approval.reject') return { rejected: true }
   if (method === 'action.execute') return { sent: true, messageId: '<msg@example>', executedAt: '2026-11-04T10:05:00Z' }
   if (method === 'message.list') {
@@ -242,7 +247,10 @@ const ctx = {  effect: (fn) => {
     spawn: () => makeFakeChild(),
   },
   configEditor: {
-    entries: () => [{ id: 'dsh-mail-plugin', name: 'dsh-mail-plugin' }],
+    entries: () => [
+      { id: 'dsh-mail-plugin', name: 'dsh-mail-plugin' },
+      { id: 'include:approval', name: '@deepseek-ai/dsh-user-approval', config: { policy: approvalPolicyConfig } },
+    ],
     edit: async (entry, change) => {
       configEdits.push({ entry, next: change({ syncIntervalMs: 300_000 }) })
     },
@@ -615,11 +623,22 @@ if (sendTool) {
   check(approvalRequests.length === 1, '应调用一次宿主审批')
   check(approvalRequests[0].toolName === 'mail_send_draft', '审批应标明来源工具')
   check(String(approvalRequests[0].displayReason.zh).includes('报价回复'), '审批文案应带上邮件主题')
+  check(approveCalls[0]?.decidedVia === 'prompt', '审计应记录 decidedVia=prompt')
+  check(approveCalls[0]?.decidedBy === 'user', '审计应记录 decidedBy=user')
 
   approvalOutcome = 'rejected'
   const rejectedSend = await sendTool.execute({ draftId: 'drf_1' }, { agent: { id: 'sess_1' }, signal: new AbortController().signal })
   check(rejectedSend.sent === false, '用户拒绝时不应发送')
   check(String(rejectedSend.reason).includes('rejected'), '应把拒绝原因带回来')
+
+  // 策略为 never 时宿主会直接放行、不弹框，必须拒绝发送
+  approvalPolicyConfig = 'never'
+  const sendsBefore = approveCalls.length
+  const neverSend = await sendTool.execute({ draftId: 'drf_1' }, { agent: { id: 'sess_1' }, signal: new AbortController().signal })
+  check(neverSend.sent === false, 'policy=never 时不应发送')
+  check(String(neverSend.reason).includes('never'), '应说明策略原因')
+  check(approveCalls.length === sendsBefore, 'policy=never 时不应产生批准记录')
+  approvalPolicyConfig = 'ask'
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

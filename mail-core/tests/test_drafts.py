@@ -90,15 +90,14 @@ class SchemaV5MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v4_database_upgrades_to_v5_and_keeps_data(self):
+    def test_v4_database_upgrades_and_keeps_data(self):
         path = self.tmp / "legacy-v4.db"
         self._make_v4_database(path)
 
         store = Store(path)
         self.addCleanup(store.close)
 
-        self.assertEqual(SCHEMA_VERSION, 5)
-        self.assertEqual(store.schema_version, 5)
+        self.assertEqual(store.schema_version, SCHEMA_VERSION)
         self.assertEqual(store.get_account("acc_old")["address"], "old@b.com")
         self.assertEqual([c["name"] for c in store.list_contacts()], ["旧联系人"])
         self.assertEqual([t["name"] for t in store.list_templates()], ["旧模板"])
@@ -120,7 +119,7 @@ class SchemaV5MigrationTests(unittest.TestCase):
         )
         self.assertEqual(draft["status"], "draft")
 
-        # Re-running v5 must be a no-op, exactly like every earlier step.
+        # Re-running each added step must be a no-op, like every earlier one.
         self.assertEqual(store.migrate(), SCHEMA_VERSION)
         store._conn.executescript(MIGRATIONS[5])
         self.assertEqual(store.schema_version, SCHEMA_VERSION)

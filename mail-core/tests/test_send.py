@@ -295,6 +295,8 @@ class ApprovalSendTests(unittest.TestCase):
                     "createdAt",
                     "expiresAt",
                     "decidedAt",
+                    "decidedVia",
+                    "decidedBy",
                 },
             )
             self.assertTrue(item["decidedAt"].endswith("Z"))

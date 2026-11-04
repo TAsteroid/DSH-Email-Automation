@@ -144,4 +144,6 @@
 
 **依赖条件**：宿主 `include:approval` 的 `policy` 必须是 `ask`。若被设成 `never`，审批会被自动放行、不弹框——此时该门禁失效，需在 DSH 设置里改回 `ask`。
 
-**待补**：`approvals` 表还没有「批准来源/批准人」字段，审计上无法区分是人批的还是策略放行的。后续加 `decided_via`（prompt / policy-never）与 `decided_by`。
+**审计（schema v6，已完成）**：`approvals` 增加 `decided_via`（`prompt` / `policy-never` / `api` / 空）与 `decided_by`（`user` / `agent` / 空）。走弹窗批准时写 `prompt` + `user`；界面审批历史直接显示「用户批准 / 策略放行 / Agent 批准」。迁移不回填历史记录（老记录保持空串，不猜测来源）。
+
+**附带收紧**：策略为 `never` 时工具直接拒绝发送（不再静默放行），因为那种情况下宿主根本不弹框，等于没有人工确认。

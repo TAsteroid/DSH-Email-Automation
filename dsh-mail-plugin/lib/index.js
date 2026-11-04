@@ -353,6 +353,24 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 宿主审批策略：'ask' 才会真的弹框给真人；'never' 会直接放行。
+   * 读不到就按 'ask' 处理（与实际默认一致）。
+   */
+  function approvalPolicy() {
+    try {
+      const entry = ctx.configEditor.entries().find((candidate) => {
+        const label = `${candidate?.id ?? ''} ${candidate?.name ?? ''} ${candidate?.packageName ?? ''}`
+        return label.includes('dsh-user-approval') || /(^|\s)approval(\s|$)/.test(label)
+      })
+      if (!entry) return 'ask'
+      const config = entry.config ?? entry.options ?? {}
+      return config.policy === 'never' ? 'never' : 'ask'
+    } catch {
+      return 'ask'
+    }
+  }
+
   async function snapshot() {    const coreStatus = core.status()
     const accounts = ready ? await callCore('account.list') : { available: false, reason: readyError }
     const sync = ready ? await callCore('sync.status') : { available: false, reason: readyError }
@@ -989,6 +1007,11 @@ export function apply(ctx, config) {
           const agent = exec && exec.agent
           if (!ctx.approval || !agent) return fail('approval service or agent context unavailable')
 
+          // policy=never 时宿主会直接放行、不弹框，等于没有人工确认；这种情况拒绝发送
+          if (approvalPolicy() === 'never') {
+            return fail('approval policy is "never": sending requires a human prompt, switch the policy to "ask"')
+          }
+
           const reasonZh = `发送邮件给 ${value.to || '(空)'}：${value.subject || '(无主题)'}`
           const outcome = await ctx.approval.request({
             agent,
@@ -1002,7 +1025,7 @@ export function apply(ctx, config) {
           })
           if (outcome !== 'allowed-once') return fail(`user did not approve (${outcome})`)
 
-          const approved = await callCore('approval.approve', { id: approvalId })
+          const approved = await callCore('approval.approve', { id: approvalId, decidedVia: 'prompt', decidedBy: 'user' })
           if (!approved.available) return fail(approved.reason.message)
           const executed = await callCore('action.execute', { approvalId }, { timeoutMs: 120_000 })
           if (!executed.available) return fail(executed.reason.message)

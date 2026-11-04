@@ -33,7 +33,13 @@ from .protocol import (
     MailCoreError,
     bad_request,
 )
-from .store import CONTACT_FIELDS, Store, utc_now
+from .store import (
+    CONTACT_FIELDS,
+    DECIDED_BY_VALUES,
+    DECIDED_VIA_VALUES,
+    Store,
+    utc_now,
+)
 
 SECURITY_MODES = imap_client.SECURITY_MODES
 PROTOCOLS = ("imap", "pop3")
@@ -150,6 +156,19 @@ def _optional_id(params: dict, key: str) -> Optional[str]:
     if not isinstance(value, str) or not value.strip():
         raise bad_request(f"field {key} must be a non-empty string when given")
     return value.strip()
+
+
+def _optional_choice(
+    params: dict, key: str, allowed: tuple[str, ...], default: str = ""
+) -> str:
+    """Optional enum parameter; the empty string always means "not recorded"."""
+    value = params.get(key, default)
+    if value is None:
+        return default
+    choices = "', '".join(("",) + allowed)
+    if not isinstance(value, str) or value not in ("",) + allowed:
+        raise bad_request(f"field {key} must be one of: '{choices}'")
+    return value
 
 
 class Service:
@@ -626,11 +645,19 @@ class Service:
     def _decide_approval(self, params: dict, status: str, result_key: str) -> dict:
         """Shared ``approve`` / ``reject`` path (only a pending approval decides).
 
+        ``decidedVia`` / ``decidedBy`` are the optional v6 audit values: how
+        the decision was reached (host user prompt, policy auto-approval, or
+        the API) and who made it.  They default to the empty string, and are
+        validated before the approval lookup so a typo is always a
+        ``BAD_REQUEST`` rather than a decision.
+
         Expiry is ``now >= expiresAt``: the timestamp is the last instant the
         approval is valid, which also makes ``ttlMinutes: 0`` immediately
         expired instead of depending on the wall clock ticking over.
         """
         approval_id = _require_str(params, "id")
+        decided_via = _optional_choice(params, "decidedVia", DECIDED_VIA_VALUES)
+        decided_by = _optional_choice(params, "decidedBy", DECIDED_BY_VALUES)
         approval = self.store.get_approval(approval_id)
         if approval is None:
             raise MailCoreError(APPROVAL_NOT_FOUND, "approval not found")
@@ -638,7 +665,12 @@ class Service:
             raise bad_request(f"approval is already {approval['status']}")
         if utc_now() >= approval["expiresAt"]:
             raise MailCoreError(APPROVAL_EXPIRED, "approval has expired")
-        if not self.store.decide_approval(approval_id, status):
+        if not self.store.decide_approval(
+            approval_id,
+            status,
+            decided_via=decided_via,
+            decided_by=decided_by,
+        ):
             raise bad_request("approval is no longer pending")
 
         self.store.set_draft_status(

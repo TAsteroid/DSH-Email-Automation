@@ -59,12 +59,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 5}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 6}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录。**它和 `protocol` 无关**：v5 只新增表和新增方法，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段。**它和 `protocol` 无关**：v6 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -402,20 +402,31 @@ POP3 结果：
 {"pending": [{"id": "apr_xxx", "draftId": "dft_xxx", "action": "send",
   "contentHash": "9f2c…", "status": "pending",
   "createdAt": "2026-11-04T12:00:00Z", "expiresAt": "2026-11-05T12:00:00Z",
-  "decidedAt": ""}],
+  "decidedAt": "", "decidedVia": "", "decidedBy": ""}],
  "history": [ ...同样结构，status 为 approved / rejected... ]}
 ```
 
 - `pending`：所有 `status = pending` 的记录，按 `createdAt` **升序**（队列顺序）。过期但未处理的仍是 `pending`，`expiresAt` 已过；对它们 `approve` / `reject` / `execute` 返回 `APPROVAL_EXPIRED`。
 - `history`：已决定的记录（`approved` / `rejected`），按 `createdAt` **倒序**，最多 50 条。
+- `decidedVia` / `decidedBy` 是 v6 审计字段：**pending 项为空串**；已决定项取 `approve` / `reject` 传入的值（未传也是空串，v5 老记录迁移后同样为空串）。
 - 审批卡片要显示主题 / 收件人时，用 `draftId` 再调 `draft.get`（草稿已删则 `NOT_FOUND`）。
 
 ### `approval.approve` / `approval.reject`
 
-参数：`{"id": "apr_xxx"}` → 结果 `{"approved": true}` / `{"rejected": true}`
+参数：
 
+```json
+{"id": "apr_xxx", "decidedVia": "prompt", "decidedBy": "user"}
+```
+
+结果：`{"approved": true}` / `{"rejected": true}`
+
+- `decidedVia` / `decidedBy` 可省略，缺省存空串（= 未记录来源）。
+- `decidedVia` 仅允许 `""` | `"prompt"` | `"policy-never"` | `"api"`：用户弹窗批准、宿主策略（`policy=never`）自动放行、API 直接调用。
+- `decidedBy` 仅允许 `""` | `"user"` | `"agent"`。
+- 非法值（大小写不符、带空格、非字符串）→ `BAD_REQUEST`，**审批保持 pending**，不会消耗这次决定。
 - 只接受 `status = pending` 的审批：不存在 → `APPROVAL_NOT_FOUND`；已过期（`now >= expiresAt`）→ `APPROVAL_EXPIRED`；已决定 → `BAD_REQUEST`（message 带当前状态，如 `approval is already approved`）。
-- 通过 / 驳回后写 `decidedAt`，并把草稿状态改为 `approved` / `rejected`。审批自身状态此后保持 `approved`（发送成功后也不变）。
+- 通过 / 驳回后写 `decidedAt` 和两个审计字段，并把草稿状态改为 `approved` / `rejected`。审批自身状态此后保持 `approved`（发送成功后也不变）。
 
 ### `action.execute`
 
@@ -462,3 +473,4 @@ POP3 结果：
 - 新增方法不做破坏性变更；删除或改签名的旧方法必须提升 `protocol`。
 - 数据库 `schemaVersion` 独立于 `protocol`：v4 只**新增** `contacts`、`templates` 和 `messages_fts`（FTS5 external content 表 + 三个同步触发器），不改旧表；老库（v1~v3）启动时自动逐级迁移，v4 迁移会把已有 `messages` 全量重建进索引，不需要重新同步。
 - v5 只**新增** `drafts`、`approvals`、`mail_actions` 三张表及其索引，不改旧表；老库（v1~v4）启动时自动迁移，账号 / 邮件 / 通讯录 / 模板全部保留。`drafts.account_id` 与 `approvals.draft_id` 带 `ON DELETE CASCADE`（删账号连带草稿、删草稿连带审批），`mail_actions` 故意不设外键，发送审计记录不随草稿删除而消失。
+- v6 只给 `approvals` **新增** `decided_via`、`decided_by` 两列，默认空串，不改旧表结构、不丢旧数据；已有决定迁移后审计字段为空（v5 记录本来就没有来源信息，不回填猜测值）。迁移幂等，老库（v1~v5）启动时自动升级。

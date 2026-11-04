@@ -17,8 +17,11 @@ so a v3 mailbox becomes searchable without resyncing mail.
 Schema v5 adds the approval-bound send pipeline: ``drafts`` (one row per
 editable draft, with the content hash the approval is bound to),
 ``approvals`` (a send request with a TTL) and ``mail_actions`` (the immutable
-execute log, keyed by an idempotency key).  Every migration is additive and
-repeatable, so a v4 mailbox upgrades in place.
+execute log, keyed by an idempotency key).  Schema v6 adds the approval audit
+columns ``approvals.decided_via`` / ``approvals.decided_by`` so a decision can
+be attributed to the host prompt, a policy auto-approval or the API, and to a
+user or an agent.  Every migration is additive and repeatable, so a v5
+mailbox upgrades in place.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -245,12 +248,33 @@ CREATE TABLE IF NOT EXISTS mail_actions (
 """
 
 
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """Add the approval audit columns (``decided_via`` / ``decided_by``).
+
+    ``ALTER TABLE ... ADD COLUMN`` has no ``IF NOT EXISTS``, so the column
+    list is inspected first; running the migration twice (or on a database
+    that already has the columns) is a no-op.  Existing decisions keep the
+    empty default: a v5 approval has no recorded provenance, and inventing
+    one would be worse than admitting the gap.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(approvals)")}
+    if "decided_via" not in columns:
+        conn.execute(
+            "ALTER TABLE approvals ADD COLUMN decided_via TEXT NOT NULL DEFAULT ''"
+        )
+    if "decided_by" not in columns:
+        conn.execute(
+            "ALTER TABLE approvals ADD COLUMN decided_by TEXT NOT NULL DEFAULT ''"
+        )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
     3: _MIGRATION_3,
     4: _MIGRATION_4,
     5: _MIGRATION_5,
+    6: _migrate_to_v6,
 }
 
 
@@ -263,6 +287,12 @@ CONTACT_FIELDS = ("name", "email", "phone", "company", "title", "notes")
 # but these tuples document the only statuses the service layer produces.
 DRAFT_STATUSES = ("draft", "approved", "sent", "rejected")
 APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired")
+
+# Approval audit values (schema v6).  The empty string means "not recorded"
+# and is always accepted; it is what a v5 row or a bare ``approval.approve``
+# call carries.
+DECIDED_VIA_VALUES = ("prompt", "policy-never", "api")
+DECIDED_BY_VALUES = ("user", "agent")
 
 # Protocol timestamps are fixed-width UTC, so plain string comparison is also
 # chronological (``now >= expires_at`` is the approval expiry test).
@@ -1175,6 +1205,8 @@ class Store:
             "createdAt": row["created_at"],
             "expiresAt": row["expires_at"],
             "decidedAt": row["decided_at"],
+            "decidedVia": row["decided_via"],
+            "decidedBy": row["decided_by"],
         }
 
     def add_approval(
@@ -1236,14 +1268,31 @@ class Store:
         return [self._approval_to_dict(row) for row in rows]
 
     def decide_approval(
-        self, approval_id: str, status: str, decided_at: Optional[str] = None
+        self,
+        approval_id: str,
+        status: str,
+        decided_at: Optional[str] = None,
+        *,
+        decided_via: str = "",
+        decided_by: str = "",
     ) -> bool:
-        """Set the decision on a still-pending approval; ``False`` if lost."""
+        """Set the decision on a still-pending approval; ``False`` if lost.
+
+        ``decided_via`` / ``decided_by`` are the v6 audit values; they stay
+        empty when the caller did not say how the decision was reached.
+        """
         with self._conn:
             cursor = self._conn.execute(
-                "UPDATE approvals SET status = ?, decided_at = ? "
+                "UPDATE approvals SET status = ?, decided_at = ?, "
+                "decided_via = ?, decided_by = ? "
                 "WHERE id = ? AND status = 'pending'",
-                (status, decided_at or utc_now(), approval_id),
+                (
+                    status,
+                    decided_at or utc_now(),
+                    decided_via,
+                    decided_by,
+                    approval_id,
+                ),
             )
         return cursor.rowcount > 0
 

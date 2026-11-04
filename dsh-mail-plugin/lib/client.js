@@ -162,6 +162,9 @@ window.__ModuleLoader__.load({
         copySendCommand: '复制发送指令',
         sendCommandCopied: '指令已复制',
         sentOk: '已发送',
+        decidedByUser: '用户批准',
+        decidedByPolicy: '策略放行',
+        decidedByAgent: 'Agent 批准',
         approvalExpired: '已过期',
         agentChatTitle: '与 Agent 对话处理这封邮件',
         agentChatPlaceholder: '例如：帮我起草一封回复，确认周五 9:30 的会议…',
@@ -346,6 +349,9 @@ window.__ModuleLoader__.load({
         copySendCommand: 'Copy send command',
         sendCommandCopied: 'Command copied',
         sentOk: 'Sent',
+        decidedByUser: 'approved by user',
+        decidedByPolicy: 'auto (policy)',
+        decidedByAgent: 'approved by agent',
         approvalExpired: 'expired',
         agentChatTitle: 'Ask the Agent about this mail',
         agentChatPlaceholder: 'e.g. Draft a reply confirming the meeting on Friday 9:30…',
@@ -2826,9 +2832,19 @@ window.__ModuleLoader__.load({
                   h(
                     'span',
                     { style: styles.listItemMeta },
-                    showingHistory
-                      ? `${item.status || ''} · ${item.to || ''}`
-                      : `${item.to || ''} · ${item.expiresAt || ''}`,
+                    (() => {
+                      const via =
+                        item.decidedVia === 'prompt'
+                          ? t('decidedByUser')
+                          : item.decidedVia === 'policy-never'
+                            ? t('decidedByPolicy')
+                            : item.decidedVia === 'api'
+                              ? t('decidedByAgent')
+                              : ''
+                      return showingHistory
+                        ? [item.status || '', via, item.to || ''].filter(Boolean).join(' · ')
+                        : `${item.to || ''} · ${item.expiresAt || ''}`
+                    })(),
                   ),
                   showingHistory
                     ? null
