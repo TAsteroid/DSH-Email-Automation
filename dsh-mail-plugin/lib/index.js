@@ -223,6 +223,9 @@ export function apply(ctx, config) {
 
   let syncing = false
 
+  /** 界面当前上下文（客户端上报），让 Agent 知道用户正在看哪封邮件。 */
+  let uiState = { messageId: '', accountId: '', folder: '', tab: '', updatedAt: '' }
+
   /** 找到账号的「已发送」文件夹名（服务器返回的是解码后的名字）。 */
   async function findSentFolder(accountId) {
     try {
@@ -1038,6 +1041,295 @@ export function apply(ctx, config) {
     'mail: register mail_send_draft tool',
   )
 
+  // ---- 上下文类工具：让 Agent 知道用户在指哪封邮件、相关材料在哪 -------------
+
+  const messageBrief = (message) => ({
+    id: message?.id ?? '',
+    subject: message?.subject ?? '',
+    fromAddr: message?.fromAddr ?? '',
+    toAddr: message?.toAddr ?? '',
+    date: message?.date ?? '',
+    folder: message?.folder ?? '',
+    threadId: message?.threadId ?? '',
+  })
+
+  /** 去掉 Re:/Fwd:/回复: 之类前缀，得到可检索的主题核心。 */
+  function subjectCore(subject) {
+    return String(subject || '')
+      .replace(/^\s*((re|fw|fwd|答复|回复|转发)\s*[:：]\s*)+/i, '')
+      .trim()
+  }
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_current',
+        description:
+          "What the user is looking at in the Mail panel right now (selected message, account, folder, tab). Call this before acting on 'this mail' so you do not have to ask for an id.",
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              hasSelection: { type: 'boolean' },
+              accountId: { type: 'string' },
+              folder: { type: 'string' },
+              tab: { type: 'string' },
+              messageId: { type: 'string' },
+              subject: { type: 'string' },
+              fromAddr: { type: 'string' },
+              date: { type: 'string' },
+              threadId: { type: 'string' },
+            },
+            required: ['available', 'hasSelection'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `mail context unavailable: ${value.reason ?? 'unknown'}` }]
+            if (!value.hasSelection) return [{ type: 'text', text: `no message selected (tab=${value.tab || '?'})` }]
+            return [{ type: 'text', text: `selected ${value.messageId}: ${value.subject} (from ${value.fromAddr}, ${value.date})` }]
+          },
+        },
+        timeoutMs: 20_000,
+        isConcurrencySafe: () => true,
+        async execute() {
+          const base = {
+            available: true,
+            reason: '',
+            hasSelection: Boolean(uiState.messageId),
+            accountId: uiState.accountId,
+            folder: uiState.folder,
+            tab: uiState.tab,
+            messageId: uiState.messageId,
+            subject: '',
+            fromAddr: '',
+            date: '',
+            threadId: '',
+          }
+          if (!uiState.messageId) return base
+          const result = await callCore('message.get', { id: uiState.messageId })
+          if (!result.available) return { ...base, available: false, reason: result.reason.message }
+          const brief = messageBrief(result.value)
+          return {
+            ...base,
+            hasSelection: true,
+            messageId: brief.id,
+            subject: brief.subject,
+            fromAddr: brief.fromAddr,
+            date: brief.date,
+            threadId: brief.threadId,
+          }
+        },
+      }),
+    'mail: register mail_current tool',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_thread',
+        description: 'Fetch the whole conversation (thread) a message belongs to, oldest first. Accepts either a messageId or a threadId.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            messageId: { type: 'string' },
+            threadId: { type: 'string' },
+            limit: { type: 'number', description: 'Max messages to return (default 30)' },
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              threadId: { type: 'string' },
+              subject: { type: 'string' },
+              messages: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string' },
+                    subject: { type: 'string' },
+                    fromAddr: { type: 'string' },
+                    toAddr: { type: 'string' },
+                    date: { type: 'string' },
+                    folder: { type: 'string' },
+                  },
+                },
+              },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `thread unavailable: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `thread ${value.threadId}: ${value.messages.length} message(s) — ${value.subject}` }]
+          },
+        },
+        timeoutMs: 30_000,
+        isConcurrencySafe: () => true,
+        async execute(args, exec) {
+          let threadId = typeof args.threadId === 'string' ? args.threadId.trim() : ''
+          if (!threadId) {
+            const sourceId = typeof args.messageId === 'string' && args.messageId.trim() ? args.messageId.trim() : uiState.messageId
+            if (!sourceId) return { available: false, reason: 'no messageId or threadId given and nothing is selected', threadId: '', subject: '', messages: [] }
+            const message = await callCore('message.get', { id: sourceId })
+            if (!message.available) return { available: false, reason: message.reason.message, threadId: '', subject: '', messages: [] }
+            threadId = message.value?.threadId ?? ''
+            if (!threadId) return { available: false, reason: 'message has no threadId', threadId: '', subject: '', messages: [] }
+          }
+          const result = await callCore('thread.get', { threadId })
+          if (!result.available) return { available: false, reason: result.reason.message, threadId, subject: '', messages: [] }
+          const limit = Number.isInteger(args.limit) && args.limit > 0 ? args.limit : 30
+          const messages = (result.value?.messages ?? []).slice(0, limit).map((message) => ({
+            id: message?.id ?? '',
+            subject: message?.subject ?? '',
+            fromAddr: message?.fromAddr ?? '',
+            toAddr: message?.toAddr ?? '',
+            date: message?.date ?? '',
+            folder: message?.folder ?? '',
+          }))
+          return { available: true, reason: '', threadId, subject: result.value?.subject ?? '', messages }
+        },
+      }),
+    'mail: register mail_thread tool',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_related',
+        description:
+          'Find material related to one message: the rest of its thread, plus messages sharing its subject, sender, or the sender company from the address book. Each item says why it matched.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            messageId: { type: 'string', description: 'Defaults to the message the user currently has selected' },
+            limit: { type: 'number', description: 'Max related messages (default 10)' },
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              source: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string' },
+                  subject: { type: 'string' },
+                  fromAddr: { type: 'string' },
+                  threadId: { type: 'string' },
+                },
+              },
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string' },
+                    subject: { type: 'string' },
+                    fromAddr: { type: 'string' },
+                    date: { type: 'string' },
+                    folder: { type: 'string' },
+                    reason: { type: 'string' },
+                  },
+                },
+              },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `related unavailable: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `${value.items.length} related message(s) for ${value.source?.subject ?? ''}` }]
+          },
+        },
+        timeoutMs: 60_000,
+        isConcurrencySafe: () => true,
+        async execute(args) {
+          const id = typeof args.messageId === 'string' && args.messageId.trim() ? args.messageId.trim() : uiState.messageId
+          if (!id) return { available: false, reason: 'no messageId given and nothing is selected', source: null, items: [] }
+          const source = await callCore('message.get', { id })
+          if (!source.available) return { available: false, reason: source.reason.message, source: null, items: [] }
+          const message = source.value ?? {}
+          const limit = Number.isInteger(args.limit) && args.limit > 0 ? args.limit : 10
+
+          const seen = new Map()
+          const add = (hit, reason) => {
+            const hitId = hit?.id ?? ''
+            if (!hitId || hitId === id) return
+            if (seen.has(hitId)) return
+            seen.set(hitId, {
+              id: hitId,
+              subject: hit?.subject ?? '',
+              fromAddr: hit?.fromAddr ?? '',
+              date: hit?.date ?? '',
+              folder: hit?.folder ?? '',
+              reason,
+            })
+          }
+
+          // 1) 同线程
+          if (message.threadId) {
+            const thread = await callCore('thread.get', { threadId: message.threadId })
+            if (thread.available) {
+              for (const peer of thread.value?.messages ?? []) add(peer, '同一对话')
+            }
+          }
+
+          // 2) 同主题
+          const core = subjectCore(message.subject)
+          if (core.length > 1) {
+            const bySubject = await callCore('message.search', { query: core, limit: 20 })
+            if (bySubject.available) {
+              for (const hit of bySubject.value?.messages ?? []) add(hit, `主题相关：${core}`)
+            }
+          }
+
+          // 3) 同发件人 / 通讯录里的公司
+          const sender = String(message.fromAddr || '')
+          if (sender) {
+            const bySender = await callCore('message.search', { query: sender, limit: 20 })
+            if (bySender.available) {
+              for (const hit of bySender.value?.messages ?? []) add(hit, `同一发件人：${sender}`)
+            }
+            const contacts = await callCore('contact.list', {})
+            if (contacts.available) {
+              const match = (contacts.value?.contacts ?? []).find(
+                (contact) => String(contact.email || '').toLowerCase() === sender.toLowerCase(),
+              )
+              if (match?.company) {
+                const byCompany = await callCore('message.search', { query: match.company, limit: 20 })
+                if (byCompany.available) {
+                  for (const hit of byCompany.value?.messages ?? []) add(hit, `同一公司：${match.company}`)
+                }
+              }
+            }
+          }
+
+          const items = [...seen.values()].slice(0, limit)
+          return {
+            available: true,
+            reason: '',
+            source: { id, subject: message.subject ?? '', fromAddr: sender, threadId: message.threadId ?? '' },
+            items,
+          }
+        },
+      }),
+    'mail: register mail_related tool',
+  )
+
   // 3) 本机 HTTP 通道
   ctx.effect(() => {
     const disposers = []
@@ -1267,6 +1559,18 @@ export function apply(ctx, config) {
       const id = requireText(body.id, 'id')
       const params = { id, permanent: body.permanent === true }
       return requireCoreResult(await callCore('message.delete', params, { timeoutMs: 60_000 }))
+    })
+
+    // ---- 界面上下文（谁也不用批准，纯读取用户当前操作位置）------------------
+    route('/ui/state', async (body) => {
+      uiState = {
+        messageId: typeof body.messageId === 'string' ? body.messageId.trim() : '',
+        accountId: typeof body.accountId === 'string' ? body.accountId.trim() : '',
+        folder: typeof body.folder === 'string' ? body.folder.trim() : '',
+        tab: typeof body.tab === 'string' ? body.tab.trim() : '',
+        updatedAt: new Date().toISOString(),
+      }
+      return { ...uiState }
     })
 
     route('/sync', async (body) => {

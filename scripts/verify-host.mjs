@@ -223,6 +223,7 @@ function handleMethod(method, params) {
       html: '',
       size: 4812,
       seen: false,
+      threadId: 'acc_1:<root@example>',
     }
   }
   const error = new Error(`unknown method ${method}`)
@@ -719,6 +720,43 @@ const deletePermanent = await invoke('/api/dsh-mail/messages/delete', {
 if (deletePermanent && deletePermanent.body) {
   const parsed = JSON.parse(deletePermanent.body)
   check(parsed.value.trashed === false, 'permanent=true 应为永久删除')
+}
+
+// ---- 上下文工具：mail_current / mail_thread / mail_related ---------------
+const uiStateRoute = await invoke('/api/dsh-mail/ui/state', {
+  method: 'POST',
+  body: JSON.stringify({ messageId: 'msg_1', accountId: 'acc_1', folder: 'INBOX', tab: 'inbox' }),
+})
+check(uiStateRoute && uiStateRoute.status === 200, `ui/state 应 200，实际 ${uiStateRoute && uiStateRoute.status}`)
+
+const currentTool = tools.get('mail_current')
+if (currentTool) {
+  const current = await currentTool.execute({}, { agent: { id: 'sess_1' } })
+  check(current.hasSelection === true, 'mail_current 应返回已选中')
+  check(current.messageId === 'msg_1' && current.subject === '合同确认', 'mail_current 应带回邮件摘要')
+  check(current.tab === 'inbox', 'mail_current 应带回页签')
+}
+
+const threadTool = tools.get('mail_thread')
+if (threadTool) {
+  const thread = await threadTool.execute({ messageId: 'msg_1' }, { agent: { id: 'sess_1' } })
+  check(thread.available === true && thread.threadId === 'acc_1:<root@example>', 'mail_thread 应从 messageId 解析线程')
+  check(thread.messages.length === 2, 'mail_thread 应返回线程消息')
+}
+
+const relatedTool = tools.get('mail_related')
+if (relatedTool) {
+  const related = await relatedTool.execute({ messageId: 'msg_1' }, { agent: { id: 'sess_1' } })
+  check(related.available === true, `mail_related 应可用，实际 ${JSON.stringify(related.reason)}`)
+  check(related.items.length > 0, 'mail_related 应给出相关邮件')
+  check(
+    related.items.some((item) => String(item.reason).includes('同一对话')),
+    'mail_related 应标记同线程来源',
+  )
+  check(
+    related.items.every((item) => item.reason),
+    'mail_related 每条都要说明命中原因',
+  )
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

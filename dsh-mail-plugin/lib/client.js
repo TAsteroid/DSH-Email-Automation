@@ -1054,6 +1054,11 @@ window.__ModuleLoader__.load({
       return json.value
     }
 
+    /** 把「用户正在看什么」告诉宿主，供 Agent 的 mail_current 使用。失败无所谓。 */
+    function reportUiState(state) {
+      void call('/ui/state', state).catch(() => {})
+    }
+
     // ---- 图标 --------------------------------------------------------------
     function MailIcon({ size = 16 }) {
       return h(
@@ -1924,6 +1929,12 @@ window.__ModuleLoader__.load({
       const selectMessage = async (id) => {
         setSelectedId(id)
         setDetail(null)
+        reportUiState({
+          messageId: id,
+          accountId: accountId || (accounts[0] && accounts[0].id) || '',
+          folder: 'INBOX',
+          tab: 'inbox',
+        })
         try {
           setDetail(await call('/message', { id }))
         } catch {
@@ -2287,6 +2298,14 @@ window.__ModuleLoader__.load({
       }, [folder, load])
 
       const select = async (id) => {
+        setSelectedId(id)
+        setDetail(null)
+        reportUiState({
+          messageId: id,
+          accountId: accountId || (account && account.id) || '',
+          folder: folder || '',
+          tab: storageKey,
+        })
         setSelectedId(id)
         setDetail(null)
         try {
@@ -3685,6 +3704,11 @@ window.__ModuleLoader__.load({
       }, [load])
 
       const refresh = () => load(new AbortController().signal)
+
+      // 切换页签/账户时把上下文告诉宿主（选中邮件由各视图自己上报）
+      React.useEffect(() => {
+        reportUiState({ tab, accountId: accountId || '', messageId: '', folder: '' })
+      }, [tab, accountId])
 
       const [syncingAll, setSyncingAll] = React.useState(false)
       const syncAll = async () => {
