@@ -460,6 +460,11 @@ function runRealReactPass() {
         detailWithActions.indexOf('data-mail-scroll') < detailWithActions.indexOf('data-mail-agent-dock'),
       '[真实渲染] Agent 区应在滚动容器之外，常驻底部',
     )
+    check(
+      detailWithActions.includes('aria-orientation="horizontal"'),
+      '[真实渲染] Agent 区应有可上下拖动的高度手柄',
+    )
+    check(detailWithActions.includes('t:mail.agentChatResize'), '[真实渲染] 高度手柄应带可访问标签')
 
     // 引用拆分与气泡
     const quotedBody = [

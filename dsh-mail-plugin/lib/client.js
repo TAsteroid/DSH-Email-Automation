@@ -156,6 +156,7 @@ window.__ModuleLoader__.load({
         agentChatTitle: '与 Agent 对话处理这封邮件',
         agentChatPlaceholder: '例如：帮我起草一封回复，确认周五 9:30 的会议…',
         agentChatCopy: '复制提示词',
+        agentChatResize: '拖动调整高度，双击复位',
         todo: '待跟进',
         ai: 'AI 工作台',
         drafts: '草稿箱',
@@ -322,6 +323,7 @@ window.__ModuleLoader__.load({
         agentChatTitle: 'Ask the Agent about this mail',
         agentChatPlaceholder: 'e.g. Draft a reply confirming the meeting on Friday 9:30…',
         agentChatCopy: 'Copy prompt',
+        agentChatResize: 'Drag to resize, double-click to reset',
         todo: 'Follow-ups',
         ai: 'AI workspace',
         drafts: 'Drafts',
@@ -854,14 +856,32 @@ window.__ModuleLoader__.load({
       },
       modalHead: { display: 'flex', alignItems: 'center', gap: 8 },
       readingScroll: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' },
+      agentWrap: { flex: 'none', display: 'flex', flexDirection: 'column' },
+      rowHandle: {
+        height: 7,
+        flex: 'none',
+        cursor: 'row-resize',
+        touchAction: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'transparent',
+      },
+      rowHandleLine: (active) => ({
+        height: 1,
+        width: '100%',
+        background: active ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-border-l2)',
+        transition: 'background 120ms',
+      }),
       agentDock: {
         flex: 'none',
         display: 'flex',
         flexDirection: 'column',
         gap: 6,
-        padding: '10px 20px 12px',
+        padding: '4px 20px 12px',
         borderTop: '1px solid var(--dsw-alias-border-l2)',
         background: 'var(--dsw-alias-bg-layer-1)',
+        minHeight: 0,
       },
       detailShell: { display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 },
       railPanel: {
@@ -1428,10 +1448,54 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 详情页底部的 Agent 区：常驻在阅读区底部，正文在它上面单独滚动。 */
+    /** 详情页底部的 Agent 区：常驻阅读区底部，高度可上下拖动，正文单独滚动。 */
     function AgentMailComposer({ t, message }) {
       const [text, setText] = React.useState('')
       const [copied, setCopied] = React.useState(false)
+      const DOCK_SPEC = { initial: 120, min: 76, max: 420 }
+      const [height, setHeight] = React.useState(() => storedWidth('agentDock', DOCK_SPEC))
+      const [dragging, setDragging] = React.useState(false)
+      const [hovered, setHovered] = React.useState(false)
+      const dragRef = React.useRef(null)
+
+      React.useEffect(() => {
+        storeWidth('agentDock', height)
+      }, [height])
+
+      const down = (event) => {
+        if (typeof event.button === 'number' && event.button !== 0) return
+        event.preventDefault()
+        dragRef.current = { startY: event.clientY, startHeight: height }
+        setDragging(true)
+        if (typeof event.currentTarget.setPointerCapture === 'function') {
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId)
+          } catch {
+            // 捕获失败不影响基本拖动
+          }
+        }
+      }
+
+      const move = (event) => {
+        const session = dragRef.current
+        if (!session) return
+        // 往上拖变高
+        const next = Math.round(clamp(session.startHeight + (session.startY - event.clientY), DOCK_SPEC.min, DOCK_SPEC.max))
+        setHeight((prev) => (prev === next ? prev : next))
+      }
+
+      const up = (event) => {
+        if (!dragRef.current) return
+        dragRef.current = null
+        setDragging(false)
+        if (typeof event.currentTarget.releasePointerCapture === 'function') {
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          } catch {
+            // 同上
+          }
+        }
+      }
 
       const prompt = [
         `邮件主题：${message.subject || ''}`,
@@ -1454,24 +1518,46 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { style: styles.agentDock, 'data-mail-agent-dock': 'true' },
+        { style: styles.agentWrap, 'data-mail-agent-dock': 'true' },
         h(
           'div',
-          { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-          h('span', { style: { ...styles.sectionTitle, margin: 0 } }, t('agentChatTitle')),
-          h('span', { style: styles.spacer }),
-          copied ? h('span', { style: { ...styles.muted, margin: 0 } }, t('composeCopied')) : null,
-          h('button', { type: 'button', style: styles.btnSmall, onClick: copy }, t('agentChatCopy')),
-        ),
-        h('textarea', {
-          style: { ...styles.textArea, minHeight: 54, maxHeight: 120 },
-          value: text,
-          placeholder: t('agentChatPlaceholder'),
-          onChange: (event) => {
-            setText(event.target.value)
-            setCopied(false)
+          {
+            role: 'separator',
+            'aria-orientation': 'horizontal',
+            'aria-label': t('agentChatResize'),
+            title: t('agentChatResize'),
+            style: styles.rowHandle,
+            onPointerDown: down,
+            onPointerMove: move,
+            onPointerUp: up,
+            onPointerCancel: up,
+            onPointerEnter: () => setHovered(true),
+            onPointerLeave: () => setHovered(false),
+            onDoubleClick: () => setHeight(DOCK_SPEC.initial),
           },
-        }),
+          h('div', { style: styles.rowHandleLine(dragging || hovered) }),
+        ),
+        h(
+          'div',
+          { style: { ...styles.agentDock, height } },
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' } },
+            h('span', { style: { ...styles.sectionTitle, margin: 0 } }, t('agentChatTitle')),
+            h('span', { style: styles.spacer }),
+            copied ? h('span', { style: { ...styles.muted, margin: 0 } }, t('composeCopied')) : null,
+            h('button', { type: 'button', style: styles.btnSmall, onClick: copy }, t('agentChatCopy')),
+          ),
+          h('textarea', {
+            style: { ...styles.textArea, flex: 1, minHeight: 0, resize: 'none' },
+            value: text,
+            placeholder: t('agentChatPlaceholder'),
+            onChange: (event) => {
+              setText(event.target.value)
+              setCopied(false)
+            },
+          }),
+        ),
       )
     }
 
