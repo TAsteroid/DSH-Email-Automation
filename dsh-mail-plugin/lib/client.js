@@ -140,6 +140,22 @@ window.__ModuleLoader__.load({
         contactChatCopy: '复制提示词',
         contactChatCopied: '已复制到剪贴板',
         contactChatHint: 'DSH 目前没有向运行中的 Agent 注入消息的公开接口，这里生成一段带联系人上下文的提示词，复制到对话里发出。',
+        reply: '回复',
+        replyAll: '回复全部',
+        forward: '转发',
+        send: '发送',
+        composeTitle: '编辑邮件',
+        composeTo: '收件人',
+        composeCc: '抄送',
+        composeSubject: '主题',
+        composeBody: '正文',
+        composeClose: '关闭',
+        composeCopyBody: '复制邮件',
+        composeCopied: '已复制',
+        composeSendBlocked: '发送还没接通：按计划书 §10.1，发送必须走人工审批，属于 Phase 5。现在可以先把邮件内容复制出去。',
+        agentChatTitle: '与 Agent 对话处理这封邮件',
+        agentChatPlaceholder: '例如：帮我起草一封回复，确认周五 9:30 的会议…',
+        agentChatCopy: '复制提示词',
         todo: '待跟进',
         ai: 'AI 工作台',
         drafts: '草稿箱',
@@ -290,6 +306,22 @@ window.__ModuleLoader__.load({
         contactChatCopy: 'Copy prompt',
         contactChatCopied: 'Copied to clipboard',
         contactChatHint: 'DSH exposes no public API to inject a message into a running Agent, so this composes a prompt with the contact context for you to paste into the conversation.',
+        reply: 'Reply',
+        replyAll: 'Reply all',
+        forward: 'Forward',
+        send: 'Send',
+        composeTitle: 'Compose',
+        composeTo: 'To',
+        composeCc: 'Cc',
+        composeSubject: 'Subject',
+        composeBody: 'Body',
+        composeClose: 'Close',
+        composeCopyBody: 'Copy mail',
+        composeCopied: 'Copied',
+        composeSendBlocked: 'Sending is not wired yet: per plan §10.1 every send needs human approval (Phase 5). For now you can copy the composed mail.',
+        agentChatTitle: 'Ask the Agent about this mail',
+        agentChatPlaceholder: 'e.g. Draft a reply confirming the meeting on Friday 9:30…',
+        agentChatCopy: 'Copy prompt',
         todo: 'Follow-ups',
         ai: 'AI workspace',
         drafts: 'Drafts',
@@ -796,6 +828,31 @@ window.__ModuleLoader__.load({
         flexDirection: 'column',
         gap: 8,
       },
+      detailActions: { display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' },
+      modalBackdrop: {
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0, 0, 0, 0.45)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 60,
+        padding: 24,
+      },
+      modal: {
+        width: 'min(860px, 92vw)',
+        maxHeight: '86vh',
+        overflowY: 'auto',
+        background: 'var(--dsw-alias-bg-base)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-md)',
+        padding: 18,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        boxShadow: 'var(--dsw-elevation-lg, 0 12px 40px rgba(0,0,0,0.35))',
+      },
+      modalHead: { display: 'flex', alignItems: 'center', gap: 8 },
       railPanel: {
         width: 280,
         flex: 'none',
@@ -1261,6 +1318,152 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ---- 撰写 / Agent 区 ----------------------------------------------------
+    function buildCompose(mode, message, t) {
+      const subject = message.subject || ''
+      const prefixed = (prefix) => (/^re[:：]/i.test(subject) ? subject : `${prefix}${subject}`)
+      const quoted = [
+        '',
+        '------------------ 原邮件 ------------------',
+        `发件人: ${message.fromAddr || ''}`,
+        `时间: ${message.date || ''}`,
+        `主题: ${subject}`,
+        '',
+        message.text || '',
+      ].join('\n')
+
+      if (mode === 'forward') {
+        return { mode, to: '', cc: '', subject: prefixed('Fwd: '), body: quoted }
+      }
+      if (mode === 'replyAll') {
+        const cc = [message.toAddr, message.ccAddr].filter(Boolean).join(', ')
+        return { mode, to: message.fromAddr || '', cc, subject: prefixed('Re: '), body: quoted }
+      }
+      if (mode === 'reply') {
+        return { mode, to: message.fromAddr || '', cc: '', subject: prefixed('Re: '), body: quoted }
+      }
+      // 草稿/模板的“发送”：沿用原邮件的收件人与正文
+      return {
+        mode: 'send',
+        to: message.toAddr || '',
+        cc: message.ccAddr || '',
+        subject,
+        body: message.text || '',
+      }
+    }
+
+    /** 回复/转发/发送共用的编辑页。发送未接通（Phase 5 需审批），先提供复制。 */
+    function ComposeModal({ t, initial, onClose }) {
+      const [draft, setDraft] = React.useState(initial)
+      const [copied, setCopied] = React.useState(false)
+      const field = (labelKey, key, extra) =>
+        h(
+          'label',
+          { style: styles.formRow },
+          h('span', { style: styles.label }, t(labelKey)),
+          h('input', {
+            style: styles.textInput,
+            value: draft[key],
+            onChange: (event) => setDraft((prev) => ({ ...prev, [key]: event.target.value })),
+            ...extra,
+          }),
+        )
+
+      const copy = async () => {
+        const text = `收件人: ${draft.to}\n抄送: ${draft.cc}\n主题: ${draft.subject}\n\n${draft.body}`
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(text)
+          setCopied(true)
+        } catch {
+          setCopied(false)
+        }
+      }
+
+      return h(
+        'div',
+        { style: styles.modalBackdrop, role: 'dialog', 'aria-modal': 'true', 'aria-label': t('composeTitle') },
+        h(
+          'div',
+          { style: styles.modal },
+          h(
+            'div',
+            { style: styles.modalHead },
+            h('span', { style: styles.sectionTitle }, t('composeTitle')),
+            h('span', { style: styles.spacer }),
+            h('button', { type: 'button', style: styles.iconBtn, title: t('composeClose'), onClick: onClose }, '✕'),
+          ),
+          h('div', { style: styles.formGrid }, field('composeTo', 'to'), field('composeCc', 'cc')),
+          field('composeSubject', 'subject'),
+          h(
+            'label',
+            { style: styles.formRow },
+            h('span', { style: styles.label }, t('composeBody')),
+            h('textarea', {
+              style: { ...styles.textArea, minHeight: 220 },
+              value: draft.body,
+              onChange: (event) => setDraft((prev) => ({ ...prev, body: event.target.value })),
+            }),
+          ),
+          h('p', { style: { ...styles.muted, margin: 0 } }, t('composeSendBlocked')),
+          h(
+            'div',
+            { style: styles.formActions },
+            h('button', { type: 'button', style: styles.btn, onClick: copy }, t('composeCopyBody')),
+            copied ? h('span', { style: styles.muted }, t('composeCopied')) : null,
+            h('span', { style: styles.spacer }),
+            h('button', { type: 'button', style: styles.btnSmall, onClick: onClose }, t('composeClose')),
+          ),
+        ),
+      )
+    }
+
+    /** 详情页底部的 Agent 区：组装带邮件上下文的提示词（无法注入运行中的 Agent）。 */
+    function AgentMailComposer({ t, message }) {
+      const [text, setText] = React.useState('')
+      const [copied, setCopied] = React.useState(false)
+
+      const prompt = [
+        `邮件主题：${message.subject || ''}`,
+        `发件人：${message.fromAddr || ''}`,
+        `时间：${message.date || ''}`,
+        '',
+        (message.text || '').slice(0, 2000),
+        '',
+        `请基于以上邮件：${text.trim() || '帮我起草一封回复。'}`,
+      ].join('\n')
+
+      const copy = async () => {
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(prompt)
+          setCopied(true)
+        } catch {
+          setCopied(false)
+        }
+      }
+
+      return h(
+        'div',
+        { style: styles.chatBox },
+        h('p', { style: styles.sectionTitle }, t('agentChatTitle')),
+        h('textarea', {
+          style: styles.textArea,
+          value: text,
+          placeholder: t('agentChatPlaceholder'),
+          onChange: (event) => {
+            setText(event.target.value)
+            setCopied(false)
+          },
+        }),
+        h(
+          'div',
+          { style: styles.formActions },
+          h('button', { type: 'button', style: styles.btn, onClick: copy }, t('agentChatCopy')),
+          copied ? h('span', { style: styles.muted }, t('composeCopied')) : null,
+        ),
+        h('p', { style: styles.muted }, t('contactChatHint')),
+      )
+    }
+
     // ---- 收件箱 ------------------------------------------------------------
     /** 中间栏：本地索引的邮件列表（按时间倒序）。 */
     function MessageList({ t, messages, selectedId, onSelect, onSync, syncing }) {
@@ -1315,7 +1518,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 右栏：选中邮件的正文。 */
-    function MessageDetail({ t, message, accountAddress }) {
+    function MessageDetail({ t, message, accountAddress, actions, agentChat }) {
       if (!message) {
         return h(
           'div',
@@ -1332,9 +1535,19 @@ window.__ModuleLoader__.load({
       return h(
         'article',
         { style: styles.reading },
+        actions && actions.length > 0
+          ? h(
+              'div',
+              { style: styles.detailActions },
+              actions.map((action) =>
+                h('button', { key: action.key, type: 'button', style: styles.btnSmall, onClick: action.onClick }, action.label),
+              ),
+            )
+          : null,
         h('h2', { style: styles.msgSubject }, message.subject || t('noSubject')),
         h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
         h(ThreadBubbles, { t, message, accountAddress }),
+        agentChat ? h(AgentMailComposer, { t, message }) : null,
       )
     }
     function InboxView({ t, status }) {
@@ -1351,6 +1564,11 @@ window.__ModuleLoader__.load({
       const [selectedId, setSelectedId] = React.useState(null)
       const [detail, setDetail] = React.useState(null)
       const [syncing, setSyncing] = React.useState(false)
+      const [compose, setCompose] = React.useState(null)
+
+      const openCompose = (mode) => {
+        if (detail) setCompose(buildCompose(mode, detail, t))
+      }
 
       const loadMessages = React.useCallback(async () => {
         try {
@@ -1515,7 +1733,20 @@ window.__ModuleLoader__.load({
           h(MessageList, { t, messages, selectedId, onSelect: selectMessage, onSync: syncNow, syncing }),
         ),
         handle('list'),
-        h(MessageDetail, { t, message: detail, accountAddress: accounts.length > 0 ? accounts[0].address : '' }),
+        h(MessageDetail, {
+          t,
+          message: detail,
+          accountAddress: accounts.length > 0 ? accounts[0].address : '',
+          actions: detail
+            ? [
+                { key: 'reply', label: t('reply'), onClick: () => openCompose('reply') },
+                { key: 'replyAll', label: t('replyAll'), onClick: () => openCompose('replyAll') },
+                { key: 'forward', label: t('forward'), onClick: () => openCompose('forward') },
+              ]
+            : [],
+          agentChat: true,
+        }),
+        compose ? h(ComposeModal, { t, initial: compose, onClose: () => setCompose(null) }) : null,
       )
     }
 
@@ -1545,7 +1776,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 通用文件夹视图：左侧邮件标题，右侧正文；文件夹名从服务器解码结果里按模式找。 */
-    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey }) {
+    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey, composeMode, agentChat }) {
       const accounts = (status && status.accounts) || []
       const account = accounts.length > 0 ? accounts[0] : null
       const [folder, setFolder] = React.useState(null)
@@ -1554,8 +1785,24 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = React.useState(null)
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
+      const [compose, setCompose] = React.useState(null)
 
       const accountAddress = account ? account.address : ''
+
+      const folderActions = (message) => {
+        if (!message) return []
+        if (composeMode === 'send') {
+          return [{ key: 'send', label: t('send'), onClick: () => setCompose(buildCompose('send', message, t)) }]
+        }
+        if (composeMode === 'reply') {
+          return [
+            { key: 'reply', label: t('reply'), onClick: () => setCompose(buildCompose('reply', message, t)) },
+            { key: 'replyAll', label: t('replyAll'), onClick: () => setCompose(buildCompose('replyAll', message, t)) },
+            { key: 'forward', label: t('forward'), onClick: () => setCompose(buildCompose('forward', message, t)) },
+          ]
+        }
+        return []
+      }
 
       const load = React.useCallback(
         async (targetFolder) => {
@@ -1631,7 +1878,7 @@ window.__ModuleLoader__.load({
       }))
       const groups = [{ id: storageKey, title: folder || t(titleKey), items }]
 
-      return h(SplitPane, {
+      const content = h(SplitPane, {
         storageKey,
         spec: PANE_SPEC,
         label: t('resize'),
@@ -1655,8 +1902,20 @@ window.__ModuleLoader__.load({
         }),
         right: note
           ? h('div', { style: styles.detail }, h('p', { style: styles.muted }, note))
-          : h(MessageDetail, { t, message: detail, accountAddress }),
+          : h(MessageDetail, {
+              t,
+              message: detail,
+              accountAddress,
+              actions: folderActions(detail),
+              agentChat: agentChat === true,
+            }),
       })
+      return h(
+        'div',
+        { style: { display: 'flex', flex: 1, minHeight: 0 } },
+        content,
+        compose ? h(ComposeModal, { t, initial: compose, onClose: () => setCompose(null) }) : null,
+      )
     }
 
     function SentView({ t, status }) {
@@ -1667,6 +1926,7 @@ window.__ModuleLoader__.load({
         folderPattern: /sent|已发送/i,
         titleKey: 'sent',
         emptyHintKey: 'sentEmptyHint',
+        composeMode: 'reply',
       })
     }
 
@@ -1678,6 +1938,7 @@ window.__ModuleLoader__.load({
         folderPattern: /draft|草稿/i,
         titleKey: 'drafts',
         emptyHintKey: 'sentEmptyHint',
+        composeMode: 'send',
       })
     }
 
@@ -1721,6 +1982,7 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState({ name: '', subject: '', body: '' })
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
+      const [compose, setCompose] = React.useState(null)
 
       const load = React.useCallback(async () => {
         try {
@@ -1788,7 +2050,7 @@ window.__ModuleLoader__.load({
         },
       ]
 
-      return h(SplitPane, {
+      const content = h(SplitPane, {
         storageKey: 'templates',
         spec: PANE_SPEC,
         label: t('resize'),
@@ -1841,12 +2103,24 @@ window.__ModuleLoader__.load({
             'div',
             { style: styles.formActions },
             h('button', { type: 'submit', style: styles.btn, disabled: busy }, t('templateSave')),
+            h(
+              'button',
+              {
+                type: 'button',
+                style: styles.btnSmall,
+                onClick: () =>
+                  setCompose({ mode: 'send', to: '', cc: '', subject: draft.subject || '', body: draft.body || '' }),
+              },
+              t('send'),
+            ),
             selectedId ? h('button', { type: 'button', style: styles.dangerBtn, onClick: remove, disabled: busy }, t('templateDelete')) : null,
             note ? h('span', { style: styles.muted }, note) : null,
           ),
           templates.length === 0 ? h('p', { style: styles.muted }, t('templatesEmpty')) : null,
         ),
       })
+      const composeModal = compose ? h(ComposeModal, { t, initial: compose, onClose: () => setCompose(null) }) : null
+      return h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } }, content, composeModal)
     }
 
     /** 通讯录：左列表 / 右详情 + Agent 提示词生成。 */
@@ -2723,6 +2997,9 @@ window.__ModuleLoader__.load({
         MessageDetail,
         ThreadBubbles,
         splitQuoted,
+        buildCompose,
+        ComposeModal,
+        AgentMailComposer,
         TodoView,
         DraftsView,
         ApprovalsRail,

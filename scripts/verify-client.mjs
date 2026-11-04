@@ -406,6 +406,56 @@ function runRealReactPass() {
     const noSelectionMarkup = renderToStaticMarkup(h(views.MessageDetail, { t, message: null }))
     check(noSelectionMarkup.includes('t:mail.selectMessage'), '[真实渲染] 未选中时应显示占位')
 
+    // 回复 / 回复全部 / 转发 / 发送 的预填规则
+    const baseMessage = {
+      id: 'm1',
+      subject: '项目 A',
+      fromAddr: 'a@b.com',
+      toAddr: 'me@b.com',
+      ccAddr: 'c@b.com',
+      date: '2026-11-04T09:00:00Z',
+      text: '正文内容',
+    }
+    const replyDraft = views.buildCompose('reply', baseMessage, t)
+    check(replyDraft.to === 'a@b.com' && replyDraft.cc === '', '[撰写] 回复应只填发件人')
+    check(replyDraft.subject === 'Re: 项目 A', '[撰写] 回复主题应加 Re:')
+    check(replyDraft.body.includes('原邮件'), '[撰写] 回复应带原文引用')
+
+    const replyAllDraft = views.buildCompose('replyAll', baseMessage, t)
+    check(replyAllDraft.cc.includes('me@b.com') && replyAllDraft.cc.includes('c@b.com'), '[撰写] 回复全部应带上原收件人与抄送')
+
+    const forwardDraft = views.buildCompose('forward', baseMessage, t)
+    check(forwardDraft.subject === 'Fwd: 项目 A' && forwardDraft.to === '', '[撰写] 转发应加 Fwd: 且收件人为空')
+
+    const sendDraft = views.buildCompose('send', baseMessage, t)
+    check(sendDraft.to === 'me@b.com' && sendDraft.body === '正文内容', '[撰写] 草稿发送应沿用原收件人与正文')
+
+    check(
+      views.buildCompose('reply', { ...baseMessage, subject: 'Re: 已有前缀' }, t).subject === 'Re: 已有前缀',
+      '[撰写] 已有 Re: 前缀时不应重复添加',
+    )
+
+    const composeMarkup = renderToStaticMarkup(h(views.ComposeModal, { t, initial: replyDraft, onClose: () => {} }))
+    check(composeMarkup.includes('t:mail.composeTo'), '[真实渲染] 编辑页应有收件人')
+    check(composeMarkup.includes('t:mail.composeBody'), '[真实渲染] 编辑页应有正文')
+    check(composeMarkup.includes('a@b.com'), '[真实渲染] 编辑页应回显预填收件人')
+    check(composeMarkup.includes('t:mail.composeSendBlocked'), '[真实渲染] 编辑页应说明发送未接通')
+
+    const agentMarkup = renderToStaticMarkup(h(views.AgentMailComposer, { t, message: baseMessage }))
+    check(agentMarkup.includes('t:mail.agentChatTitle'), '[真实渲染] 详情页应有 Agent 区')
+    check(agentMarkup.includes('t:mail.agentChatCopy'), '[真实渲染] Agent 区应有复制提示词')
+
+    const detailWithActions = renderToStaticMarkup(
+      h(views.MessageDetail, {
+        t,
+        message: baseMessage,
+        actions: [{ key: 'reply', label: '回复', onClick: () => {} }],
+        agentChat: true,
+      }),
+    )
+    check(detailWithActions.includes('回复'), '[真实渲染] 详情页应渲染操作按钮')
+    check(detailWithActions.includes('t:mail.agentChatTitle'), '[真实渲染] 详情页底部应渲染 Agent 区')
+
     // 引用拆分与气泡
     const quotedBody = [
       '这是当前这封邮件的新内容。',
