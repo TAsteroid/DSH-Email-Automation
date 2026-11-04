@@ -197,16 +197,19 @@ export function apply(ctx, config) {
   }
 
   /** 统一把 Core 调用包成 { available, value | reason }，工具和路由共用。 */
-  async function callCore(method, params) {
+  async function callCore(method, params, options) {
     try {
       await ensureCore()
-      return { available: true, value: await core.request(method, params) }
+      return { available: true, value: await core.request(method, params, options) }
     } catch (error) {
       ready = core.state === 'ready'
       readyError = { code: error?.code ?? 'INTERNAL', message: error?.message ?? String(error) }
       return { available: false, reason: readyError }
     }
   }
+
+  /** 同步是长活：逐封 FETCH，整批可能几分钟，不能套 20s 的默认超时。 */
+  const SYNC_TIMEOUT_MS = 300_000
 
   async function snapshot() {
     const coreStatus = core.status()
@@ -405,6 +408,10 @@ export function apply(ctx, config) {
             accountId: { type: 'string', description: 'Account id from mail_accounts' },
             folder: { type: 'string', description: 'Folder name, defaults to INBOX' },
             limit: { type: 'number', description: 'Max messages to fetch this run (default 50, max 200)' },
+            reset: {
+              type: 'boolean',
+              description: 'Drop the local copy of this folder first and refetch from scratch',
+            },
           },
           required: ['accountId'],
         },
@@ -435,11 +442,22 @@ export function apply(ctx, config) {
         timeoutMs: 120_000,
         isConcurrencySafe: () => false,
         async execute(args) {
-          const result = await callCore('sync.run', {
-            accountId: args.accountId,
-            folder: args.folder,
-            limit: args.limit,
-          })
+          const folder = typeof args.folder === 'string' && args.folder.trim() ? args.folder.trim() : 'INBOX'
+          if (args.reset === true) {
+            const cleared = await callCore('sync.reset', { accountId: args.accountId, folder }, { timeoutMs: SYNC_TIMEOUT_MS })
+            if (!cleared.available) {
+              return { available: false, reason: cleared.reason.message, fetched: 0, stored: 0, skipped: 0, lastUid: 0 }
+            }
+          }
+          const result = await callCore(
+            'sync.run',
+            {
+              accountId: args.accountId,
+              folder: args.folder,
+              limit: args.limit,
+            },
+            { timeoutMs: SYNC_TIMEOUT_MS },
+          )
           if (!result.available) {
             return { available: false, reason: result.reason.message, fetched: 0, stored: 0, skipped: 0, lastUid: 0 }
           }
@@ -671,7 +689,19 @@ export function apply(ctx, config) {
       const folder = typeof body.folder === 'string' && body.folder.trim() ? body.folder.trim() : 'INBOX'
       const limit = body.limit === undefined ? 50 : Number(body.limit)
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('limit must be 1..200')
-      return requireCoreResult(await callCore('sync.run', { accountId, folder, limit }))
+      if (body.reset === true) {
+        const cleared = await callCore('sync.reset', { accountId, folder }, { timeoutMs: SYNC_TIMEOUT_MS })
+        requireCoreResult(cleared)
+      }
+      return requireCoreResult(
+        await callCore('sync.run', { accountId, folder, limit }, { timeoutMs: SYNC_TIMEOUT_MS }),
+      )
+    })
+
+    route('/sync/reset', async (body) => {
+      const accountId = requireText(body.accountId, 'accountId')
+      const folder = typeof body.folder === 'string' && body.folder.trim() ? body.folder.trim() : 'INBOX'
+      return requireCoreResult(await callCore('sync.reset', { accountId, folder }, { timeoutMs: SYNC_TIMEOUT_MS }))
     })
 
     return () => {
@@ -704,7 +734,7 @@ export function apply(ctx, config) {
             await core.request(
               'sync.run',
               { accountId: account.id, folder: 'INBOX', limit: 50 },
-              { timeoutMs: 120_000 },
+              { timeoutMs: SYNC_TIMEOUT_MS },
             )
           } catch (error) {
             log(`sync failed for ${account.address}: ${error?.message ?? error}`)

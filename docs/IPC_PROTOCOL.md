@@ -157,6 +157,14 @@ POP3 结果：
 
 **UIDVALIDITY 变化**：重置该文件夹游标、按新值重建记录，不得因为旧 uid 冲突而报错。
 
+### `sync.reset`
+
+参数：`{"accountId": "acc_xxx", "folder": "INBOX"}`
+
+结果：`{"accountId": "acc_xxx", "folder": "INBOX", "removed": 42}`
+
+删除该文件夹的本地副本并把同步游标清零，下一次 `sync.run` 从头重拉。用于「本地索引和服务器对不上」的场景（例如改了同步窗口之后）。
+
 ### `message.list`
 
 参数：

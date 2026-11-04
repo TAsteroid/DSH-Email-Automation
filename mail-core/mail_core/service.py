@@ -152,6 +152,7 @@ class Service:
             "account.test": self._account_test,
             "sync.status": self._sync_status,
             "sync.run": self._sync_run,
+            "sync.reset": self._sync_reset,
             "message.list": self._message_list,
             "message.get": self._message_get,
             "shutdown": self._shutdown,
@@ -338,6 +339,27 @@ class Service:
         return sync.run_sync(
             self.store, account, password, folder.strip(), limit
         )
+
+    def _sync_reset(self, params: dict) -> dict:
+        """Drop the local copy of one folder and restart its cursor.
+
+        Used when the local index is out of sync with the server (for example
+        after changing the sync window): the next ``sync.run`` refetches from
+        scratch instead of resuming from a cursor that skipped messages.
+        """
+        account_id = _require_str(params, "accountId")
+        folder = _optional_str(params, "folder", sync.DEFAULT_FOLDER) or ""
+        if not folder.strip():
+            raise bad_request("field folder must be a non-empty string")
+
+        account = self.store.get_account(account_id)
+        if account is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        folder = folder.strip()
+        removed = self.store.delete_messages(account_id, folder)
+        self.store.set_sync_state(account_id, folder, uidvalidity=0, last_uid=0, status="idle", error="")
+        return {"accountId": account_id, "folder": folder, "removed": removed}
 
     # -- messages ----------------------------------------------------------
 

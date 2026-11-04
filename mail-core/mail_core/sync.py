@@ -259,7 +259,10 @@ def _sync_imap(
 
         # ``UID n:*`` returns the last message even when its UID is below n;
         # filtering by ``> last_uid`` keeps a repeated sync truly empty.
-        uids = [uid for uid in _parse_search(data) if uid > last_uid][:limit]
+        pending = [uid for uid in _parse_search(data) if uid > last_uid]
+        # 新邮件优先：待拉数量超过一次限额时，取最新的一批。
+        # 否则首次同步会从最旧的邮件开始往里灌，界面上永远先看到很久以前的信。
+        uids = pending[-limit:] if len(pending) > limit else pending
 
         for uid in uids:
             raw, size = _fetch_one(connection, uid)

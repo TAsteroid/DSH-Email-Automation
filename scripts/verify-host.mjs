@@ -114,6 +114,9 @@ function handleMethod(method, params) {
       finishedAt: '2026-11-04T12:00:02Z',
     }
   }
+  if (method === 'sync.reset') {
+    return { accountId: params.accountId, folder: params.folder ?? 'INBOX', removed: 3 }
+  }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -444,6 +447,23 @@ check(
   missingMessage && JSON.parse(missingMessage.body).code === 'NOT_FOUND',
   'NOT_FOUND 应原样透出',
 )
+
+// 重建本地缓存：/sync/reset 与 /sync?reset=true 都应先清再拉
+const resetRoute = await invoke('/api/dsh-mail/sync/reset', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1' }),
+})
+check(resetRoute && resetRoute.status === 200, `sync/reset 应 200，实际 ${resetRoute && resetRoute.status}`)
+check(
+  Boolean(received.find((request) => request.method === 'sync.reset')),
+  'sync/reset 应把请求打到 Core',
+)
+
+const resetThenSync = await invoke('/api/dsh-mail/sync', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1', reset: true }),
+})
+check(resetThenSync && resetThenSync.status === 200, `reset 后同步应 200，实际 ${resetThenSync && resetThenSync.status}`)
 
 const syncRoute = await invoke('/api/dsh-mail/sync', {
   method: 'POST',

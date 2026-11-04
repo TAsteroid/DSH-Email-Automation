@@ -95,6 +95,39 @@ class SyncTests(unittest.TestCase):
             self.assertNotIn("html", message)
         self.assertNotIn(PASSWORD, json.dumps(listed, ensure_ascii=False))
 
+    def test_limit_fetches_newest_first(self):
+        with FakeImapServer(MESSAGES) as server:
+            account_id = self._add_account(server.port)
+            result = self._sync(account_id, limit=2)
+
+            # 限额 2 时应先拿最新的两封（UID 3、2），而不是最旧的两封
+            self.assertEqual(result["stored"], 2)
+            self.assertEqual(result["lastUid"], 3)
+            listed = self._list(accountId=account_id)
+            self.assertEqual(
+                [message["subject"] for message in listed["messages"]],
+                ["Third", "Second"],
+            )
+
+            # 再同步一次不应重复入库
+            again = self._sync(account_id, limit=2)
+            self.assertEqual(again["stored"], 0)
+            self.assertEqual(self._list(accountId=account_id)["total"], 2)
+
+    def test_sync_reset_clears_local_copy_and_refetches(self):
+        with FakeImapServer(MESSAGES) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+            self.assertEqual(self._list(accountId=account_id)["total"], 3)
+
+            reset = self.service.dispatch("sync.reset", {"accountId": account_id, "folder": "INBOX"})
+            self.assertEqual(reset["removed"], 3)
+            self.assertEqual(self._list(accountId=account_id)["total"], 0)
+
+            again = self._sync(account_id)
+            self.assertEqual(again["stored"], 3)
+            self.assertEqual(self._list(accountId=account_id)["total"], 3)
+
     def test_repeated_sync_is_idempotent(self):
         with FakeImapServer(MESSAGES) as server:
             account_id = self._add_account(server.port)
