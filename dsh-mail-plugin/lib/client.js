@@ -1218,11 +1218,11 @@ window.__ModuleLoader__.load({
       return String(header.from).toLowerCase().includes(String(accountAddress).toLowerCase())
     }
 
-    /** 对话气泡：最新一封常显，历史引用默认折叠，点一下展开。 */
+    /** 对话气泡：最新一封在最上方且常显，历史引用排在下面、默认折叠。 */
     function ThreadBubbles({ t, message, accountAddress }) {
       const segments = React.useMemo(() => splitQuoted(message.text), [message.text])
       const [expanded, setExpanded] = React.useState({})
-      const ordered = segments.map((segment, index) => ({ segment, latest: index === 0 })).reverse()
+      const ordered = segments.map((segment, index) => ({ segment, latest: index === 0 }))
 
       return h(
         'div',
@@ -1354,12 +1354,15 @@ window.__ModuleLoader__.load({
 
       const loadMessages = React.useCallback(async () => {
         try {
-          const value = await call('/messages', { limit: 100 })
+          // 必须限定文件夹：不带 folder 会把这个账号所有邮件（含已发送）都列出来
+          const params = { folder: 'INBOX', limit: 100 }
+          if (accounts.length > 0) params.accountId = accounts[0].id
+          const value = await call('/messages', params)
           setMessages(value && value.messages ? value.messages : [])
         } catch {
           setMessages([])
         }
-      }, [])
+      }, [accounts])
 
       React.useEffect(() => {
         void loadMessages()

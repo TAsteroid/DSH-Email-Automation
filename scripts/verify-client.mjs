@@ -178,11 +178,15 @@ const statusPayload = {
   lastSyncAt: '',
 }
 
-globalThis.fetch = async () => ({
-  ok: true,
-  status: 200,
-  json: async () => ({ ok: true, value: statusPayload }),
-})
+const fetchCalls = []
+globalThis.fetch = async (url, init) => {
+  fetchCalls.push({ url: String(url), body: init && init.body ? String(init.body) : '' })
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: true, value: statusPayload }),
+  }
+}
 
 const t = (key) => `t:mail.${key}`
 
@@ -217,6 +221,13 @@ async function runShimPass() {
   check(loaded.includes('t:mail.noMessages'), '状态回来后应收件箱空状态')
   check(loaded.includes('t:mail.selectMessage'), '状态回来后应显示右侧占位')
   check(!loaded.includes('t:mail.loading'), '加载态没有被状态替换')
+
+  const inboxCall = fetchCalls.find((entry) => entry.url.includes('/messages'))
+  check(Boolean(inboxCall), '收件箱应请求 /messages')
+  check(
+    Boolean(inboxCall) && inboxCall.body.includes('"folder":"INBOX"'),
+    '收件箱请求必须限定 folder=INBOX（不带会把已发送也列出来）',
+  )
 
   const settingsButton = findButtonByText(tree, 't:mail.settings')
   check(Boolean(settingsButton), '找不到设置 tab 按钮')
@@ -429,6 +440,11 @@ function runRealReactPass() {
     check(!bubbleMarkup.includes('QUOTED-TAIL-MARKER'), '[气泡] 历史引用默认折叠（只给预览，不渲染全文）')
     check(bubbleMarkup.includes('t:mail.clickToExpand'), '[气泡] 折叠气泡应有展开提示')
     check(bubbleMarkup.includes('Serena'), '[气泡] 折叠时仍显示对方与时间')
+    check(
+      bubbleMarkup.indexOf('新内容') >= 0 &&
+        bubbleMarkup.indexOf('新内容') < bubbleMarkup.indexOf('Serena'),
+      '[气泡] 最新一封应排在最上方',
+    )
 
     // 发件箱页签位置：待跟进 < 发件箱 < AI 工作台
     const todoAt = pageMarkup.indexOf('t:mail.todo')
