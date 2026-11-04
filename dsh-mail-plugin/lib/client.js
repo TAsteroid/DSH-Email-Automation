@@ -853,6 +853,17 @@ window.__ModuleLoader__.load({
         boxShadow: 'var(--dsw-elevation-lg, 0 12px 40px rgba(0,0,0,0.35))',
       },
       modalHead: { display: 'flex', alignItems: 'center', gap: 8 },
+      readingScroll: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' },
+      agentDock: {
+        flex: 'none',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '10px 20px 12px',
+        borderTop: '1px solid var(--dsw-alias-border-l2)',
+        background: 'var(--dsw-alias-bg-layer-1)',
+      },
+      detailShell: { display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 },
       railPanel: {
         width: 280,
         flex: 'none',
@@ -1417,7 +1428,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 详情页底部的 Agent 区：组装带邮件上下文的提示词（无法注入运行中的 Agent）。 */
+    /** 详情页底部的 Agent 区：常驻在阅读区底部，正文在它上面单独滚动。 */
     function AgentMailComposer({ t, message }) {
       const [text, setText] = React.useState('')
       const [copied, setCopied] = React.useState(false)
@@ -1443,10 +1454,17 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { style: styles.chatBox },
-        h('p', { style: styles.sectionTitle }, t('agentChatTitle')),
+        { style: styles.agentDock, 'data-mail-agent-dock': 'true' },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { ...styles.sectionTitle, margin: 0 } }, t('agentChatTitle')),
+          h('span', { style: styles.spacer }),
+          copied ? h('span', { style: { ...styles.muted, margin: 0 } }, t('composeCopied')) : null,
+          h('button', { type: 'button', style: styles.btnSmall, onClick: copy }, t('agentChatCopy')),
+        ),
         h('textarea', {
-          style: styles.textArea,
+          style: { ...styles.textArea, minHeight: 54, maxHeight: 120 },
           value: text,
           placeholder: t('agentChatPlaceholder'),
           onChange: (event) => {
@@ -1454,13 +1472,6 @@ window.__ModuleLoader__.load({
             setCopied(false)
           },
         }),
-        h(
-          'div',
-          { style: styles.formActions },
-          h('button', { type: 'button', style: styles.btn, onClick: copy }, t('agentChatCopy')),
-          copied ? h('span', { style: styles.muted }, t('composeCopied')) : null,
-        ),
-        h('p', { style: styles.muted }, t('contactChatHint')),
       )
     }
 
@@ -1533,20 +1544,24 @@ window.__ModuleLoader__.load({
         )
       }
       return h(
-        'article',
-        { style: styles.reading },
-        actions && actions.length > 0
-          ? h(
-              'div',
-              { style: styles.detailActions },
-              actions.map((action) =>
-                h('button', { key: action.key, type: 'button', style: styles.btnSmall, onClick: action.onClick }, action.label),
-              ),
-            )
-          : null,
-        h('h2', { style: styles.msgSubject }, message.subject || t('noSubject')),
-        h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
-        h(ThreadBubbles, { t, message, accountAddress }),
+        'div',
+        { style: styles.detailShell },
+        h(
+          'div',
+          { style: styles.readingScroll, 'data-mail-scroll': 'true' },
+          actions && actions.length > 0
+            ? h(
+                'div',
+                { style: styles.detailActions },
+                actions.map((action) =>
+                  h('button', { key: action.key, type: 'button', style: styles.btnSmall, onClick: action.onClick }, action.label),
+                ),
+              )
+            : null,
+          h('h2', { style: styles.msgSubject }, message.subject || t('noSubject')),
+          h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
+          h(ThreadBubbles, { t, message, accountAddress }),
+        ),
         agentChat ? h(AgentMailComposer, { t, message }) : null,
       )
     }

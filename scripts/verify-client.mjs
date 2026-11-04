@@ -455,6 +455,11 @@ function runRealReactPass() {
     )
     check(detailWithActions.includes('回复'), '[真实渲染] 详情页应渲染操作按钮')
     check(detailWithActions.includes('t:mail.agentChatTitle'), '[真实渲染] 详情页底部应渲染 Agent 区')
+    check(
+      detailWithActions.includes('data-mail-agent-dock') &&
+        detailWithActions.indexOf('data-mail-scroll') < detailWithActions.indexOf('data-mail-agent-dock'),
+      '[真实渲染] Agent 区应在滚动容器之外，常驻底部',
+    )
 
     // 引用拆分与气泡
     const quotedBody = [
