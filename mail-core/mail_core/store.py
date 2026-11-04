@@ -14,6 +14,11 @@ Schema v4 adds the local address book (``contacts``), message templates
 ``messages_fts``, an FTS5 external-content index over ``messages`` kept in
 sync by triggers; the migration rebuilds it from the rows already on disk,
 so a v3 mailbox becomes searchable without resyncing mail.
+Schema v5 adds the approval-bound send pipeline: ``drafts`` (one row per
+editable draft, with the content hash the approval is bound to),
+``approvals`` (a send request with a TTL) and ``mail_actions`` (the immutable
+execute log, keyed by an idempotency key).  Every migration is additive and
+repeatable, so a v4 mailbox upgrades in place.
 """
 
 from __future__ import annotations
@@ -22,11 +27,11 @@ import json
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -189,11 +194,63 @@ INSERT INTO messages_fts (messages_fts) VALUES ('rebuild');
 """
 
 
+# Schema v5: drafts, approvals and the execute log.
+#
+# ``drafts.content_hash`` is recomputed by ``draft.save`` on every edit; an
+# approval stores the hash it was granted for, so editing the draft after
+# approval makes the approval unusable (``HASH_MISMATCH``) without touching
+# the approval row.  Deleting a draft cascades its approvals; the
+# ``mail_actions`` log deliberately has no foreign keys so the record that a
+# message was actually sent survives draft cleanup.  ``idempotency_key`` is
+# UNIQUE, which is what guarantees one approval can be executed only once.
+_MIGRATION_5 = """
+CREATE TABLE IF NOT EXISTS drafts (
+    id           TEXT PRIMARY KEY,
+    account_id   TEXT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+    to_addr      TEXT NOT NULL DEFAULT '',
+    cc_addr      TEXT NOT NULL DEFAULT '',
+    subject      TEXT NOT NULL DEFAULT '',
+    body         TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'draft',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_drafts_account ON drafts (account_id);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id           TEXT PRIMARY KEY,
+    draft_id     TEXT NOT NULL REFERENCES drafts (id) ON DELETE CASCADE,
+    action       TEXT NOT NULL DEFAULT 'send',
+    content_hash TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    decided_at   TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status);
+
+CREATE TABLE IF NOT EXISTS mail_actions (
+    id              TEXT PRIMARY KEY,
+    approval_id     TEXT NOT NULL,
+    draft_id        TEXT NOT NULL,
+    action          TEXT NOT NULL DEFAULT 'send',
+    result          TEXT NOT NULL,
+    error           TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL UNIQUE,
+    executed_at     TEXT NOT NULL
+);
+"""
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
     3: _MIGRATION_3,
     4: _MIGRATION_4,
+    5: _MIGRATION_5,
 }
 
 
@@ -201,6 +258,15 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
 # iterating this tuple (instead of trusting request keys) keeps the SQL free
 # of caller-controlled identifiers.
 CONTACT_FIELDS = ("name", "email", "phone", "company", "title", "notes")
+
+# Draft/approval state machines.  The store never validates a caller's value,
+# but these tuples document the only statuses the service layer produces.
+DRAFT_STATUSES = ("draft", "approved", "sent", "rejected")
+APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired")
+
+# Protocol timestamps are fixed-width UTC, so plain string comparison is also
+# chronological (``now >= expires_at`` is the approval expiry test).
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # ``snippet()`` arguments shared by every search: highlight the matched term,
 # elide with ``…`` and keep the excerpt short (12 tokens) so a hit never
@@ -285,9 +351,17 @@ def _snippet_for(row, term: str) -> str:
         return ""
 
 
-def _utc_now() -> str:
+def utc_now() -> str:
     """Protocol timestamp: ISO-8601 UTC with a ``Z`` suffix, second precision."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
+
+
+def add_minutes(timestamp: str, minutes: int) -> str:
+    """Shift one protocol timestamp by ``minutes`` (used for approval TTLs)."""
+    moment = datetime.strptime(timestamp, TIMESTAMP_FORMAT).replace(
+        tzinfo=timezone.utc
+    )
+    return (moment + timedelta(minutes=int(minutes))).strftime(TIMESTAMP_FORMAT)
 
 
 class Store:
@@ -389,7 +463,7 @@ class Store:
         enabled: bool = True,
         created_at: Optional[str] = None,
     ) -> str:
-        timestamp = created_at or _utc_now()
+        timestamp = created_at or utc_now()
         with self._conn:
             self._conn.execute(
                 """
@@ -428,7 +502,7 @@ class Store:
         with self._conn:
             cursor = self._conn.execute(
                 "UPDATE accounts SET password_blob = ?, updated_at = ? WHERE id = ?",
-                (password_blob, _utc_now(), account_id),
+                (password_blob, utc_now(), account_id),
             )
         return cursor.rowcount > 0
 
@@ -641,7 +715,7 @@ class Store:
                     body_html,
                     int(size),
                     1 if seen else 0,
-                    created_at or _utc_now(),
+                    created_at or utc_now(),
                 ),
             )
         return cursor.rowcount > 0
@@ -746,7 +820,7 @@ class Store:
         notes: str = "",
         created_at: Optional[str] = None,
     ) -> str:
-        timestamp = created_at or _utc_now()
+        timestamp = created_at or utc_now()
         contact_id = contact_id or f"con_{uuid.uuid4().hex}"
         with self._conn:
             self._conn.execute(
@@ -780,7 +854,7 @@ class Store:
             assignments.append(f"{field} = ?")
             args.append(str(changes[field]))
         assignments.append("updated_at = ?")
-        args.extend([_utc_now(), contact_id])
+        args.extend([utc_now(), contact_id])
         with self._conn:
             cursor = self._conn.execute(
                 f"UPDATE contacts SET {', '.join(assignments)} WHERE id = ?", args
@@ -833,7 +907,7 @@ class Store:
         template_id: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> str:
-        timestamp = created_at or _utc_now()
+        timestamp = created_at or utc_now()
         template_id = template_id or f"tpl_{uuid.uuid4().hex}"
         with self._conn:
             self._conn.execute(
@@ -938,6 +1012,334 @@ class Store:
             summary["snippet"] = _snippet_for(row, terms[0])
             messages.append(summary)
         return total, messages
+
+    # -- drafts ------------------------------------------------------------
+
+    @staticmethod
+    def _draft_to_dict(row: sqlite3.Row) -> dict:
+        """Full draft shape returned by ``draft.save`` / ``draft.get``."""
+        return {
+            "id": row["id"],
+            "accountId": row["account_id"],
+            "to": row["to_addr"],
+            "cc": row["cc_addr"],
+            "subject": row["subject"],
+            "body": row["body"],
+            "contentHash": row["content_hash"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    @staticmethod
+    def _draft_summary(row: sqlite3.Row) -> dict:
+        """List shape for ``draft.list`` (no body, newest edit first)."""
+        return {
+            "id": row["id"],
+            "accountId": row["account_id"],
+            "to": row["to_addr"],
+            "subject": row["subject"],
+            "contentHash": row["content_hash"],
+            "status": row["status"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def create_draft(
+        self,
+        *,
+        account_id: str,
+        to_addr: str,
+        cc_addr: str = "",
+        subject: str = "",
+        body: str = "",
+        content_hash: str = "",
+        draft_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> dict:
+        timestamp = created_at or utc_now()
+        draft_id = draft_id or f"dft_{uuid.uuid4().hex}"
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO drafts (
+                    id, account_id, to_addr, cc_addr, subject, body,
+                    content_hash, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                """,
+                (
+                    draft_id,
+                    account_id,
+                    to_addr,
+                    cc_addr,
+                    subject,
+                    body,
+                    content_hash,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return self.get_draft(draft_id) or {}
+
+    def update_draft(
+        self,
+        draft_id: str,
+        *,
+        account_id: str,
+        to_addr: str,
+        cc_addr: str = "",
+        subject: str = "",
+        body: str = "",
+        content_hash: str = "",
+        status: str = "draft",
+        updated_at: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Replace the editable fields; ``None`` when the id is unknown."""
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE drafts SET
+                    account_id = ?, to_addr = ?, cc_addr = ?, subject = ?,
+                    body = ?, content_hash = ?, status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    account_id,
+                    to_addr,
+                    cc_addr,
+                    subject,
+                    body,
+                    content_hash,
+                    status,
+                    updated_at or utc_now(),
+                    draft_id,
+                ),
+            )
+        if cursor.rowcount <= 0:
+            return None
+        return self.get_draft(draft_id)
+
+    def get_draft(self, draft_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM drafts WHERE id = ?", (draft_id,)
+        ).fetchone()
+        return self._draft_to_dict(row) if row is not None else None
+
+    def list_drafts(self, account_id: Optional[str] = None) -> list[dict]:
+        """Draft summaries ordered by most recent edit, then id."""
+        if account_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM drafts ORDER BY updated_at DESC, id ASC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM drafts WHERE account_id = ? "
+                "ORDER BY updated_at DESC, id ASC",
+                (account_id,),
+            ).fetchall()
+        return [self._draft_summary(row) for row in rows]
+
+    def remove_draft(self, draft_id: str) -> bool:
+        """Delete a draft; its approvals cascade, its action log remains."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM drafts WHERE id = ?", (draft_id,)
+            )
+        return cursor.rowcount > 0
+
+    def set_draft_status(self, draft_id: str, status: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE drafts SET status = ?, updated_at = ? WHERE id = ?",
+                (status, utc_now(), draft_id),
+            )
+        return cursor.rowcount > 0
+
+    def count_drafts(self) -> int:
+        """Drafts still in the draft box (``sent`` has left it)."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM drafts WHERE status <> 'sent'"
+        ).fetchone()
+        return int(row["n"])
+
+    # -- approvals ---------------------------------------------------------
+
+    @staticmethod
+    def _approval_to_dict(row: sqlite3.Row) -> dict:
+        """Approval shape shared by ``approval.*`` and ``action.execute``."""
+        return {
+            "id": row["id"],
+            "draftId": row["draft_id"],
+            "action": row["action"],
+            "contentHash": row["content_hash"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+            "expiresAt": row["expires_at"],
+            "decidedAt": row["decided_at"],
+        }
+
+    def add_approval(
+        self,
+        *,
+        draft_id: str,
+        content_hash: str,
+        action: str = "send",
+        status: str = "pending",
+        ttl_minutes: int = 1440,
+        approval_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> dict:
+        """Insert a pending approval expiring ``ttl_minutes`` after creation."""
+        created = created_at or utc_now()
+        expires = add_minutes(created, int(ttl_minutes))
+        approval_id = approval_id or f"apr_{uuid.uuid4().hex}"
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO approvals (
+                    id, draft_id, action, content_hash, status,
+                    created_at, expires_at, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '')
+                """,
+                (
+                    approval_id,
+                    draft_id,
+                    action,
+                    content_hash,
+                    status,
+                    created,
+                    expires,
+                ),
+            )
+        return self.get_approval(approval_id) or {}
+
+    def get_approval(self, approval_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+        ).fetchone()
+        return self._approval_to_dict(row) if row is not None else None
+
+    def list_pending_approvals(self) -> list[dict]:
+        """Undecided approvals, oldest first (a queue, not a log)."""
+        rows = self._conn.execute(
+            "SELECT * FROM approvals WHERE status = 'pending' "
+            "ORDER BY created_at ASC, id ASC"
+        ).fetchall()
+        return [self._approval_to_dict(row) for row in rows]
+
+    def list_approval_history(self, limit: int = 50) -> list[dict]:
+        """Decided approvals, newest first (``limit`` caps the returned page)."""
+        rows = self._conn.execute(
+            "SELECT * FROM approvals WHERE status <> 'pending' "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [self._approval_to_dict(row) for row in rows]
+
+    def decide_approval(
+        self, approval_id: str, status: str, decided_at: Optional[str] = None
+    ) -> bool:
+        """Set the decision on a still-pending approval; ``False`` if lost."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE approvals SET status = ?, decided_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (status, decided_at or utc_now(), approval_id),
+            )
+        return cursor.rowcount > 0
+
+    def count_pending_approvals(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM approvals WHERE status = 'pending'"
+        ).fetchone()
+        return int(row["n"])
+
+    # -- mail actions ------------------------------------------------------
+
+    @staticmethod
+    def _action_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "approvalId": row["approval_id"],
+            "draftId": row["draft_id"],
+            "action": row["action"],
+            "result": row["result"],
+            "error": row["error"],
+            "idempotencyKey": row["idempotency_key"],
+            "executedAt": row["executed_at"],
+        }
+
+    def add_mail_action(
+        self,
+        *,
+        approval_id: str,
+        draft_id: str,
+        result: str,
+        action: str = "send",
+        error: str = "",
+        idempotency_key: str,
+        action_id: Optional[str] = None,
+        executed_at: Optional[str] = None,
+    ) -> dict:
+        """Record one execute attempt; ``idempotency_key`` is UNIQUE.
+
+        A duplicate key raises ``sqlite3.IntegrityError``; the service turns
+        that into ``ALREADY_EXECUTED`` instead of sending a second message.
+        """
+        action_id = action_id or f"act_{uuid.uuid4().hex}"
+        timestamp = executed_at or utc_now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO mail_actions (
+                    id, approval_id, draft_id, action, result, error,
+                    idempotency_key, executed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action_id,
+                    approval_id,
+                    draft_id,
+                    action,
+                    result,
+                    error,
+                    idempotency_key,
+                    timestamp,
+                ),
+            )
+        return {
+            "id": action_id,
+            "approvalId": approval_id,
+            "draftId": draft_id,
+            "action": action,
+            "result": result,
+            "error": error,
+            "idempotencyKey": idempotency_key,
+            "executedAt": timestamp,
+        }
+
+    def get_mail_action_by_key(self, idempotency_key: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM mail_actions WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        return self._action_to_dict(row) if row is not None else None
+
+    def list_mail_actions(self, approval_id: Optional[str] = None) -> list[dict]:
+        if approval_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM mail_actions ORDER BY executed_at ASC, id ASC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM mail_actions WHERE approval_id = ? "
+                "ORDER BY executed_at ASC, id ASC",
+                (approval_id,),
+            ).fetchall()
+        return [self._action_to_dict(row) for row in rows]
+
+    def count_mail_actions(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM mail_actions").fetchone()
+        return int(row["n"])
 
     # -- meta --------------------------------------------------------------
 

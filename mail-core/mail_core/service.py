@@ -8,25 +8,32 @@ stack trace nor request data can reach stdout).
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import crypto, imap_client, pop3_client, smtp_client
+from . import crypto, drafts, imap_client, pop3_client, sender, smtp_client
 from . import protocol
 from . import sync
 from .protocol import (
+    ALREADY_EXECUTED,
+    APPROVAL_EXPIRED,
+    APPROVAL_NOT_APPROVED,
+    APPROVAL_NOT_FOUND,
     BAD_REQUEST,
     CREDENTIAL_MISSING,
+    HASH_MISMATCH,
     IMAP_ERROR,
     INTERNAL,
     NOT_FOUND,
+    SMTP_ERROR,
     UNKNOWN_METHOD,
     MailCoreError,
     bad_request,
 )
-from .store import CONTACT_FIELDS, Store
+from .store import CONTACT_FIELDS, Store, utc_now
 
 SECURITY_MODES = imap_client.SECURITY_MODES
 PROTOCOLS = ("imap", "pop3")
@@ -135,6 +142,16 @@ def _optional_protocol(params: dict, key: str = "protocol", default: str = "imap
     return value
 
 
+def _optional_id(params: dict, key: str) -> Optional[str]:
+    """An id parameter that may be absent but must be a non-empty string."""
+    value = params.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise bad_request(f"field {key} must be a non-empty string when given")
+    return value.strip()
+
+
 class Service:
     """Owns the data directory, the SQLite store and the method table."""
 
@@ -164,6 +181,15 @@ class Service:
             "template.list": self._template_list,
             "template.add": self._template_add,
             "template.remove": self._template_remove,
+            "draft.save": self._draft_save,
+            "draft.get": self._draft_get,
+            "draft.list": self._draft_list,
+            "draft.remove": self._draft_remove,
+            "approval.request": self._approval_request,
+            "approval.list": self._approval_list,
+            "approval.approve": self._approval_approve,
+            "approval.reject": self._approval_reject,
+            "action.execute": self._action_execute,
             "shutdown": self._shutdown,
         }
 
@@ -328,9 +354,10 @@ class Service:
             "accounts": self.store.count_accounts(),
             "messages": self.store.count_messages(),
             "unread": self.store.count_unread_messages(),
-            # No draft / approval / AI tables yet: these are real zeros.
-            "drafts": 0,
-            "pendingApprovals": 0,
+            # Drafts that have not been sent yet, and undecided approvals.
+            "drafts": self.store.count_drafts(),
+            "pendingApprovals": self.store.count_pending_approvals(),
+            # AI tasks arrive with a later phase; there is no table for them.
             "pendingAi": 0,
         }
         return {"counters": counters, "lastSyncAt": self.store.latest_sync_at()}
@@ -499,6 +526,233 @@ class Service:
         if not self.store.remove_template(template_id):
             raise MailCoreError(NOT_FOUND, "template not found")
         return {"removed": True}
+
+    # -- drafts ------------------------------------------------------------
+
+    def _draft_save(self, params: dict) -> dict:
+        """Create (no ``draftId``) or replace one draft's editable fields.
+
+        Every save recomputes ``contentHash`` and ``updatedAt``.  A draft that
+        had already been approved/rejected goes back to ``draft``: the old
+        decision belongs to the previous content and can never execute again,
+        because its approval still holds the old hash.
+        """
+        account_id = _require_str(params, "accountId")
+        draft_id = _optional_id(params, "draftId")
+        to_addr = _require_str(params, "to")
+        cc_addr = _optional_str(params, "cc", "")
+        subject = _optional_str(params, "subject", "")
+        body = _optional_str(params, "body", "")
+
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        digest = drafts.content_hash(to_addr, cc_addr, subject, body)
+        if draft_id is None:
+            saved = self.store.create_draft(
+                account_id=account_id,
+                to_addr=to_addr,
+                cc_addr=cc_addr,
+                subject=subject,
+                body=body,
+                content_hash=digest,
+            )
+        else:
+            saved = self.store.update_draft(
+                draft_id,
+                account_id=account_id,
+                to_addr=to_addr,
+                cc_addr=cc_addr,
+                subject=subject,
+                body=body,
+                content_hash=digest,
+                status="draft",
+            )
+            if saved is None:
+                raise MailCoreError(NOT_FOUND, "draft not found")
+
+        return {
+            "id": saved["id"],
+            "contentHash": saved["contentHash"],
+            "status": saved["status"],
+        }
+
+    def _draft_get(self, params: dict) -> dict:
+        draft_id = _require_str(params, "id")
+        draft = self.store.get_draft(draft_id)
+        if draft is None:
+            raise MailCoreError(NOT_FOUND, "draft not found")
+        return draft
+
+    def _draft_list(self, params: dict) -> dict:
+        account_id = _optional_id(params, "accountId")
+        return {"drafts": self.store.list_drafts(account_id)}
+
+    def _draft_remove(self, params: dict) -> dict:
+        draft_id = _require_str(params, "id")
+        if not self.store.remove_draft(draft_id):
+            raise MailCoreError(NOT_FOUND, "draft not found")
+        return {"removed": True}
+
+    # -- approvals ---------------------------------------------------------
+
+    def _approval_request(self, params: dict) -> dict:
+        """Bind a pending approval to the draft's *current* content hash."""
+        draft_id = _require_str(params, "draftId")
+        ttl_minutes = _optional_int(
+            params, "ttlMinutes", 1440, minimum=0, maximum=525600
+        )
+        draft = self.store.get_draft(draft_id)
+        if draft is None:
+            raise MailCoreError(NOT_FOUND, "draft not found")
+        approval = self.store.add_approval(
+            draft_id=draft_id,
+            content_hash=draft["contentHash"],
+            ttl_minutes=ttl_minutes,
+        )
+        return {
+            "id": approval["id"],
+            "draftId": approval["draftId"],
+            "contentHash": approval["contentHash"],
+            "expiresAt": approval["expiresAt"],
+        }
+
+    def _approval_list(self, _params: dict) -> dict:
+        return {
+            "pending": self.store.list_pending_approvals(),
+            "history": self.store.list_approval_history(50),
+        }
+
+    def _decide_approval(self, params: dict, status: str, result_key: str) -> dict:
+        """Shared ``approve`` / ``reject`` path (only a pending approval decides).
+
+        Expiry is ``now >= expiresAt``: the timestamp is the last instant the
+        approval is valid, which also makes ``ttlMinutes: 0`` immediately
+        expired instead of depending on the wall clock ticking over.
+        """
+        approval_id = _require_str(params, "id")
+        approval = self.store.get_approval(approval_id)
+        if approval is None:
+            raise MailCoreError(APPROVAL_NOT_FOUND, "approval not found")
+        if approval["status"] != "pending":
+            raise bad_request(f"approval is already {approval['status']}")
+        if utc_now() >= approval["expiresAt"]:
+            raise MailCoreError(APPROVAL_EXPIRED, "approval has expired")
+        if not self.store.decide_approval(approval_id, status):
+            raise bad_request("approval is no longer pending")
+
+        self.store.set_draft_status(
+            approval["draftId"], "approved" if status == "approved" else "rejected"
+        )
+        return {result_key: True}
+
+    def _approval_approve(self, params: dict) -> dict:
+        return self._decide_approval(params, "approved", "approved")
+
+    def _approval_reject(self, params: dict) -> dict:
+        return self._decide_approval(params, "rejected", "rejected")
+
+    # -- actions -----------------------------------------------------------
+
+    def _send_password(self, account: dict) -> str:
+        """Decrypt the stored credential for sending, or explain why not.
+
+        Every failure here is a send failure (``SMTP_ERROR``), never a
+        ``CREDENTIAL_MISSING``: ``action.execute`` has a single failure code
+        and always leaves a ``mail_actions`` row behind.
+        """
+        if not account.get("smtpHost"):
+            raise sender.SendError("SMTP host is not configured for this account")
+        blob = self.store.get_credential(account["id"])
+        if not blob:
+            raise sender.SendError("no credential stored for this account")
+        try:
+            return crypto.decrypt_password(blob)
+        except MailCoreError:
+            raise sender.SendError(
+                "stored credential could not be decrypted"
+            ) from None
+
+    def _action_execute(self, params: dict) -> dict:
+        """Send an approved draft exactly once, recording the attempt.
+
+        Validation order (each step has its own error code): approval exists,
+        approval is approved, approval has not expired, the draft still hashes
+        to the approved content, the idempotency key was never executed.  Only
+        then is a message built and sent.
+        """
+        approval_id = _require_str(params, "approvalId")
+        idempotency_key = _optional_id(params, "idempotencyKey") or approval_id
+
+        approval = self.store.get_approval(approval_id)
+        if approval is None:
+            raise MailCoreError(APPROVAL_NOT_FOUND, "approval not found")
+        if approval["status"] != "approved":
+            raise MailCoreError(
+                APPROVAL_NOT_APPROVED,
+                f"approval is {approval['status']}, not approved",
+            )
+        if utc_now() >= approval["expiresAt"]:
+            raise MailCoreError(APPROVAL_EXPIRED, "approval has expired")
+
+        draft = self.store.get_draft(approval["draftId"])
+        if draft is None:
+            raise MailCoreError(NOT_FOUND, "draft not found")
+        if draft["contentHash"] != approval["contentHash"]:
+            raise MailCoreError(
+                HASH_MISMATCH, "draft content changed after the approval"
+            )
+        if self.store.get_mail_action_by_key(idempotency_key) is not None:
+            raise MailCoreError(
+                ALREADY_EXECUTED,
+                "this approval (or idempotency key) was already executed",
+            )
+
+        password = ""
+        try:
+            account = self.store.get_account(draft["accountId"])
+            if account is None:
+                raise sender.SendError("account not found for this draft")
+            password = self._send_password(account)
+            message_id = sender.send_draft(account, password, draft)
+        except Exception as exc:
+            error = sender.describe_error(exc, secrets=(password,))
+            self._record_action(
+                approval, draft, "failed", error, idempotency_key, utc_now()
+            )
+            raise MailCoreError(SMTP_ERROR, error) from None
+
+        executed_at = utc_now()
+        self.store.set_draft_status(draft["id"], "sent")
+        self._record_action(
+            approval, draft, "sent", "", idempotency_key, executed_at
+        )
+        return {"sent": True, "messageId": message_id, "executedAt": executed_at}
+
+    def _record_action(
+        self,
+        approval: dict,
+        draft: dict,
+        result: str,
+        error: str,
+        idempotency_key: str,
+        executed_at: str,
+    ) -> dict:
+        """Write the ``mail_actions`` row; a duplicate key means "already done"."""
+        try:
+            return self.store.add_mail_action(
+                approval_id=approval["id"],
+                draft_id=draft["id"],
+                result=result,
+                error=error,
+                idempotency_key=idempotency_key,
+                executed_at=executed_at,
+            )
+        except sqlite3.IntegrityError:
+            raise MailCoreError(
+                ALREADY_EXECUTED,
+                "this approval (or idempotency key) was already executed",
+            ) from None
 
     # -- lifecycle ---------------------------------------------------------
 

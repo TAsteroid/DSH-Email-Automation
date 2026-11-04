@@ -152,7 +152,13 @@ window.__ModuleLoader__.load({
         composeClose: '关闭',
         composeCopyBody: '复制邮件',
         composeCopied: '已复制',
-        composeSendBlocked: '发送还没接通：按计划书 §10.1，发送必须走人工审批，属于 Phase 5。现在可以先把邮件内容复制出去。',
+        composeSendBlocked: '点「发送」会先存为草稿并提交审批；批准在右侧审批栏完成，Core 在校验内容哈希后才真正发信。',
+        composeSubmit: '发送',
+        composePendingHint: '已提交审批，去右侧审批栏批准后才会真正发送。',
+        approveAndSend: '批准并发送',
+        rejectApproval: '拒绝',
+        sentOk: '已发送',
+        approvalExpired: '已过期',
         agentChatTitle: '与 Agent 对话处理这封邮件',
         agentChatPlaceholder: '例如：帮我起草一封回复，确认周五 9:30 的会议…',
         agentChatCopy: '复制提示词',
@@ -319,7 +325,13 @@ window.__ModuleLoader__.load({
         composeClose: 'Close',
         composeCopyBody: 'Copy mail',
         composeCopied: 'Copied',
-        composeSendBlocked: 'Sending is not wired yet: per plan §10.1 every send needs human approval (Phase 5). For now you can copy the composed mail.',
+        composeSendBlocked: 'Sending saves the draft and requests approval first; approving happens in the Approvals rail, and the Core verifies the content hash before sending.',
+        composeSubmit: 'Send',
+        composePendingHint: 'Submitted for approval — it is sent only after you approve it in the rail.',
+        approveAndSend: 'Approve and send',
+        rejectApproval: 'Reject',
+        sentOk: 'Sent',
+        approvalExpired: 'expired',
         agentChatTitle: 'Ask the Agent about this mail',
         agentChatPlaceholder: 'e.g. Draft a reply confirming the meeting on Friday 9:30…',
         agentChatCopy: 'Copy prompt',
@@ -1384,9 +1396,37 @@ window.__ModuleLoader__.load({
     }
 
     /** 回复/转发/发送共用的编辑页。发送未接通（Phase 5 需审批），先提供复制。 */
-    function ComposeModal({ t, initial, onClose }) {
+    function ComposeModal({ t, initial, onClose, accountId, onSubmitted }) {
       const [draft, setDraft] = React.useState(initial)
       const [copied, setCopied] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+      const [note, setNote] = React.useState(null)
+
+      const submit = async () => {
+        if (busy) return
+        if (!accountId) {
+          setNote(t('accountNoCredential'))
+          return
+        }
+        setBusy(true)
+        setNote(null)
+        try {
+          const saved = await call('/drafts/save', {
+            accountId,
+            to: draft.to,
+            cc: draft.cc,
+            subject: draft.subject,
+            body: draft.body,
+          })
+          await call('/approvals/request', { draftId: saved.id })
+          setNote(t('composePendingHint'))
+          if (onSubmitted) onSubmitted()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
       const field = (labelKey, key, extra) =>
         h(
           'label',
@@ -1436,10 +1476,12 @@ window.__ModuleLoader__.load({
             }),
           ),
           h('p', { style: { ...styles.muted, margin: 0 } }, t('composeSendBlocked')),
+          note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
           h(
             'div',
             { style: styles.formActions },
-            h('button', { type: 'button', style: styles.btn, onClick: copy }, t('composeCopyBody')),
+            h('button', { type: 'button', style: styles.btn, disabled: busy, onClick: submit }, t('composeSubmit')),
+            h('button', { type: 'button', style: styles.btnSmall, onClick: copy }, t('composeCopyBody')),
             copied ? h('span', { style: styles.muted }, t('composeCopied')) : null,
             h('span', { style: styles.spacer }),
             h('button', { type: 'button', style: styles.btnSmall, onClick: onClose }, t('composeClose')),
@@ -1651,7 +1693,7 @@ window.__ModuleLoader__.load({
         agentChat ? h(AgentMailComposer, { t, message }) : null,
       )
     }
-    function InboxView({ t, status }) {
+    function InboxView({ t, status, onRefresh }) {
       const accounts = (status && status.accounts) || []
       const bodyRef = React.useRef(null)
       const dragRef = React.useRef(null)
@@ -1847,7 +1889,18 @@ window.__ModuleLoader__.load({
             : [],
           agentChat: true,
         }),
-        compose ? h(ComposeModal, { t, initial: compose, onClose: () => setCompose(null) }) : null,
+        compose
+          ? h(ComposeModal, {
+              t,
+              initial: compose,
+              accountId: accounts.length > 0 ? accounts[0].id : undefined,
+              onSubmitted: () => {
+                setCompose(null)
+                if (onRefresh) onRefresh()
+              },
+              onClose: () => setCompose(null),
+            })
+          : null,
       )
     }
 
@@ -1877,7 +1930,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 通用文件夹视图：左侧邮件标题，右侧正文；文件夹名从服务器解码结果里按模式找。 */
-    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey, composeMode, agentChat }) {
+    function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey, composeMode, agentChat, onRefresh }) {
       const accounts = (status && status.accounts) || []
       const account = accounts.length > 0 ? accounts[0] : null
       const [folder, setFolder] = React.useState(null)
@@ -2015,14 +2068,26 @@ window.__ModuleLoader__.load({
         'div',
         { style: { display: 'flex', flex: 1, minHeight: 0 } },
         content,
-        compose ? h(ComposeModal, { t, initial: compose, onClose: () => setCompose(null) }) : null,
+        compose
+          ? h(ComposeModal, {
+              t,
+              initial: compose,
+              accountId: account ? account.id : undefined,
+              onSubmitted: () => {
+                setCompose(null)
+                if (onRefresh) onRefresh()
+              },
+              onClose: () => setCompose(null),
+            })
+          : null,
       )
     }
 
-    function SentView({ t, status }) {
+    function SentView({ t, status, onRefresh }) {
       return h(MailFolderView, {
         t,
         status,
+        onRefresh,
         storageKey: 'sent',
         folderPattern: /sent|已发送/i,
         titleKey: 'sent',
@@ -2031,10 +2096,11 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function DraftsMailView({ t, status }) {
+    function DraftsMailView({ t, status, onRefresh }) {
       return h(MailFolderView, {
         t,
         status,
+        onRefresh,
         storageKey: 'draftsMail',
         folderPattern: /draft|草稿/i,
         titleKey: 'drafts',
@@ -2043,10 +2109,11 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function DeletedView({ t, status }) {
+    function DeletedView({ t, status, onRefresh }) {
       return h(MailFolderView, {
         t,
         status,
+        onRefresh,
         storageKey: 'deleted',
         folderPattern: /deleted|trash|已删除|废纸/i,
         titleKey: 'deleted',
@@ -2054,10 +2121,11 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function JunkView({ t, status }) {
+    function JunkView({ t, status, onRefresh }) {
       return h(MailFolderView, {
         t,
         status,
+        onRefresh,
         storageKey: 'junk',
         folderPattern: /junk|spam|垃圾/i,
         titleKey: 'junk',
@@ -2065,10 +2133,11 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function HistoryMailView({ t, status }) {
+    function HistoryMailView({ t, status, onRefresh }) {
       return h(MailFolderView, {
         t,
         status,
+        onRefresh,
         storageKey: 'historyMail',
         folderPattern: /archive|history|历史/i,
         titleKey: 'historyMail',
@@ -2077,7 +2146,8 @@ window.__ModuleLoader__.load({
     }
 
     /** 模板：纯本地保存，不和邮箱同步。 */
-    function TemplatesView({ t }) {
+    function TemplatesView({ t, status, onRefresh }) {
+      const accountId = status && status.accounts && status.accounts.length > 0 ? status.accounts[0].id : undefined
       const [templates, setTemplates] = React.useState([])
       const [selectedId, setSelectedId] = React.useState(null)
       const [draft, setDraft] = React.useState({ name: '', subject: '', body: '' })
@@ -2220,7 +2290,18 @@ window.__ModuleLoader__.load({
           templates.length === 0 ? h('p', { style: styles.muted }, t('templatesEmpty')) : null,
         ),
       })
-      const composeModal = compose ? h(ComposeModal, { t, initial: compose, onClose: () => setCompose(null) }) : null
+      const composeModal = compose
+        ? h(ComposeModal, {
+            t,
+            initial: compose,
+            accountId: accountId,
+            onSubmitted: () => {
+              setCompose(null)
+              if (onRefresh) onRefresh()
+            },
+            onClose: () => setCompose(null),
+          })
+        : null
       return h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } }, content, composeModal)
     }
 
@@ -2490,13 +2571,45 @@ window.__ModuleLoader__.load({
      * 全部页签共用的最右侧审批栏：
      * 默认只列待审批；点历史图标切到审批历史；历史里有返回按钮。
      */
-    function ApprovalsRail({ t, status, initialMode = 'pending' }) {
+    function ApprovalsRail({ t, status, initialMode = 'pending', onRefresh }) {
       const [mode, setMode] = React.useState(initialMode)
+      const [busy, setBusy] = React.useState(null)
+      const [note, setNote] = React.useState(null)
       const pending = (status && status.approvals && status.approvals.pending) || []
       const history = (status && status.approvals && status.approvals.history) || []
       const count = (status && status.counters && status.counters.pendingApprovals) || pending.length
       const showingHistory = mode === 'history'
       const items = showingHistory ? history : pending
+
+      const approveAndSend = async (approval) => {
+        if (busy) return
+        setBusy(approval.id)
+        setNote(null)
+        try {
+          await call('/approvals/approve', { id: approval.id })
+          const result = await call('/actions/execute', { approvalId: approval.id })
+          setNote(`${t('sentOk')}${result && result.messageId ? ` · ${result.messageId}` : ''}`)
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(null)
+        }
+      }
+
+      const reject = async (approval) => {
+        if (busy) return
+        setBusy(approval.id)
+        setNote(null)
+        try {
+          await call('/approvals/reject', { id: approval.id })
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(null)
+        }
+      }
 
       const body =
         items.length === 0
@@ -2509,14 +2622,52 @@ window.__ModuleLoader__.load({
                 { style: { ...styles.railEmpty, paddingTop: 0 } },
                 showingHistory ? t('approvalHistoryHint') : t('emptyApprovalsHint'),
               ),
+              note ? h('p', { style: styles.railEmpty }, note) : null,
             )
-          : items.map((item) =>
-              h(
-                'div',
-                { key: item.id, style: styles.listItem },
-                h('span', null, item.title),
-                item.meta ? h('span', { style: styles.listItemMeta }, item.meta) : null,
+          : h(
+              'div',
+              null,
+              items.map((item) =>
+                h(
+                  'div',
+                  { key: item.id, style: { ...styles.listItem, cursor: 'default' } },
+                  h('span', null, item.subject || item.draftId || item.id),
+                  h(
+                    'span',
+                    { style: styles.listItemMeta },
+                    showingHistory
+                      ? `${item.status || ''} · ${item.to || ''}`
+                      : `${item.to || ''} · ${item.expiresAt || ''}`,
+                  ),
+                  showingHistory
+                    ? null
+                    : h(
+                        'div',
+                        { style: { display: 'flex', gap: 6, marginTop: 6 } },
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: styles.btnSmall,
+                            disabled: busy === item.id,
+                            onClick: () => approveAndSend(item),
+                          },
+                          t('approveAndSend'),
+                        ),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: styles.dangerBtn,
+                            disabled: busy === item.id,
+                            onClick: () => reject(item),
+                          },
+                          t('rejectApproval'),
+                        ),
+                      ),
+                ),
               ),
+              note ? h('p', { style: styles.railEmpty }, note) : null,
             )
 
       return h(
@@ -2986,14 +3137,14 @@ window.__ModuleLoader__.load({
 
       let content
       if (query.trim().length > 0) content = h(SearchView, { t, query: query.trim(), status })
-      else if (tab === 'inbox') content = h(InboxView, { t, status })
+      else if (tab === 'inbox') content = h(InboxView, { t, status, onRefresh: refresh })
       else if (tab === 'todo') content = h(TodoView, { t, status })
-      else if (tab === 'sent') content = h(SentView, { t, status })
-      else if (tab === 'draftsMail') content = h(DraftsMailView, { t, status })
-      else if (tab === 'deleted') content = h(DeletedView, { t, status })
-      else if (tab === 'junk') content = h(JunkView, { t, status })
-      else if (tab === 'historyMail') content = h(HistoryMailView, { t, status })
-      else if (tab === 'templates') content = h(TemplatesView, { t })
+      else if (tab === 'sent') content = h(SentView, { t, status, onRefresh: refresh })
+      else if (tab === 'draftsMail') content = h(DraftsMailView, { t, status, onRefresh: refresh })
+      else if (tab === 'deleted') content = h(DeletedView, { t, status, onRefresh: refresh })
+      else if (tab === 'junk') content = h(JunkView, { t, status, onRefresh: refresh })
+      else if (tab === 'historyMail') content = h(HistoryMailView, { t, status, onRefresh: refresh })
+      else if (tab === 'templates') content = h(TemplatesView, { t, status, onRefresh: refresh })
       else if (tab === 'contacts') content = h(ContactsView, { t })
       else if (tab === 'ai') content = h(AiWorkbench, { t, status })
       else if (tab === 'knowledge') content = h(KnowledgeView, { t, status })
@@ -3035,7 +3186,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { style: styles.body },
                 h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } }, content),
-                h(ApprovalsRail, { t, status }),
+                h(ApprovalsRail, { t, status, onRefresh: refresh }),
               ),
       )
     }

@@ -42,6 +42,12 @@
 | `CREDENTIAL_MISSING` | 该账号没有可用密码（未录入或 DPAPI 解密失败） |
 | `IMAP_ERROR` | IMAP 连接或命令失败（message 带服务器原文） |
 | `DPAPI_ERROR` | Windows DPAPI 调用失败 |
+| `SMTP_ERROR` | 发信失败（未配置 SMTP、认证失败、服务器拒绝等；message 不含密码） |
+| `APPROVAL_NOT_FOUND` | 审批记录不存在 |
+| `APPROVAL_NOT_APPROVED` | 审批存在但不是 `approved`（含 pending / rejected / expired 状态） |
+| `APPROVAL_EXPIRED` | 审批已过期（到达 `expiresAt` 即视为过期） |
+| `HASH_MISMATCH` | 审批后草稿内容被修改，当前 `contentHash` 与审批绑定的不一致 |
+| `ALREADY_EXECUTED` | 幂等键已有执行记录，本次绝不重发 |
 | `INTERNAL` | 未预期异常（message 带异常类型，不打印堆栈到 stdout） |
 
 ## 方法
@@ -53,12 +59,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 4}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 5}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索。**它和 `protocol` 无关**：v4 只新增表和新增方法，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录。**它和 `protocol` 无关**：v5 只新增表和新增方法，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -147,9 +153,13 @@ POP3 结果：
 结果：
 
 ```json
-{"counters": {"accounts": 1, "messages": 42, "unread": 3, "drafts": 0, "pendingApprovals": 0, "pendingAi": 0},
+{"counters": {"accounts": 1, "messages": 42, "unread": 3, "drafts": 2, "pendingApprovals": 1, "pendingAi": 0},
  "lastSyncAt": "2026-11-04T12:30:00Z"}
 ```
+
+- `drafts`：还在草稿箱里的草稿数（`status != sent`；已发送的草稿不计入）。
+- `pendingApprovals`：`status = pending` 的审批数（过期但未处理的仍计入，与 `approval.list.pending` 一致）。
+- `pendingAi` 目前恒为 0：AI 任务表属于后续阶段。
 
 ### `sync.run`
 
@@ -316,6 +326,124 @@ POP3 结果：
 
 参数：`{"id": "tpl_xxx"}` → 结果 `{"removed": true}`；`id` 不存在 → `NOT_FOUND`（与 `account.remove` 一致）。
 
+### `draft.save`
+
+参数：
+
+```json
+{"draftId": "dft_xxx", "accountId": "acc_xxx", "to": "you@example.com",
+ "cc": "", "subject": "季度报告", "body": "您好，附件是报告。"}
+```
+
+结果：`{"id": "dft_xxx", "contentHash": "9f2c…", "status": "draft"}`
+
+- 不带 `draftId` 新建（id 由核心层生成，`dft_` 前缀）；带 `draftId` 就地替换该草稿的 `accountId` / `to` / `cc` / `subject` / `body`，`id` 不存在 → `NOT_FOUND`。
+- `accountId` / `to` 必填；`accountId` 必须存在，否则 `NOT_FOUND`；`cc` / `subject` / `body` 可省略，缺省空串。
+- 每次保存都重算 `contentHash` 和 `updatedAt`；`createdAt` 只在新建时写入。
+- 已批准 / 已驳回 / 已发送的草稿被再次保存时，状态退回 `draft`。旧审批记录保持原状态，但绑定的是旧哈希，执行时必然 `HASH_MISMATCH`。
+- `contentHash = sha256(to + "\n" + cc + "\n" + subject + "\n" + body)` 的小写十六进制；四个字段先统一换行（`\r\n`、`\r` → `\n`）再拼接，按 UTF-8 编码。除 `to` 在校验时去掉首尾空格外，字段内容不做 trim。
+
+### `draft.get`
+
+参数：`{"id": "dft_xxx"}`
+
+结果：
+
+```json
+{"id": "dft_xxx", "accountId": "acc_xxx", "to": "you@example.com", "cc": "",
+ "subject": "季度报告", "body": "您好，附件是报告。", "contentHash": "9f2c…",
+ "status": "draft", "createdAt": "2026-11-04T12:00:00Z", "updatedAt": "2026-11-04T12:00:00Z"}
+```
+
+`status` 取值 `draft` | `approved` | `rejected` | `sent`。不存在 → `NOT_FOUND`。
+
+### `draft.list`
+
+参数：`{"accountId": "acc_xxx"}`（可省略 = 全部账户）
+
+结果：
+
+```json
+{"drafts": [{"id": "dft_xxx", "accountId": "acc_xxx", "to": "you@example.com",
+  "subject": "季度报告", "contentHash": "9f2c…", "status": "draft",
+  "updatedAt": "2026-11-04T12:00:00Z"}]}
+```
+
+按 `updatedAt` 倒序（最近修改的在前）。列表**不含** `body`；要正文请调 `draft.get`。
+
+### `draft.remove`
+
+参数：`{"id": "dft_xxx"}` → 结果 `{"removed": true}`；`id` 不存在 → `NOT_FOUND`。
+
+草稿的审批记录随草稿级联删除；已经发生的发送记录（`mail_actions`）保留，作为审计日志。
+
+### `approval.request`
+
+参数：`{"draftId": "dft_xxx", "ttlMinutes": 1440}`
+
+结果：
+
+```json
+{"id": "apr_xxx", "draftId": "dft_xxx", "contentHash": "9f2c…",
+ "expiresAt": "2026-11-05T12:00:00Z"}
+```
+
+- 绑定草稿**当前**的 `contentHash`；`action` 固定 `send`，初始状态 `pending`。
+- `ttlMinutes` 缺省 1440（一天），上限 525600（一年）；`0` 表示立即过期（`expiresAt == createdAt`）。
+- 草稿不存在 → `NOT_FOUND`。同一草稿可以有多个待审批记录，核心层不去重。
+
+### `approval.list`
+
+参数：`{}`
+
+结果：
+
+```json
+{"pending": [{"id": "apr_xxx", "draftId": "dft_xxx", "action": "send",
+  "contentHash": "9f2c…", "status": "pending",
+  "createdAt": "2026-11-04T12:00:00Z", "expiresAt": "2026-11-05T12:00:00Z",
+  "decidedAt": ""}],
+ "history": [ ...同样结构，status 为 approved / rejected... ]}
+```
+
+- `pending`：所有 `status = pending` 的记录，按 `createdAt` **升序**（队列顺序）。过期但未处理的仍是 `pending`，`expiresAt` 已过；对它们 `approve` / `reject` / `execute` 返回 `APPROVAL_EXPIRED`。
+- `history`：已决定的记录（`approved` / `rejected`），按 `createdAt` **倒序**，最多 50 条。
+- 审批卡片要显示主题 / 收件人时，用 `draftId` 再调 `draft.get`（草稿已删则 `NOT_FOUND`）。
+
+### `approval.approve` / `approval.reject`
+
+参数：`{"id": "apr_xxx"}` → 结果 `{"approved": true}` / `{"rejected": true}`
+
+- 只接受 `status = pending` 的审批：不存在 → `APPROVAL_NOT_FOUND`；已过期（`now >= expiresAt`）→ `APPROVAL_EXPIRED`；已决定 → `BAD_REQUEST`（message 带当前状态，如 `approval is already approved`）。
+- 通过 / 驳回后写 `decidedAt`，并把草稿状态改为 `approved` / `rejected`。审批自身状态此后保持 `approved`（发送成功后也不变）。
+
+### `action.execute`
+
+参数：`{"approvalId": "apr_xxx", "idempotencyKey": "apr_xxx"}`（`idempotencyKey` 可省略，缺省 = `approvalId`）
+
+结果：
+
+```json
+{"sent": true, "messageId": "<20261104120005.123@b.com>", "executedAt": "2026-11-04T12:00:05Z"}
+```
+
+校验顺序（每一步对应一个错误码）：
+
+1. 审批存在 → 否则 `APPROVAL_NOT_FOUND`
+2. `status = approved` → 否则 `APPROVAL_NOT_APPROVED`（pending 未批准 / rejected 被驳回）
+3. 未过期（`now < expiresAt`）→ 否则 `APPROVAL_EXPIRED`
+4. 草稿当前 `contentHash` 等于审批绑定的哈希 → 否则 `HASH_MISMATCH`
+5. 幂等键没有执行记录 → 否则 `ALREADY_EXECUTED`
+6. 真正发信
+
+发送与结果：
+
+- 用草稿所属账号的 `smtpHost` / `smtpPort` / `smtpSecurity`（`ssl` → `SMTP_SSL`；`starttls` → `SMTP` + `STARTTLS`；`none` → `SMTP`），用 DPAPI 解出的密码 `login`，超时 20 秒，证书用 `ssl.create_default_context()`。
+- `From` = 账号地址，`To` / `Cc` 取草稿，`Subject` 取草稿，正文为**纯文本**；`Message-ID` 由核心层生成并原样返回。
+- 成功：草稿 `status = sent`、审批保持 `approved`、写一条 `mail_actions(result = sent)`，返回上面三个字段。
+- 失败（未配置 `smtpHost`、没有可用密码、DPAPI 解密失败、连接 / 认证 / 发信出错）：写一条 `mail_actions(result = failed, error = 原因)`，**草稿状态不变**，返回 `SMTP_ERROR`。`error` 和响应 message **绝不包含密码**。
+- **幂等**：`idempotency_key` 在 `mail_actions` 里是 UNIQUE。首次执行记录写入后（无论 `sent` 还是 `failed`），同一个键再次 `execute` 一律返回 `ALREADY_EXECUTED`，绝不重发。发送失败后要重试，调用方需要提供**新的** `idempotencyKey`，并在界面上明确这是另一次发送尝试。
+
 ### `shutdown`
 
 参数：`{}` → 结果 `{"ok": true}`，随后进程自行退出。
@@ -333,3 +461,4 @@ POP3 结果：
 - `protocol` 变化才需要双方同时升级；`version` 仅用于展示。
 - 新增方法不做破坏性变更；删除或改签名的旧方法必须提升 `protocol`。
 - 数据库 `schemaVersion` 独立于 `protocol`：v4 只**新增** `contacts`、`templates` 和 `messages_fts`（FTS5 external content 表 + 三个同步触发器），不改旧表；老库（v1~v3）启动时自动逐级迁移，v4 迁移会把已有 `messages` 全量重建进索引，不需要重新同步。
+- v5 只**新增** `drafts`、`approvals`、`mail_actions` 三张表及其索引，不改旧表；老库（v1~v4）启动时自动迁移，账号 / 邮件 / 通讯录 / 模板全部保留。`drafts.account_id` 与 `approvals.draft_id` 带 `ON DELETE CASCADE`（删账号连带草稿、删草稿连带审批），`mail_actions` 故意不设外键，发送审计记录不随草稿删除而消失。

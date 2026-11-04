@@ -439,7 +439,22 @@ function runRealReactPass() {
     check(composeMarkup.includes('t:mail.composeTo'), '[真实渲染] 编辑页应有收件人')
     check(composeMarkup.includes('t:mail.composeBody'), '[真实渲染] 编辑页应有正文')
     check(composeMarkup.includes('a@b.com'), '[真实渲染] 编辑页应回显预填收件人')
-    check(composeMarkup.includes('t:mail.composeSendBlocked'), '[真实渲染] 编辑页应说明发送未接通')
+    check(composeMarkup.includes('t:mail.composeSubmit'), '[真实渲染] 编辑页应有发送按钮')
+    check(composeMarkup.includes('t:mail.composeSendBlocked'), '[真实渲染] 编辑页应说明要先审批')
+
+    // 审批栏：待审批项要能批准发送 / 拒绝
+    const pendingStatus = {
+      ...statusPayload,
+      approvals: {
+        pending: [{ id: 'apr_1', subject: '报价回复', to: 'x@b.com', expiresAt: '2026-11-05T10:00:00Z' }],
+        history: [],
+      },
+      counters: { ...statusPayload.counters, pendingApprovals: 1 },
+    }
+    const railWithPending = renderToStaticMarkup(h(views.ApprovalsRail, { t, status: pendingStatus }))
+    check(railWithPending.includes('报价回复'), '[真实渲染] 待审批应显示草稿主题')
+    check(railWithPending.includes('t:mail.approveAndSend'), '[真实渲染] 待审批应有「批准并发送」')
+    check(railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批应有「拒绝」')
 
     const agentMarkup = renderToStaticMarkup(h(views.AgentMailComposer, { t, message: baseMessage }))
     check(agentMarkup.includes('t:mail.agentChatTitle'), '[真实渲染] 详情页应有 Agent 区')

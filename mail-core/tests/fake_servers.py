@@ -8,10 +8,33 @@ assert e.g. that the SMTP probe never issues ``MAIL FROM``.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import email.header
 import re
 import socket
 import threading
+
+
+def _b64_text(token: str) -> str:
+    """Decode one base64 AUTH token, tolerating a malformed value."""
+    try:
+        return base64.b64decode(token.encode("ascii"), validate=False).decode(
+            "utf-8", "replace"
+        )
+    except (binascii.Error, ValueError, UnicodeEncodeError):
+        return ""
+
+
+def _auth_plain(token: str) -> tuple[str, str]:
+    """Split a decoded ``AUTH PLAIN`` token (``\\0user\\0password``)."""
+    decoded = _b64_text(token)
+    parts = decoded.split("\0")
+    if len(parts) >= 3:
+        return parts[-2], parts[-1]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return "", ""
 
 
 def _header_value(text: str) -> str:
@@ -229,7 +252,15 @@ class FakePop3Server(_LoopbackServer):
 
 
 class FakeSmtpServer(_LoopbackServer):
-    """Speaks just enough SMTP for ``EHLO`` / ``QUIT`` (and a busy signal)."""
+    """Speaks enough SMTP for the probe *and* for an actual send.
+
+    ``auth=False`` (the default) answers ``EHLO`` with a bare greeting, so the
+    reachability probe never sees ``MAIL`` / ``RCPT`` / ``DATA`` and no
+    password is sent.  ``auth=True`` advertises ``AUTH PLAIN LOGIN``, accepts
+    the login, collects ``MAIL FROM`` / ``RCPT TO`` and stores every message
+    body it received in ``messages`` (raw bytes, dot-unstuffed), which lets a
+    test count exactly how many messages were sent.
+    """
 
     def __init__(
         self,
@@ -237,34 +268,126 @@ class FakeSmtpServer(_LoopbackServer):
         reject: bool = False,
         reject_reply: str = "554 no SMTP service here",
         greeting: str = "220 fake SMTP ready",
+        auth: bool = False,
     ) -> None:
         super().__init__()
         self.reject = reject
         self.greeting = reject_reply if reject else greeting
+        self.auth = auth
+        self.messages: list[bytes] = []
+        self.logins: list[tuple[str, str]] = []
+        self.senders: list[str] = []
+        self.recipients: list[str] = []
+
+    # -- protocol helpers --------------------------------------------------
+
+    @staticmethod
+    def _send(connection: socket.socket, text: str | bytes) -> None:
+        payload = text.encode("ascii") if isinstance(text, str) else text
+        connection.sendall(payload)
+
+    def _reply(self, connection: socket.socket, text: str) -> None:
+        self._send(connection, text + "\r\n")
+
+    @staticmethod
+    def _join_data(lines: list[bytes]) -> bytes:
+        unstuffed = [
+            line[1:] if line.startswith(b"..") else line for line in lines
+        ]
+        return b"\r\n".join(unstuffed) + b"\r\n"
+
+    def _handle_auth(
+        self, connection: socket.socket, stream, argument: str
+    ) -> None:
+        mechanism, _, initial = argument.partition(" ")
+        mechanism = mechanism.upper()
+        initial = initial.strip()
+        if mechanism == "PLAIN":
+            if not initial:
+                self._reply(connection, "334 ")
+                initial = stream.readline().decode("ascii", "replace").strip()
+            username, password = _auth_plain(initial)
+            self.logins.append((username, password))
+            self._reply(connection, "235 2.7.0 Authentication successful")
+        elif mechanism == "LOGIN":
+            if initial:
+                username = _b64_text(initial)
+            else:
+                self._reply(connection, "334 VXNlcm5hbWU6")
+                username = _b64_text(
+                    stream.readline().decode("ascii", "replace").strip()
+                )
+            self._reply(connection, "334 UGFzc3dvcmQ6")
+            password = _b64_text(
+                stream.readline().decode("ascii", "replace").strip()
+            )
+            self.logins.append((username, password))
+            self._reply(connection, "235 2.7.0 Authentication successful")
+        else:
+            self._reply(connection, "504 Unrecognized authentication type")
 
     def handle(self, connection: socket.socket) -> None:
-        connection.sendall(f"{self.greeting}\r\n".encode("ascii"))
+        self._reply(connection, self.greeting)
         if self.reject:
             return
         stream = connection.makefile("rb")
         with stream:
+            in_data = False
+            data_lines: list[bytes] = []
             for raw in stream:
-                line = raw.decode("ascii", "replace").strip()
+                line_bytes = raw.rstrip(b"\r\n")
+                if in_data:
+                    if line_bytes == b".":
+                        in_data = False
+                        self.messages.append(self._join_data(data_lines))
+                        data_lines = []
+                        self._reply(connection, "250 2.0.0 Ok: queued")
+                    else:
+                        data_lines.append(line_bytes)
+                    continue
+
+                line = line_bytes.decode("utf-8", "replace").strip()
                 if not line:
                     continue
                 self.commands.append(line)
-                command = line.partition(" ")[0].upper()
+                command, _, argument = line.partition(" ")
+                command = command.upper()
+                argument = argument.strip()
+
                 if command in ("EHLO", "HELO"):
-                    connection.sendall(b"250 fake\r\n")
+                    if self.auth:
+                        self._send(
+                            connection,
+                            "250-fake\r\n"
+                            "250-SIZE 1048576\r\n"
+                            "250-AUTH PLAIN LOGIN\r\n"
+                            "250 8BITMIME\r\n",
+                        )
+                    else:
+                        self._reply(connection, "250 fake")
                 elif command == "STARTTLS":
-                    connection.sendall(b"502 STARTTLS not supported\r\n")
+                    self._reply(connection, "502 STARTTLS not supported")
+                elif command == "AUTH":
+                    self._handle_auth(connection, stream, argument)
+                elif command == "MAIL":
+                    self.senders.append(argument)
+                    self._reply(connection, "250 2.1.0 Ok")
+                elif command == "RCPT":
+                    self.recipients.append(argument)
+                    self._reply(connection, "250 2.1.5 Ok")
+                elif command == "DATA":
+                    in_data = True
+                    data_lines = []
+                    self._reply(connection, "354 End data with <CR><LF>.<CR><LF>")
+                elif command == "RSET":
+                    self._reply(connection, "250 ok")
                 elif command == "QUIT":
-                    connection.sendall(b"221 bye\r\n")
+                    self._reply(connection, "221 bye")
                     return
                 elif command == "NOOP":
-                    connection.sendall(b"250 ok\r\n")
+                    self._reply(connection, "250 ok")
                 else:
-                    connection.sendall(b"502 command not implemented\r\n")
+                    self._reply(connection, "502 command not implemented")
 
 
 def _imap_tokens(text: str) -> list[str]:

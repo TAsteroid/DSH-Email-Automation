@@ -211,10 +211,21 @@ export function apply(ctx, config) {
   /** 同步是长活：逐封 FETCH，整批可能几分钟，不能套 20s 的默认超时。 */
   const SYNC_TIMEOUT_MS = 300_000
 
-  async function snapshot() {
-    const coreStatus = core.status()
+  /** 审批记录只带 draftId，界面需要主题与收件人，这里按草稿补上。 */
+  function decorateApprovals(list, draftsResult) {
+    const drafts = (draftsResult && draftsResult.available && draftsResult.value?.drafts) || []
+    const byId = new Map(drafts.map((draft) => [draft.id, draft]))
+    return (list || []).map((approval) => {
+      const draft = byId.get(approval.draftId) || {}
+      return { ...approval, subject: draft.subject ?? '', to: draft.to ?? '' }
+    })
+  }
+
+  async function snapshot() {    const coreStatus = core.status()
     const accounts = ready ? await callCore('account.list') : { available: false, reason: readyError }
     const sync = ready ? await callCore('sync.status') : { available: false, reason: readyError }
+    const approvals = ready ? await callCore('approval.list') : { available: false, reason: readyError }
+    const drafts = ready ? await callCore('draft.list', {}) : { available: false, reason: readyError }
     const counters = (sync.available && sync.value?.counters) || {
       accounts: 0,
       messages: 0,
@@ -222,6 +233,9 @@ export function apply(ctx, config) {
       drafts: 0,
       pendingApprovals: 0,
       pendingAi: 0,
+    }
+    if (approvals.available && approvals.value?.pending) {
+      counters.pendingApprovals = approvals.value.pending.length
     }
     return {
       plugin: name,
@@ -240,7 +254,10 @@ export function apply(ctx, config) {
       },
       accounts: (accounts.available && accounts.value?.accounts) || [],
       accountsError: accounts.available ? null : accounts.reason,
-      approvals: { pending: [], history: [] },
+      approvals: {
+        pending: decorateApprovals(approvals.available ? approvals.value?.pending : [], drafts),
+        history: decorateApprovals(approvals.available ? approvals.value?.history : [], drafts),
+      },
       counters,
       lastSyncAt: (sync.available && sync.value?.lastSyncAt) || '',
     }
@@ -679,6 +696,116 @@ export function apply(ctx, config) {
     'mail: register mail_contacts tool',
   )
 
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_draft_save',
+        description:
+          'Create or update a draft reply. Saving never sends anything: sending requires a human approval created with mail_request_approval and approved in the Mail panel.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            accountId: { type: 'string', description: 'Account id from mail_accounts' },
+            draftId: { type: 'string', description: 'Existing draft to update; omit to create' },
+            to: { type: 'string' },
+            cc: { type: 'string' },
+            subject: { type: 'string' },
+            body: { type: 'string' },
+          },
+          required: ['accountId', 'to', 'subject', 'body'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              id: { type: 'string' },
+              contentHash: { type: 'string' },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `draft not saved: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `draft ${value.id} saved (hash ${String(value.contentHash).slice(0, 12)}…)` }]
+          },
+        },
+        timeoutMs: 20_000,
+        isConcurrencySafe: () => false,
+        async execute(args) {
+          const params = {
+            accountId: args.accountId,
+            to: args.to,
+            cc: args.cc ?? '',
+            subject: args.subject,
+            body: args.body,
+          }
+          if (typeof args.draftId === 'string' && args.draftId.trim()) params.draftId = args.draftId.trim()
+          const result = await callCore('draft.save', params)
+          if (!result.available) return { available: false, reason: result.reason.message }
+          return {
+            available: true,
+            reason: '',
+            id: result.value?.id ?? '',
+            contentHash: result.value?.contentHash ?? '',
+          }
+        },
+      }),
+    'mail: register mail_draft_save tool',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_request_approval',
+        description:
+          'Ask the user to approve sending one draft. This only creates a pending approval; it never approves or sends. Approving happens in the Mail panel by the user.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            draftId: { type: 'string', description: 'Draft id returned by mail_draft_save' },
+            ttlMinutes: { type: 'number', description: 'How long the approval stays valid (default 1440)' },
+          },
+          required: ['draftId'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              id: { type: 'string' },
+              expiresAt: { type: 'string' },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `approval not created: ${value.reason ?? 'unknown'}` }]
+            return [{ type: 'text', text: `approval ${value.id} pending until ${value.expiresAt}; the user must approve it in the Mail panel` }]
+          },
+        },
+        timeoutMs: 20_000,
+        isConcurrencySafe: () => true,
+        async execute(args) {
+          const params = { draftId: args.draftId }
+          if (args.ttlMinutes !== undefined) params.ttlMinutes = args.ttlMinutes
+          const result = await callCore('approval.request', params)
+          if (!result.available) return { available: false, reason: result.reason.message }
+          return {
+            available: true,
+            reason: '',
+            id: result.value?.id ?? '',
+            expiresAt: result.value?.expiresAt ?? '',
+          }
+        },
+      }),
+    'mail: register mail_request_approval tool',
+  )
+
   // 3) 本机 HTTP 通道
   ctx.effect(() => {
     const disposers = []
@@ -816,6 +943,58 @@ export function apply(ctx, config) {
     route('/templates/remove', async (body) => {
       const id = requireText(body.id, 'id')
       return requireCoreResult(await callCore('template.remove', { id }))
+    })
+
+    // ---- 草稿 / 审批 / 发送（批准与执行是用户操作，不暴露给 Agent）----------
+    route('/drafts', async (body) => {
+      const params = {}
+      if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
+      return requireCoreResult(await callCore('draft.list', params))
+    })
+
+    route('/drafts/save', async (body) => {
+      const params = {
+        accountId: requireText(body.accountId, 'accountId'),
+        to: typeof body.to === 'string' ? body.to.trim() : '',
+        cc: typeof body.cc === 'string' ? body.cc.trim() : '',
+        subject: typeof body.subject === 'string' ? body.subject : '',
+        body: typeof body.body === 'string' ? body.body : '',
+      }
+      if (typeof body.draftId === 'string' && body.draftId.trim()) params.draftId = body.draftId.trim()
+      return requireCoreResult(await callCore('draft.save', params))
+    })
+
+    route('/drafts/remove', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('draft.remove', { id }))
+    })
+
+    route('/approvals', async () => requireCoreResult(await callCore('approval.list', {})))
+
+    route('/approvals/request', async (body) => {
+      const draftId = requireText(body.draftId, 'draftId')
+      const params = { draftId }
+      if (body.ttlMinutes !== undefined) params.ttlMinutes = Number(body.ttlMinutes)
+      return requireCoreResult(await callCore('approval.request', params))
+    })
+
+    route('/approvals/approve', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('approval.approve', { id }))
+    })
+
+    route('/approvals/reject', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('approval.reject', { id }))
+    })
+
+    route('/actions/execute', async (body) => {
+      const approvalId = requireText(body.approvalId, 'approvalId')
+      const params = { approvalId }
+      if (typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()) {
+        params.idempotencyKey = body.idempotencyKey.trim()
+      }
+      return requireCoreResult(await callCore('action.execute', params, { timeoutMs: 120_000 }))
     })
 
     route('/messages', async (body) => {

@@ -133,6 +133,23 @@ function handleMethod(method, params) {
   }
   if (method === 'template.add') return { id: 'tpl_new' }
   if (method === 'template.remove') return { removed: true }
+  if (method === 'draft.list') {
+    return {
+      drafts: [{ id: 'drf_1', accountId: 'acc_1', to: 'x@b.com', subject: '报价回复', contentHash: 'h1', status: 'approved', updatedAt: '2026-11-04T10:00:00Z' }],
+    }
+  }
+  if (method === 'draft.save') return { id: params.draftId ?? 'drf_new', contentHash: 'deadbeef', status: 'draft' }
+  if (method === 'draft.remove') return { removed: true }
+  if (method === 'approval.list') {
+    return {
+      pending: [{ id: 'apr_1', draftId: 'drf_1', action: 'send', contentHash: 'h1', status: 'pending', expiresAt: '2026-11-05T10:00:00Z' }],
+      history: [{ id: 'apr_0', draftId: 'drf_1', action: 'send', contentHash: 'h0', status: 'sent', createdAt: '2026-11-03T10:00:00Z' }],
+    }
+  }
+  if (method === 'approval.request') return { id: 'apr_new', draftId: params.draftId, contentHash: 'h1', expiresAt: '2026-11-05T10:00:00Z' }
+  if (method === 'approval.approve') return { approved: true }
+  if (method === 'approval.reject') return { rejected: true }
+  if (method === 'action.execute') return { sent: true, messageId: '<msg@example>', executedAt: '2026-11-04T10:05:00Z' }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -529,6 +546,54 @@ const foldersRoute = await invoke('/api/dsh-mail/folders', {
   body: JSON.stringify({ accountId: 'acc_1' }),
 })
 check(foldersRoute && foldersRoute.status === 200, `folders 应 200，实际 ${foldersRoute && foldersRoute.status}`)
+
+// ---- 草稿 / 审批 / 执行 ---------------------------------------------------
+const draftNoAccount = await invoke('/api/dsh-mail/drafts/save', {
+  method: 'POST',
+  body: JSON.stringify({ to: 'a@b.com', subject: 's', body: 'b' }),
+})
+check(draftNoAccount && draftNoAccount.status === 400, `草稿缺 accountId 应 400，实际 ${draftNoAccount && draftNoAccount.status}`)
+
+const draftSave = await invoke('/api/dsh-mail/drafts/save', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1', to: 'a@b.com', subject: 's', body: 'b' }),
+})
+check(draftSave && draftSave.status === 200, `保存草稿应 200，实际 ${draftSave && draftSave.status}`)
+if (draftSave && draftSave.body) {
+  const parsed = JSON.parse(draftSave.body)
+  check(parsed.value.id === 'drf_new' && parsed.value.contentHash === 'deadbeef', '草稿应返回 id 与 hash')
+}
+
+const approvalsRoute = await invoke('/api/dsh-mail/approvals', { method: 'POST', body: '{}' })
+check(approvalsRoute && approvalsRoute.status === 200, `approvals 应 200，实际 ${approvalsRoute && approvalsRoute.status}`)
+
+const approvalRequestNoDraft = await invoke('/api/dsh-mail/approvals/request', { method: 'POST', body: '{}' })
+check(approvalRequestNoDraft && approvalRequestNoDraft.status === 400, `缺 draftId 应 400，实际 ${approvalRequestNoDraft && approvalRequestNoDraft.status}`)
+
+const approveRoute = await invoke('/api/dsh-mail/approvals/approve', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'apr_1' }),
+})
+check(approveRoute && approveRoute.status === 200, `批准应 200，实际 ${approveRoute && approveRoute.status}`)
+
+const executeRoute = await invoke('/api/dsh-mail/actions/execute', {
+  method: 'POST',
+  body: JSON.stringify({ approvalId: 'apr_1' }),
+})
+check(executeRoute && executeRoute.status === 200, `执行应 200，实际 ${executeRoute && executeRoute.status}`)
+if (executeRoute && executeRoute.body) {
+  const parsed = JSON.parse(executeRoute.body)
+  check(parsed.value.sent === true && parsed.value.messageId, '执行应返回 sent 与 messageId')
+}
+
+const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })
+if (statuses && statuses.body) {
+  const parsed = JSON.parse(statuses.body)
+  check(parsed.value.approvals.pending.length === 1, 'status 应带待审批列表')
+  check(parsed.value.approvals.pending[0].subject === '报价回复', '待审批应补上草稿主题')
+  check(parsed.value.counters.pendingApprovals === 1, 'counters.pendingApprovals 应与待审批数一致')
+  check(!JSON.stringify(parsed.value).includes('password'), 'status 不得泄露密码')
+}
 
 const syncRoute = await invoke('/api/dsh-mail/sync', {
   method: 'POST',
