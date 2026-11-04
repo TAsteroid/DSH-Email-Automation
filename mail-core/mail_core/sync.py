@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import imap_client, mime_parse, pop3_client
-from .protocol import MailCoreError
+from .protocol import MailCoreError, bad_request
 from .store import Store
 
 DEFAULT_FOLDER = "INBOX"
@@ -105,6 +105,63 @@ def _result(
         "startedAt": started_at,
         "finishedAt": _now(),
     }
+
+
+def _fallback_message_id(
+    account_id: str, folder: str, uidvalidity: int, uid: int
+) -> str:
+    """Stable Message-ID for mail that arrives without one.
+
+    Derived from the row identity (account + folder + UIDVALIDITY + UID), so
+    it survives a ``sync.reset`` and repeated syncs of the same message.
+    """
+    seed = f"{account_id}\0{folder}\0{int(uidvalidity)}\0{int(uid)}"
+    return f"<{hashlib.sha1(seed.encode('utf-8')).hexdigest()}@mail-core>"
+
+
+def _parse(
+    account_id: str,
+    folder: str,
+    uidvalidity: int,
+    uid: int,
+    raw: bytes,
+    size: int,
+) -> dict:
+    return mime_parse.parse_message(
+        raw,
+        size,
+        fallback_message_id=_fallback_message_id(
+            account_id, folder, uidvalidity, uid
+        ),
+    )
+
+
+def _insert(
+    store: Store,
+    account_id: str,
+    folder: str,
+    uidvalidity: int,
+    uid: int,
+    parsed: dict,
+) -> bool:
+    return store.insert_message(
+        account_id=account_id,
+        folder=folder,
+        uidvalidity=uidvalidity,
+        uid=uid,
+        message_id=parsed["messageId"],
+        in_reply_to=parsed["inReplyTo"],
+        references=parsed["references"],
+        subject=parsed["subject"],
+        from_addr=parsed["fromAddr"],
+        to_addr=parsed["toAddr"],
+        cc_addr=parsed["ccAddr"],
+        date=parsed["date"],
+        snippet=parsed["snippet"],
+        body_text=parsed["text"],
+        body_html=parsed["html"],
+        size=parsed["size"],
+    )
 
 
 def run_sync(
@@ -270,23 +327,8 @@ def _sync_imap(
 
         for uid in uids:
             raw, size = _fetch_one(connection, uid)
-            parsed = mime_parse.parse_message(raw, size)
-            inserted = store.insert_message(
-                account_id=account_id,
-                folder=folder,
-                uidvalidity=uidvalidity,
-                uid=uid,
-                message_id=parsed["messageId"],
-                subject=parsed["subject"],
-                from_addr=parsed["fromAddr"],
-                to_addr=parsed["toAddr"],
-                cc_addr=parsed["ccAddr"],
-                date=parsed["date"],
-                snippet=parsed["snippet"],
-                body_text=parsed["text"],
-                body_html=parsed["html"],
-                size=parsed["size"],
-            )
+            parsed = _parse(account_id, folder, uidvalidity, uid, raw, size)
+            inserted = _insert(store, account_id, folder, uidvalidity, uid, parsed)
             fetched += 1
             if inserted:
                 stored += 1
@@ -424,23 +466,8 @@ def _sync_pop3(
             raw = b"\r\n".join(body_lines)
             if body_lines:
                 raw += b"\r\n"
-            parsed = mime_parse.parse_message(raw, len(raw))
-            inserted = store.insert_message(
-                account_id=account_id,
-                folder=folder,
-                uidvalidity=0,
-                uid=uid,
-                message_id=parsed["messageId"],
-                subject=parsed["subject"],
-                from_addr=parsed["fromAddr"],
-                to_addr=parsed["toAddr"],
-                cc_addr=parsed["ccAddr"],
-                date=parsed["date"],
-                snippet=parsed["snippet"],
-                body_text=parsed["text"],
-                body_html=parsed["html"],
-                size=parsed["size"],
-            )
+            parsed = _parse(account_id, folder, 0, uid, raw, len(raw))
+            inserted = _insert(store, account_id, folder, 0, uid, parsed)
             fetched += 1
             if inserted:
                 stored += 1
@@ -497,3 +524,252 @@ def _sync_pop3(
         batch_last_uid,
         started_at,
     )
+
+
+# -- history backfill ------------------------------------------------------
+
+# IMAP ``SEARCH BEFORE`` wants ``d-Mon-yyyy``.  The month names are hard-coded
+# so the command does not depend on the process locale.
+_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def normalize_before(value: str) -> str:
+    """Normalise ``history.backfill``'s ``before`` to protocol UTC form.
+
+    Accepts a date (``2026-11-03``), a naive datetime or full ISO-8601 with
+    ``Z`` / offset.  Raises ``BAD_REQUEST`` for anything unparsable.
+    """
+    text = str(value).strip()
+    if not text:
+        raise bad_request("field before must be an ISO-8601 date")
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        moment = datetime.fromisoformat(candidate)
+    except ValueError:
+        raise bad_request("field before must be an ISO-8601 date") from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    try:
+        return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, ValueError):
+        raise bad_request("field before must be an ISO-8601 date") from None
+
+
+def _imap_before_date(before: str) -> str:
+    moment = datetime.strptime(before, "%Y-%m-%dT%H:%M:%SZ")
+    return f"{moment.day:02d}-{_MONTHS[moment.month - 1]}-{moment.year:04d}"
+
+
+def backfill_history(
+    store: Store,
+    account: dict,
+    password: str,
+    folder: str,
+    before: str,
+    limit: int = DEFAULT_LIMIT,
+) -> dict:
+    """Fetch messages older than ``before`` that are not in the local index.
+
+    This is deliberately separate from the forward cursor: it never changes
+    ``sync_state.last_uid``, and messages it already stored are skipped (by
+    UID) so repeated calls keep returning ``stored = 0``.
+    """
+    receive_protocol = account.get("protocol") or "imap"
+    if receive_protocol == "pop3":
+        return _backfill_pop3(store, account, password, folder, before, limit)
+    return _backfill_imap(store, account, password, folder, before, limit)
+
+
+def _backfill_imap(
+    store: Store,
+    account: dict,
+    password: str,
+    folder: str,
+    before: str,
+    limit: int,
+) -> dict:
+    account_id = str(account["id"])
+    wire_folder = imap_client.encode_mailbox(folder)
+    fetched = stored = 0
+    connection = None
+
+    try:
+        connection = imap_client.connect(
+            account["imapHost"],
+            int(account["imapPort"]),
+            account["imapSecurity"],
+        )
+        try:
+            connection.login(account["username"], password)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"login failed: {_redact(exc, password)}"
+            ) from None
+
+        try:
+            status, data = connection.select(wire_folder)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"SELECT {folder} failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(f"SELECT {folder} failed: {_text(data)}")
+
+        uidvalidity = _read_uidvalidity(connection, wire_folder) or 0
+        local_uids = store.list_message_uids(account_id, folder, uidvalidity)
+
+        try:
+            status, data = connection.uid(
+                "SEARCH", None, f"BEFORE {_imap_before_date(before)}"
+            )
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"UID SEARCH BEFORE failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(
+                f"UID SEARCH BEFORE failed: {_text(data)}"
+            )
+
+        # Ascending UIDs: the oldest candidates first is exactly what a
+        # historical backfill wants.  The date re-check below keeps servers
+        # (and test fakes) that ignore BEFORE from storing newer mail.
+        candidates = [
+            uid for uid in _parse_search(data) if uid not in local_uids
+        ][:limit]
+
+        for uid in candidates:
+            raw, size = _fetch_one(connection, uid)
+            parsed = _parse(account_id, folder, uidvalidity, uid, raw, size)
+            if not parsed["date"] or parsed["date"] >= before:
+                continue
+            if _insert(store, account_id, folder, uidvalidity, uid, parsed):
+                stored += 1
+            fetched += 1
+    except MailCoreError:
+        raise
+    except _IMAP_FAILURES as exc:
+        raise imap_client.ImapError(
+            f"backfill {folder} failed: {_redact(exc, password)}"
+        ) from None
+    finally:
+        if connection is not None:
+            try:
+                connection.logout()
+            except Exception:
+                pass
+
+    return _backfill_result(
+        store, account_id, folder, before, fetched, stored
+    )
+
+
+def _backfill_pop3(
+    store: Store,
+    account: dict,
+    password: str,
+    folder: str,
+    before: str,
+    limit: int,
+) -> dict:
+    account_id = str(account["id"])
+    fetched = stored = 0
+    connection = None
+
+    try:
+        connection = pop3_client.connect(
+            account["imapHost"],
+            int(account["imapPort"]),
+            account["imapSecurity"],
+        )
+        try:
+            connection.user(account["username"])
+            connection.pass_(password)
+        except _POP3_FAILURES as exc:
+            raise pop3_client.Pop3Error(
+                f"login failed: {_redact(exc, password)}"
+            ) from None
+
+        try:
+            _status, lines, _octets = connection.uidl()
+        except _POP3_FAILURES as exc:
+            raise pop3_client.Pop3Error(
+                f"UIDL failed: {_redact(exc, password)}"
+            ) from None
+
+        local_uids = store.list_message_uids(account_id, folder, 0)
+        candidates: list[tuple[int, int]] = []
+        for message_number, uidl in sorted(_parse_uidl(lines)):
+            uid = _pop3_uid(uidl, message_number)
+            if uid in local_uids:
+                continue
+            candidates.append((message_number, uid))
+            if len(candidates) >= limit:
+                break
+
+        for message_number, uid in candidates:
+            try:
+                _status, body_lines, _octets = connection.retr(message_number)
+            except _POP3_FAILURES as exc:
+                raise pop3_client.Pop3Error(
+                    f"RETR {message_number} failed: {_redact(exc, password)}"
+                ) from None
+            raw = b"\r\n".join(body_lines)
+            if body_lines:
+                raw += b"\r\n"
+            parsed = _parse(account_id, folder, 0, uid, raw, len(raw))
+            if not parsed["date"] or parsed["date"] >= before:
+                continue
+            if _insert(store, account_id, folder, 0, uid, parsed):
+                stored += 1
+            fetched += 1
+    except MailCoreError:
+        raise
+    except _POP3_FAILURES as exc:
+        raise pop3_client.Pop3Error(
+            f"backfill failed: {_redact(exc, password)}"
+        ) from None
+    finally:
+        if connection is not None:
+            try:
+                connection.quit()
+            except Exception:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    return _backfill_result(
+        store, account_id, folder, before, fetched, stored
+    )
+
+
+def _backfill_result(
+    store: Store,
+    account_id: str,
+    folder: str,
+    before: str,
+    fetched: int,
+    stored: int,
+) -> dict:
+    return {
+        "accountId": account_id,
+        "folder": folder,
+        "before": before,
+        "fetched": fetched,
+        "stored": stored,
+        "oldestDate": store.oldest_message_date(account_id, folder),
+    }

@@ -169,6 +169,19 @@ function handleMethod(method, params) {
   }
   if (method === 'approval.reject') return { rejected: true }
   if (method === 'action.execute') return { sent: true, messageId: '<msg@example>', executedAt: '2026-11-04T10:05:00Z' }
+  if (method === 'thread.list') {
+    return {
+      threads: [
+        { threadId: 'thr_1', subject: '报价回复', messageCount: 2, lastDate: '2026-11-04T10:00:00Z', unreadCount: 1, participants: ['a@b.com'] },
+      ],
+    }
+  }
+  if (method === 'thread.get') return { threadId: params.threadId, subject: '报价回复', messages: [{ id: 'm1' }, { id: 'm2' }] }
+  if (method === 'history.backfill') return { fetched: 1, stored: 1, oldestDate: '2026-10-01T00:00:00Z' }
+  if (method === 'admin.backup') return { path: 'C:\\data\\backups\\mail-20261104-120000.db', size: 4096, createdAt: '2026-11-04T12:00:00Z' }
+  if (method === 'admin.backups') {
+    return { backups: [{ path: 'C:\\data\\backups\\mail-20261104-120000.db', size: 4096, createdAt: '2026-11-04T12:00:00Z' }] }
+  }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -639,6 +652,49 @@ if (sendTool) {
   check(String(neverSend.reason).includes('never'), '应说明策略原因')
   check(approveCalls.length === sendsBefore, 'policy=never 时不应产生批准记录')
   approvalPolicyConfig = 'ask'
+}
+
+// ---- 线程 / 回溯 / 备份 -----------------------------------------------------
+const threadsRoute = await invoke('/api/dsh-mail/threads', { method: 'POST', body: JSON.stringify({ folder: 'INBOX' }) })
+check(threadsRoute && threadsRoute.status === 200, `threads 应 200，实际 ${threadsRoute && threadsRoute.status}`)
+if (threadsRoute && threadsRoute.body) {
+  const parsed = JSON.parse(threadsRoute.body)
+  check(parsed.value.threads.length === 1, 'threads 应返回线程列表')
+  check(parsed.value.threads[0].messageCount === 2, '线程应带消息数')
+}
+
+const threadNoId = await invoke('/api/dsh-mail/thread', { method: 'POST', body: '{}' })
+check(threadNoId && threadNoId.status === 400, `thread 缺 threadId 应 400，实际 ${threadNoId && threadNoId.status}`)
+
+const threadGet = await invoke('/api/dsh-mail/thread', { method: 'POST', body: JSON.stringify({ threadId: 'thr_1' }) })
+check(threadGet && threadGet.status === 200, `thread 应 200，实际 ${threadGet && threadGet.status}`)
+
+const backfillNoAccount = await invoke('/api/dsh-mail/history/backfill', { method: 'POST', body: JSON.stringify({ folder: 'INBOX' }) })
+check(backfillNoAccount && backfillNoAccount.status === 400, `backfill 缺 accountId 应 400，实际 ${backfillNoAccount && backfillNoAccount.status}`)
+
+const backfill = await invoke('/api/dsh-mail/history/backfill', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1', folder: 'INBOX', before: '2026-10-01T00:00:00Z', limit: 50 }),
+})
+check(backfill && backfill.status === 200, `backfill 应 200，实际 ${backfill && backfill.status}`)
+if (backfill && backfill.body) {
+  const parsed = JSON.parse(backfill.body)
+  check(parsed.value.stored === 1, 'backfill 应返回 stored')
+}
+
+const backupRoute = await invoke('/api/dsh-mail/backup', { method: 'POST', body: '{}' })
+check(backupRoute && backupRoute.status === 200, `backup 应 200，实际 ${backupRoute && backupRoute.status}`)
+if (backupRoute && backupRoute.body) {
+  const parsed = JSON.parse(backupRoute.body)
+  check(String(parsed.value.path).includes('backups'), '备份路径应在 backups 目录')
+  check(parsed.value.size > 0, '备份应返回文件大小')
+}
+
+const backupsRoute = await invoke('/api/dsh-mail/backups', { method: 'POST', body: '{}' })
+check(backupsRoute && backupsRoute.status === 200, `backups 应 200，实际 ${backupsRoute && backupsRoute.status}`)
+if (backupsRoute && backupsRoute.body) {
+  const parsed = JSON.parse(backupsRoute.body)
+  check(parsed.value.backups.length === 1, 'backups 应返回列表')
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

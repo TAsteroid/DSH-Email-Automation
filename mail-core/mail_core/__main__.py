@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
+from pathlib import Path
 from typing import Optional, TextIO
 
-from . import protocol
+from . import backup, protocol, store
 from .service import Service
 
 DATA_DIR_ENV = "MAIL_CORE_DATA_DIR"
@@ -34,8 +36,13 @@ def resolve_data_dir(explicit: Optional[str] = None) -> str:
 
 
 def _configure_streams() -> None:
-    """Force UTF-8 and ``\\n`` line endings on the protocol pipes."""
-    for stream in (sys.stdin, sys.stdout):
+    """Force UTF-8 on the protocol pipes and on the log stream.
+
+    stderr is UTF-8 as well, otherwise a Chinese Windows error message (for
+    example the reason a pre-migration backup was refused) reaches the parent
+    as cp936 bytes and shows up garbled.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
@@ -43,7 +50,9 @@ def _configure_streams() -> None:
             if stream is sys.stdin:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             else:
-                stream.reconfigure(encoding="utf-8", newline="\n")
+                stream.reconfigure(
+                    encoding="utf-8", errors="replace", newline="\n"
+                )
         except (ValueError, OSError):
             # Pipes that cannot be reconfigured keep their defaults.
             pass
@@ -65,6 +74,64 @@ def serve(service: Service, stdin: TextIO, stdout: TextIO) -> None:
             return
 
 
+def _read_user_version(db_path: Path) -> int:
+    """Read ``PRAGMA user_version`` without triggering a migration."""
+    try:
+        connection = sqlite3.connect(str(db_path))
+    except sqlite3.Error as exc:
+        raise backup.BackupError(f"cannot open database {db_path}: {exc}") from None
+    try:
+        row = connection.execute("PRAGMA user_version").fetchone()
+    except sqlite3.Error as exc:
+        raise backup.BackupError(
+            f"cannot read schema version of {db_path}: {exc}"
+        ) from None
+    finally:
+        connection.close()
+    return int(row[0]) if row is not None else 0
+
+
+def backup_before_migration(
+    data_dir: str | Path, *, target_version: Optional[int] = None
+) -> Optional[dict]:
+    """Back up ``mail.db`` when it predates the current schema.
+
+    Returns the backup metadata, or ``None`` when nothing needs protecting: a
+    missing database, a zero-byte database, or a schema that is already
+    current.  Raises :class:`mail_core.backup.BackupError` when an existing
+    database cannot be backed up -- the caller must refuse to start rather
+    than let a migration run on an unprotected database.
+    """
+    directory = Path(data_dir)
+    db_path = directory / "mail.db"
+    target = store.SCHEMA_VERSION if target_version is None else int(target_version)
+
+    if not db_path.exists():
+        return None
+    try:
+        if db_path.stat().st_size == 0:
+            return None
+    except OSError as exc:
+        raise backup.BackupError(f"cannot inspect database {db_path}: {exc}") from None
+
+    current = _read_user_version(db_path)
+    if current >= target:
+        return None
+
+    try:
+        result = backup.create_backup(db_path, directory / backup.BACKUP_DIRNAME)
+    except backup.BackupError as exc:
+        raise backup.BackupError(
+            "refusing to migrate an unprotected database "
+            f"(user_version {current} -> {target}): {exc.message}"
+        ) from None
+    _log(
+        f"pre-migration backup: user_version {current} -> {target}, "
+        f"saved {result['path']}"
+    )
+    return result
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mail_core",
@@ -79,6 +146,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     data_dir = resolve_data_dir(args.data_dir)
     _configure_streams()
+
+    try:
+        backup_before_migration(data_dir)
+    except Exception as exc:
+        _log(f"startup backup failed, refusing to start: {exc}")
+        return 1
 
     try:
         service = Service(data_dir)

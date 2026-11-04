@@ -62,8 +62,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(reopened.schema_version, SCHEMA_VERSION)
         self.assertEqual(len(reopened.list_accounts()), 1)
 
-    def test_v1_database_upgrades_to_v4_and_keeps_accounts(self):
-        """An existing v1 database walks v2 -> v3 -> v4 and keeps its accounts."""
+    def test_v1_database_upgrades_to_v7_and_keeps_accounts(self):
+        """An existing v1 database walks v2 -> ... -> v7 and keeps its accounts."""
         v1_path = Path(self._tmp.name) / "legacy.db"
         connection = sqlite3.connect(str(v1_path))
         try:
@@ -118,8 +118,97 @@ class StoreTests(unittest.TestCase):
         MIGRATIONS[2](store._conn)
         store._conn.executescript(MIGRATIONS[3])
         store._conn.executescript(MIGRATIONS[4])
+        store._conn.executescript(MIGRATIONS[5])
+        MIGRATIONS[6](store._conn)
+        MIGRATIONS[7](store._conn)
         self.assertEqual(store.get_account("acc_old")["protocol"], "imap")
         self.assertEqual(store.schema_version, SCHEMA_VERSION)
+
+        message_columns = {
+            row[1] for row in store._conn.execute("PRAGMA table_info(messages)")
+        }
+        self.assertTrue({"thread_id", "in_reply_to", "refs"} <= message_columns)
+
+    def test_v6_database_upgrades_to_v7_and_backfills_threads(self):
+        """A pre-threading mailbox keeps its mail and gets thread ids."""
+        v6_path = Path(self._tmp.name) / "legacy-v6.db"
+        connection = sqlite3.connect(str(v6_path))
+        try:
+            connection.executescript(MIGRATIONS[1])
+            MIGRATIONS[2](connection)
+            connection.executescript(MIGRATIONS[3])
+            connection.executescript(MIGRATIONS[4])
+            connection.executescript(MIGRATIONS[5])
+            MIGRATIONS[6](connection)
+            connection.execute("PRAGMA user_version=6")
+            connection.execute(
+                """
+                INSERT INTO accounts (
+                    id, address, display_name, imap_host, imap_port,
+                    imap_security, smtp_host, smtp_port, smtp_security,
+                    username, password_blob, enabled, created_at, updated_at
+                ) VALUES (
+                    'acc_old', 'old@b.com', '旧账号', 'imap.old.com', 993,
+                    'ssl', '', 465, 'ssl', 'old@b.com', NULL, 1,
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                )
+                """
+            )
+            for uid, subject in ((1, "旧邮件一"), (2, "旧邮件二")):
+                connection.execute(
+                    """
+                    INSERT INTO messages (
+                        id, account_id, folder, uidvalidity, uid, message_id,
+                        subject, from_addr, to_addr, cc_addr, date, snippet,
+                        body_text, body_html, size, seen, created_at
+                    ) VALUES (?, 'acc_old', 'INBOX', 7, ?, ?, ?, 'a@b.com',
+                              'me@b.com', '', '2026-01-0{}T00:00:00Z', '',
+                              'body', '', 4, 0, '2026-01-01T00:00:00Z')
+                    """.format(uid),
+                    (
+                        f"msg_old_{uid}",
+                        uid,
+                        f"<old{uid}@example.com>",
+                        subject,
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        store = Store(v6_path)
+        self.addCleanup(store.close)
+
+        self.assertEqual(store.schema_version, SCHEMA_VERSION)
+        self.assertEqual(store.count_messages(), 2)
+        rows = store._conn.execute(
+            "SELECT message_id, thread_id FROM messages ORDER BY uid ASC"
+        ).fetchall()
+        self.assertEqual(
+            [(row["message_id"], row["thread_id"]) for row in rows],
+            [
+                ("<old1@example.com>", "acc_old:<old1@example.com>"),
+                ("<old2@example.com>", "acc_old:<old2@example.com>"),
+            ],
+        )
+        # A reply arriving after the upgrade joins the backfilled root thread.
+        self.assertTrue(
+            store.insert_message(
+                account_id="acc_old",
+                folder="INBOX",
+                uidvalidity=7,
+                uid=3,
+                message_id="<old3@example.com>",
+                in_reply_to="<old1@example.com>",
+                references="<old1@example.com>",
+                subject="Re: 旧邮件一",
+                date="2026-01-03T00:00:00Z",
+            )
+        )
+        reply = store.get_thread("acc_old:<old1@example.com>")
+        self.assertEqual(len(reply["messages"]), 2)
+        # Backfill is repeatable and does not move the rows it already set.
+        self.assertEqual(store.backfill_threads(), 0)
 
     def test_add_and_list_account_without_exposing_secret(self):
         self.store.add_account(**_account(password_blob="ZHVtbXktYmxvYg=="))

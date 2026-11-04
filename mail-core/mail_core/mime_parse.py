@@ -14,6 +14,7 @@ from __future__ import annotations
 import email
 import email.header
 import email.utils
+import hashlib
 import re
 from datetime import timezone
 from html.parser import HTMLParser
@@ -231,6 +232,8 @@ def _empty_message(size: int) -> dict:
         "toAddr": "",
         "ccAddr": "",
         "messageId": "",
+        "inReplyTo": "",
+        "references": "",
         "date": "",
         "snippet": "",
         "text": "",
@@ -239,11 +242,28 @@ def _empty_message(size: int) -> dict:
     }
 
 
-def parse_message(raw: bytes, size: int | None = None) -> dict:
+def _fallback_message_id(payload: bytes) -> str:
+    """Content-derived Message-ID for mail whose header is missing/empty.
+
+    Hashing the raw message keeps the value stable across repeated syncs of
+    the same bytes; the sync layer passes a UID-derived id when it has one
+    (that stays stable even if the server rewrites the message).
+    """
+    return f"<{hashlib.sha1(payload).hexdigest()}@mail-core>"
+
+
+def parse_message(
+    raw: bytes,
+    size: int | None = None,
+    *,
+    fallback_message_id: str = "",
+) -> dict:
     """Parse raw RFC 822 bytes into the columns of the ``messages`` table.
 
     The returned keys use the protocol spelling; the sync layer maps them to
-    the snake_case store parameters.
+    the snake_case store parameters.  ``inReplyTo`` / ``references`` are the
+    decoded header values (thread assembly parses them with
+    :func:`mail_core.threads.reference_chain`).
     """
     payload = raw or b""
     total_size = int(size) if size is not None and int(size) > 0 else len(payload)
@@ -267,12 +287,18 @@ def parse_message(raw: bytes, size: int | None = None) -> dict:
     if truncated:
         snippet = f"{snippet}{TRUNCATION_MARKER}"
 
+    message_id = decode_header_value(message.get("Message-ID"))
+    if not message_id:
+        message_id = fallback_message_id or _fallback_message_id(payload)
+
     return {
         "subject": decode_header_value(message.get("Subject")),
         "fromAddr": decode_header_value(message.get("From")),
         "toAddr": decode_header_value(message.get("To")),
         "ccAddr": decode_header_value(message.get("Cc")),
-        "messageId": decode_header_value(message.get("Message-ID")),
+        "messageId": message_id,
+        "inReplyTo": decode_header_value(message.get("In-Reply-To")),
+        "references": decode_header_value(message.get("References")),
         "date": decode_date(message.get("Date")),
         "snippet": snippet,
         "text": text,

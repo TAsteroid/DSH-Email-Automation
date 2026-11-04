@@ -21,11 +21,15 @@ execute log, keyed by an idempotency key).  Schema v6 adds the approval audit
 columns ``approvals.decided_via`` / ``approvals.decided_by`` so a decision can
 be attributed to the host prompt, a policy auto-approval or the API, and to a
 user or an agent.  Every migration is additive and repeatable, so a v5
-mailbox upgrades in place.
+mailbox upgrades in place.  Schema v7 adds conversation threading to
+``messages``: ``thread_id`` (account-scoped ``<accountId>:<rootMessageId>``)
+plus the ``in_reply_to`` / ``references`` headers it is derived from; the v7
+upgrade backfills ``thread_id`` for mail synced before threading existed.
 """
 
 from __future__ import annotations
 
+import email.utils
 import json
 import re
 import sqlite3
@@ -34,7 +38,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
-SCHEMA_VERSION = 6
+from . import threads
+
+SCHEMA_VERSION = 7
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -268,6 +274,35 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         )
 
 
+# Schema v7: conversation threading.  ``thread_id`` is ``<accountId>:<root>``
+# so two accounts holding the same Message-ID never share a thread; the two
+# raw header columns keep enough information to recompute (and therefore
+# backfill) that id without refetching mail.  The add-column statements are
+# guarded by a PRAGMA inspection because ``ADD COLUMN`` has no
+# ``IF NOT EXISTS``; the indexes and the backfill in ``Store.migrate`` are
+# repeatable.
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    additions = (
+        ("thread_id", "TEXT NOT NULL DEFAULT ''"),
+        ("in_reply_to", "TEXT NOT NULL DEFAULT ''"),
+        # ``references`` is a SQL keyword (ADD COLUMN REFERENCES is parsed as
+        # a foreign-key clause), hence the shortened column name.
+        ("refs", "TEXT NOT NULL DEFAULT ''"),
+    )
+    for name, definition in additions:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread "
+        "ON messages (account_id, thread_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread_date "
+        "ON messages (thread_id, date)"
+    )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -275,6 +310,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     4: _MIGRATION_4,
     5: _MIGRATION_5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 
@@ -428,6 +464,10 @@ class Store:
                     self._conn.executescript(migration)
                 self._conn.execute(f"PRAGMA user_version={target}")
             version = target
+        if version >= 7:
+            # A v6 mailbox has messages but no thread ids.  Recompute them once
+            # (repeatable: with nothing left to fill this is a cheap no-op).
+            self.backfill_threads()
         return version
 
     def close(self) -> None:
@@ -677,6 +717,7 @@ class Store:
             "date": row["date"],
             "snippet": row["snippet"],
             "seen": bool(row["seen"]),
+            "threadId": row["thread_id"],
         }
 
     @classmethod
@@ -693,6 +734,88 @@ class Store:
         )
         return detail
 
+    def _thread_lookup(self, account_id: str, reference: str) -> Optional[str]:
+        """Thread of the oldest local message carrying ``reference`` as msg-id."""
+        row = self._conn.execute(
+            "SELECT thread_id FROM messages "
+            "WHERE account_id = ? AND message_id = ? AND thread_id <> '' "
+            "ORDER BY date ASC, rowid ASC LIMIT 1",
+            (account_id, reference),
+        ).fetchone()
+        return str(row["thread_id"]) if row is not None else None
+
+    def resolve_thread_id(
+        self,
+        account_id: str,
+        message_id: str,
+        references: str = "",
+        in_reply_to: str = "",
+    ) -> str:
+        """Apply the thread merge rules against the rows already stored."""
+        return threads.resolve_thread_id(
+            account_id,
+            message_id,
+            references,
+            in_reply_to,
+            lambda reference: self._thread_lookup(account_id, reference),
+        )
+
+    def backfill_threads(self) -> int:
+        """Fill ``thread_id`` (and missing ``message_id``) for existing rows.
+
+        Rows are walked from oldest to newest so a reply usually finds its
+        root already assigned.  A single dictionary of
+        ``(account, message_id) -> thread_id`` is loaded up front, which keeps
+        the whole backfill linear instead of one query per reference.  Safe to
+        repeat: the second run finds no empty ``thread_id`` and returns 0.
+        """
+        try:
+            pending = self._conn.execute(
+                "SELECT id, account_id, message_id, in_reply_to, refs "
+                "FROM messages WHERE thread_id = '' ORDER BY date ASC, rowid ASC"
+            ).fetchall()
+        except sqlite3.OperationalError:  # no messages table (never in practice)
+            return 0
+        if not pending:
+            return 0
+
+        known: dict[tuple[str, str], str] = {}
+        for row in self._conn.execute(
+            "SELECT account_id, message_id, thread_id FROM messages "
+            "WHERE thread_id <> ''"
+        ):
+            if not row["message_id"]:
+                continue
+            known.setdefault(
+                (row["account_id"], row["message_id"]), str(row["thread_id"])
+            )
+
+        updates: list[tuple[str, str, str]] = []
+        for row in pending:
+            account_id = str(row["account_id"])
+            message_id = str(row["message_id"] or "") or f"<{row['id']}@mail-core>"
+            chain = threads.reference_chain(
+                row["refs"] or "", row["in_reply_to"] or ""
+            )
+            thread_id = ""
+            for reference in chain:
+                existing = known.get((account_id, reference))
+                if existing:
+                    thread_id = existing
+                    break
+            if not thread_id:
+                root = chain[0] if chain else message_id
+                thread_id = threads.thread_key(account_id, root)
+            known.setdefault((account_id, message_id), thread_id)
+            updates.append((thread_id, message_id, str(row["id"])))
+
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE messages SET thread_id = ?, message_id = ? WHERE id = ?",
+                updates,
+            )
+        return len(updates)
+
     def insert_message(
         self,
         *,
@@ -701,6 +824,9 @@ class Store:
         uidvalidity: int,
         uid: int,
         message_id: str = "",
+        in_reply_to: str = "",
+        references: str = "",
+        thread_id: str = "",
         subject: str = "",
         from_addr: str = "",
         to_addr: str = "",
@@ -717,24 +843,39 @@ class Store:
 
         ``INSERT OR IGNORE`` plus the ``UNIQUE (account_id, folder,
         uidvalidity, uid)`` constraint makes re-syncing the same message a
-        no-op, so the boolean is exactly "rowcount == 1".
+        no-op, so the boolean is exactly "rowcount == 1".  ``thread_id`` is
+        computed from the references against the rows already stored when the
+        caller does not pass one.
         """
+        row_id = f"msg_{uuid.uuid4().hex}"
+        if not message_id:
+            # A mail without Message-ID still needs a stable identity for
+            # threading; tie it to the row id, which lives as long as the row.
+            message_id = f"<{row_id}@mail-core>"
+        if not thread_id:
+            thread_id = self.resolve_thread_id(
+                account_id, message_id, references, in_reply_to
+            )
         with self._conn:
             cursor = self._conn.execute(
                 """
                 INSERT OR IGNORE INTO messages (
                     id, account_id, folder, uidvalidity, uid, message_id,
+                    thread_id, in_reply_to, refs,
                     subject, from_addr, to_addr, cc_addr, date, snippet,
                     body_text, body_html, size, seen, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    f"msg_{uuid.uuid4().hex}",
+                    row_id,
                     account_id,
                     folder,
                     int(uidvalidity),
                     int(uid),
                     message_id,
+                    thread_id,
+                    in_reply_to,
+                    references,
                     subject,
                     from_addr,
                     to_addr,
@@ -808,6 +949,145 @@ class Store:
             "SELECT COUNT(*) AS n FROM messages WHERE seen = 0"
         ).fetchone()
         return int(row["n"])
+
+    def list_message_uids(
+        self,
+        account_id: str,
+        folder: str,
+        uidvalidity: Optional[int] = None,
+    ) -> set[int]:
+        """UIDs already stored for one folder (optionally for one UIDVALIDITY).
+
+        ``history.backfill`` uses this to skip messages it already has, so a
+        repeated backfill does not refetch the whole older window.
+        """
+        if uidvalidity is None:
+            rows = self._conn.execute(
+                "SELECT uid FROM messages WHERE account_id = ? AND folder = ?",
+                (account_id, folder),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT uid FROM messages "
+                "WHERE account_id = ? AND folder = ? AND uidvalidity = ?",
+                (account_id, folder, int(uidvalidity)),
+            ).fetchall()
+        return {int(row["uid"]) for row in rows}
+
+    def oldest_message_date(self, account_id: str, folder: str) -> str:
+        """Oldest non-empty ``date`` locally stored for one folder ("" if none)."""
+        row = self._conn.execute(
+            "SELECT MIN(date) AS oldest FROM messages "
+            "WHERE account_id = ? AND folder = ? AND date <> ''",
+            (account_id, folder),
+        ).fetchone()
+        return str(row["oldest"] or "") if row is not None else ""
+
+    # -- threads -----------------------------------------------------------
+
+    @staticmethod
+    def _participants(rows: Iterable[sqlite3.Row]) -> list[str]:
+        """Distinct addresses in a thread, in order of first appearance."""
+        seen: set[str] = set()
+        participants: list[str] = []
+        for row in rows:
+            for field in ("from_addr", "to_addr", "cc_addr"):
+                value = row[field] or ""
+                for _name, address in email.utils.getaddresses([value]):
+                    address = address.strip()
+                    if not address:
+                        continue
+                    key = address.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    participants.append(address)
+        return participants
+
+    def list_threads(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        folder: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Thread summaries, newest activity first.
+
+        ``messageCount`` / ``unreadCount`` / ``lastDate`` aggregate only the
+        messages matching ``account_id`` / ``folder``; the subject and the
+        participant list come from the thread's oldest message.
+        """
+        clauses = ["thread_id <> ''"]
+        args: list = []
+        if account_id is not None:
+            clauses.append("account_id = ?")
+            args.append(account_id)
+        if folder is not None:
+            clauses.append("folder = ?")
+            args.append(folder)
+        where = " AND ".join(clauses)
+
+        summaries = self._conn.execute(
+            f"""
+            SELECT thread_id,
+                   COUNT(*) AS message_count,
+                   COALESCE(MAX(date), '') AS last_date,
+                   SUM(CASE WHEN seen = 0 THEN 1 ELSE 0 END) AS unread_count
+            FROM messages
+            WHERE {where}
+            GROUP BY thread_id
+            ORDER BY last_date DESC, thread_id ASC
+            LIMIT ?
+            """,
+            [*args, int(limit)],
+        ).fetchall()
+        if not summaries:
+            return []
+
+        thread_ids = [str(row["thread_id"]) for row in summaries]
+        placeholders = ", ".join("?" for _ in thread_ids)
+        members = self._conn.execute(
+            f"""
+            SELECT * FROM messages
+            WHERE thread_id IN ({placeholders}) AND {where}
+            ORDER BY date ASC, rowid ASC
+            """,
+            [*thread_ids, *args],
+        ).fetchall()
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in members:
+            grouped.setdefault(str(row["thread_id"]), []).append(row)
+
+        result: list[dict] = []
+        for summary in summaries:
+            thread_id = str(summary["thread_id"])
+            rows = grouped.get(thread_id, [])
+            result.append(
+                {
+                    "threadId": thread_id,
+                    "subject": rows[0]["subject"] if rows else "",
+                    "messageCount": int(summary["message_count"]),
+                    "lastDate": str(summary["last_date"] or ""),
+                    "unreadCount": int(summary["unread_count"] or 0),
+                    "participants": self._participants(rows),
+                }
+            )
+        return result
+
+    def get_thread(self, thread_id: str) -> Optional[dict]:
+        """One thread with its messages in chronological order."""
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE thread_id = ? "
+            "ORDER BY date ASC, rowid ASC",
+            (thread_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        return {
+            "threadId": thread_id,
+            "subject": rows[0]["subject"],
+            "messages": [self._message_summary(row) for row in rows],
+        }
 
     # -- contacts ----------------------------------------------------------
 

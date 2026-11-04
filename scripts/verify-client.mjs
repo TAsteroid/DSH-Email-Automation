@@ -292,6 +292,8 @@ function runRealReactPass() {
     check(settings.includes('t:mail.settingsSyncInterval'), '[真实渲染] 设置页应显示自动同步间隔')
     check(/value="5"/.test(settings), '[真实渲染] 同步间隔应回显 5 分钟')
     check(settings.includes('t:mail.settingsSyncIntervalHint'), '[真实渲染] 同步间隔应有 0=关闭 的说明')
+    check(settings.includes('t:mail.backupTitle'), '[真实渲染] 设置页应有备份区')
+    check(settings.includes('t:mail.backupNow'), '[真实渲染] 设置页应有立即备份按钮')
     check(settings.includes('t:mail.accountAdd'), '[真实渲染] 设置页应有添加账户表单')
     check(settings.includes('t:mail.passwordHint'), '[真实渲染] 设置页应说明密码如何保存')
     check(settings.includes('type="password"'), '[真实渲染] 密码输入框应为 password 类型')

@@ -54,6 +54,8 @@ def make_message(
     cc_addr: str = "",
     date: str = "Mon, 03 Nov 2026 09:12:00 +0000",
     message_id: str = "<message@example.com>",
+    in_reply_to: str = "",
+    references: str = "",
     body: str = "",
     html: str = "",
 ) -> bytes:
@@ -68,8 +70,12 @@ def make_message(
         f"Subject: {_header_value(subject)}",
         f"Date: {date}",
         f"Message-ID: {message_id}",
-        "MIME-Version: 1.0",
     ]
+    if in_reply_to:
+        lines.append(f"In-Reply-To: {in_reply_to}")
+    if references:
+        lines.append(f"References: {references}")
+    lines.append("MIME-Version: 1.0")
     if html:
         boundary = "----fake-mail-core-boundary"
         lines += [

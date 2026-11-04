@@ -59,12 +59,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 6}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 7}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段。**它和 `protocol` 无关**：v6 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程。**它和 `protocol` 无关**：v7 只新增列、索引和线程字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -172,6 +172,7 @@ POP3 结果：
 - `folder` 缺省 `INBOX`；`limit` 缺省 50，上限 200（一次同步最多拉多少封）。
 - `folder` 用**解码后的 UTF-8 名字**（例如 `已发送`），核心层在发 `SELECT` / `STATUS` 前再编码成 modified UTF-7。
 - POP3 账号忽略 `folder`，`uidValidity` 固定 0。
+- 可选 `mode: "backfill"` + `before`：等价于直接调用 [`history.backfill`](#historybackfill)，只拉比 `before` 更早、本地还没有的邮件，返回结构也换成 backfill 的结果（不改动前向游标）。`before` 必填，ISO-8601（`2026-11-03` / `2026-11-03T00:00:00Z` 均可）。
 
 结果：
 
@@ -209,11 +210,12 @@ POP3 结果：
 {"total": 42, "messages": [{
   "id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
   "subject": "合同确认", "fromAddr": "a@b.com", "toAddr": "me@b.com",
-  "date": "2026-11-04T09:12:00Z", "snippet": "正文前 200 字…", "seen": false
+  "date": "2026-11-04T09:12:00Z", "snippet": "正文前 200 字…", "seen": false,
+  "threadId": "acc_xxx:<root@b.com>"
 }]}
 ```
 
-按 `date` 倒序。
+按 `date` 倒序。`threadId` 的取值与归并规则见 [`thread.list`](#threadlist)。
 
 ### `message.get`
 
@@ -225,7 +227,8 @@ POP3 结果：
 {"id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
  "subject": "合同确认", "fromAddr": "a@b.com", "toAddr": "me@b.com", "ccAddr": "",
  "date": "2026-11-04T09:12:00Z", "snippet": "…", "text": "完整纯文本正文",
- "html": "<p>…</p>", "size": 4812, "seen": false}
+ "html": "<p>…</p>", "size": 4812, "seen": false,
+ "threadId": "acc_xxx:<root@b.com>"}
 ```
 
 `html` 可能为空串；返回值**不包含**附件内容，也不包含原始 MIME。
@@ -240,7 +243,8 @@ POP3 结果：
 {"total": 3, "messages": [{
   "id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
   "subject": "季度报告", "fromAddr": "a@b.com", "toAddr": "me@b.com",
-  "date": "2026-11-04T09:12:00Z", "snippet": "…«季度报告»…", "seen": false
+  "date": "2026-11-04T09:12:00Z", "snippet": "…«季度报告»…", "seen": false,
+  "threadId": "acc_xxx:<root@b.com>"
 }]}
 ```
 
@@ -252,6 +256,87 @@ POP3 结果：
 - 查询按**空白切词、逐词加引号转义后 AND**：`合同 报表` = 同时含两个词。`*`、`-`、`OR`、`NEAR(...)`、引号、括号等 FTS5 语法字符都当普通文本处理，**不会**报语法错误；只由标点组成的词没有可检索的字，直接忽略（全都忽略时返回空数组而不是报错）。
 - 分词器是 FTS5 默认的 `unicode61`：**连续汉字算一个词**，所以 `季度报告` 能命中「季度报告」，但 `合同` 命中不了「合同确认书」（两个不同的词）。调用方要按用户输入原样传，别自己加通配符。
 - 索引由触发器维护，`sync.run` / `sync.reset` 增删的邮件自动进/出索引；v3 老库升级到 v4 时会重建一次索引，不需要重新同步。
+
+### `thread.list`
+
+参数（全部可省略）：
+
+```json
+{"accountId": "acc_xxx", "folder": "INBOX", "limit": 50}
+```
+
+结果：
+
+```json
+{"threads": [{
+  "threadId": "acc_xxx:<root@b.com>",
+  "subject": "合同确认",
+  "messageCount": 3,
+  "lastDate": "2026-11-04T09:12:00Z",
+  "unreadCount": 2,
+  "participants": ["a@b.com", "me@b.com"]
+}]}
+```
+
+只读本地已同步的邮件，不联网。按 `lastDate` 倒序（同一时间按 `threadId`）；`limit` 缺省 50、上限 200。
+
+**线程归并规则**（v7，入库时计算；v6 及更老的库在启动迁移时回填一次）：
+
+1. `threadId` 的格式是 `<accountId>:<rootMessageId>`。**账户前缀是身份的一部分**：两个账户即使收到同一个 `Message-ID`，线程也互不相串。
+2. 邮件的 `References` / `In-Reply-To` 能在**同账户**本地已索引邮件里命中一条 → 直接归入那条邮件的线程。
+3. 有引用但一条都命中不了 → 以**最早引用**为根：有 `References` 时取第一个 id，否则取 `In-Reply-To`；`threadId = <accountId>:<最早引用>`。
+4. 完全没有引用 → `threadId = <accountId>:<本条 Message-ID>`，孤立成线程。邮件缺 `Message-ID` 时核心层会生成稳定的 `<sha1>@mail-core>`（同步场景按 account/folder/UIDVALIDITY/UID 派生，重复同步与 reset 后都不变）。
+5. 迟到的父邮件不会拆散子线程：子邮件当初以“最早引用”为根，父邮件入库时按同一规则算出的根与它一致。`history.backfill` 拉回旧父邮件后线程会自动合并（已验证）。
+
+字段说明：
+
+- `subject`：线程内**最早**一封邮件的主题（通常是根邮件；不自动去掉 `Re:`）。
+- `messageCount` / `unreadCount` / `lastDate`：只统计 `accountId` / `folder` 过滤范围内的邮件；`lastDate` 是该范围内最新一封的 `date`。
+- `participants`：线程内出现过的 `From` / `To` / `Cc` 地址去重后的列表，按首次出现顺序，比较时忽略大小写。
+- 没有 `thread_id` 的空行不会出现（迁移会先回填；新邮件入库即算好）。
+
+### `thread.get`
+
+参数：`{"threadId": "acc_xxx:<root@b.com>"}`
+
+结果：
+
+```json
+{"threadId": "acc_xxx:<root@b.com>", "subject": "合同确认",
+ "messages": [{
+   "id": "msg_xxx", "accountId": "acc_xxx", "folder": "INBOX", "uid": 4567,
+   "subject": "合同确认", "fromAddr": "a@b.com", "toAddr": "me@b.com",
+   "date": "2026-11-04T09:12:00Z", "snippet": "…", "seen": false,
+   "threadId": "acc_xxx:<root@b.com>"
+ }]}
+```
+
+- `messages` 按 `date` **升序**（最早的在前），每项字段与 `message.list` 完全一致；不含正文，正文用 `message.get`。
+- 主题同 `thread.list`：最早一封的主题。
+- `threadId` 不存在 → `NOT_FOUND`。
+
+### `history.backfill`
+
+参数：
+
+```json
+{"accountId": "acc_xxx", "folder": "INBOX",
+ "before": "2026-11-03T00:00:00Z", "limit": 50}
+```
+
+结果：
+
+```json
+{"accountId": "acc_xxx", "folder": "INBOX", "before": "2026-11-03T00:00:00Z",
+ "fetched": 12, "stored": 10, "oldestDate": "2026-10-01T08:00:00Z"}
+```
+
+- 回溯比 `before` **更早**、且本地还没有的邮件：IMAP 发 `UID SEARCH BEFORE <date>`，并用邮件头 `Date` 再校验一次；POP3 从最老的邮件开始按 UIDL 派生的 uid 去重。`before` 必填，ISO-8601，可写成日期或带时区的时间，核心层统一成 UTC `...Z`。
+- `limit` 缺省 50、上限 200（本次最多取多少封候选）；`fetched` 是本次真正取回并保存的旧邮件数，`stored` 是新增行数——重复调用时 `stored = 0`。
+- **幂等**：本地已有的 UID 直接跳过，同一封邮件不会第二次入库。
+- **不动前向游标**：不修改 `sync_state.last_uid`，`sync.run` / `sync.status` 的增量同步不受影响。
+- `oldestDate`：该 folder 本地当前最老的非空 `date`（没有邮件时为空串），用于展示回溯进度。
+- 账号不存在 → `NOT_FOUND`；没有可用密码 → `CREDENTIAL_MISSING`；网络失败 → `IMAP_ERROR`（POP3 同样沿用）。
 
 ### `contact.list`
 
@@ -455,6 +540,37 @@ POP3 结果：
 - 失败（未配置 `smtpHost`、没有可用密码、DPAPI 解密失败、连接 / 认证 / 发信出错）：写一条 `mail_actions(result = failed, error = 原因)`，**草稿状态不变**，返回 `SMTP_ERROR`。`error` 和响应 message **绝不包含密码**。
 - **幂等**：`idempotency_key` 在 `mail_actions` 里是 UNIQUE。首次执行记录写入后（无论 `sent` 还是 `failed`），同一个键再次 `execute` 一律返回 `ALREADY_EXECUTED`，绝不重发。发送失败后要重试，调用方需要提供**新的** `idempotencyKey`，并在界面上明确这是另一次发送尝试。
 
+### `admin.backup`
+
+参数：`{}`
+
+结果：
+
+```json
+{"path": "C:\\...\\backups\\mail-20261105-001500.db", "size": 45056,
+ "createdAt": "2026-11-05T00:15:00Z"}
+```
+
+- 用 SQLite 在线备份 API 把当前 `mail.db` 完整快照到 `<data-dir>/backups/`，文件名 `mail-YYYYMMDD-HHMMSS.db`（UTC，与 `createdAt` 一致）；同一秒内的第二次备份加 `-2` / `-3` 后缀，不覆盖已有文件。
+- 先写临时文件、成功后原子重命名；失败不会留下半成品文件。
+- 成功后按文件名时间只保留最近 10 个备份，更老的自动删除。
+- 备份是完整可打开的 SQLite 库（含当时所有表和数据），可直接用于回滚。
+- 失败返回 `INTERNAL`，message 说明原因（如磁盘只读、数据库被占用）；不包含密码或凭据内容。
+
+### `admin.backups`
+
+参数：`{}`
+
+结果：
+
+```json
+{"backups": [{"path": "C:\\...\\backups\\mail-20261105-001500.db",
+  "size": 45056, "createdAt": "2026-11-05T00:15:00Z"}]}
+```
+
+- 按 `createdAt` 倒序（新的在前）；没有备份目录或没有备份时返回空数组（不报错）。
+- 只列出 `mail-*.db`，目录里的其它文件忽略。
+
 ### `shutdown`
 
 参数：`{}` → 结果 `{"ok": true}`，随后进程自行退出。
@@ -466,6 +582,7 @@ POP3 结果：
 - 环境变量：`MAIL_CORE_DATA_DIR` 可作为 `--data-dir` 的替代；两者都缺则用 `./data/mail`
 - 子进程启动后**不主动输出**任何内容，等父进程发 `core.handshake`
 - 数据库文件：`<data-dir>/mail.db`，首次启动自动建表
+- **升级前自动备份**：启动时若 `mail.db` 已存在、非 0 字节，且 `PRAGMA user_version` 小于当前 `schemaVersion`，核心层会先把整库备份到 `<data-dir>/backups/`（命名与 `admin.backup` 相同），再执行迁移。备份失败时**拒绝启动**（退出码 1，stderr 写明原因），绝不带着未备份的库跑迁移。新建库（文件不存在或 0 字节）和已是最新 schema 的库不需要备份。
 
 ## 版本策略
 
@@ -474,3 +591,4 @@ POP3 结果：
 - 数据库 `schemaVersion` 独立于 `protocol`：v4 只**新增** `contacts`、`templates` 和 `messages_fts`（FTS5 external content 表 + 三个同步触发器），不改旧表；老库（v1~v3）启动时自动逐级迁移，v4 迁移会把已有 `messages` 全量重建进索引，不需要重新同步。
 - v5 只**新增** `drafts`、`approvals`、`mail_actions` 三张表及其索引，不改旧表；老库（v1~v4）启动时自动迁移，账号 / 邮件 / 通讯录 / 模板全部保留。`drafts.account_id` 与 `approvals.draft_id` 带 `ON DELETE CASCADE`（删账号连带草稿、删草稿连带审批），`mail_actions` 故意不设外键，发送审计记录不随草稿删除而消失。
 - v6 只给 `approvals` **新增** `decided_via`、`decided_by` 两列，默认空串，不改旧表结构、不丢旧数据；已有决定迁移后审计字段为空（v5 记录本来就没有来源信息，不回填猜测值）。迁移幂等，老库（v1~v5）启动时自动升级。
+- v7 只给 `messages` **新增** `thread_id`、`in_reply_to`、`refs` 三列（`refs` 是 `References` 头；`references` 是 SQL 关键字，故列名缩短）以及两个线程索引，不改旧表结构、不删旧邮件；迁移后对 `thread_id = ''` 的旧行按线程规则回填一次（幂等，重复迁移不再改动已回填的行）。老库（v1~v6）启动时先自动备份再逐级升级。新增字段都可空串，旧插件忽略 `threadId` 即可继续工作。

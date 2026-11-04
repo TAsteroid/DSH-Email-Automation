@@ -161,6 +161,14 @@ window.__ModuleLoader__.load({
         approvalSendHint: '发送只能由 Agent 发起并弹出 DSH 审批确认。点「复制发送指令」，把它粘到对话里即可。',
         copySendCommand: '复制发送指令',
         sendCommandCopied: '指令已复制',
+        loadOlder: '加载更早邮件',
+        backupTitle: '数据库备份',
+        backupNow: '立即备份',
+        backupDone: '备份完成',
+        backupEmpty: '还没有备份',
+        backupsRecent: '最近备份',
+        settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
+
         sentOk: '已发送',
         decidedByUser: '用户批准',
         decidedByPolicy: '策略放行',
@@ -348,6 +356,14 @@ window.__ModuleLoader__.load({
         approvalSendHint: 'Sending is agent-initiated and confirmed through the DSH approval prompt. Use "Copy send command" and paste it into the conversation.',
         copySendCommand: 'Copy send command',
         sendCommandCopied: 'Command copied',
+        backupTitle: 'Database backup',
+        loadOlder: 'Load older mail',
+        backupNow: 'Back up now',
+        backupDone: 'Backup created',
+        backupEmpty: 'No backups yet',
+        backupsRecent: 'Recent backups',
+        settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
+
         sentOk: 'Sent',
         decidedByUser: 'approved by user',
         decidedByPolicy: 'auto (policy)',
@@ -1684,7 +1700,7 @@ window.__ModuleLoader__.load({
 
     // ---- 收件箱 ------------------------------------------------------------
     /** 中间栏：本地索引的邮件列表（按时间倒序）。 */
-    function MessageList({ t, messages, selectedId, onSelect, onSync, syncing }) {
+    function MessageList({ t, messages, selectedId, onSelect, onSync, syncing, onLoadOlder, loadingOlder, notice }) {
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
@@ -1732,6 +1748,23 @@ window.__ModuleLoader__.load({
                 ),
               ),
             ),
+        onLoadOlder
+          ? h(
+              'div',
+              { style: { padding: '6px 8px', flex: 'none' } },
+              notice ? h('p', { style: { ...styles.muted, margin: '0 0 4px' } }, notice) : null,
+              h(
+                'button',
+                {
+                  type: 'button',
+                  style: { ...styles.btnSmall, width: '100%' },
+                  disabled: loadingOlder === true || messages.length === 0,
+                  onClick: onLoadOlder,
+                },
+                t('loadOlder'),
+              ),
+            )
+          : null,
       )
     }
 
@@ -1788,8 +1821,7 @@ window.__ModuleLoader__.load({
       const [syncing, setSyncing] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
 
-      const openCompose = (mode) => {
-        if (detail) setCompose(buildCompose(mode, detail, t))
+      const openCompose = (mode) => {        if (detail) setCompose(buildCompose(mode, detail, t))
       }
 
       const loadMessages = React.useCallback(async () => {
@@ -1807,6 +1839,29 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         void loadMessages()
       }, [loadMessages])
+
+      const [loadingOlder, setLoadingOlder] = React.useState(false)
+      const [note, setNote] = React.useState(null)
+
+      /** 收件箱也支持往更早方向回溯。 */
+      const loadOlder = async () => {
+        const target = accountId || (accounts[0] && accounts[0].id)
+        if (!target || loadingOlder || messages.length === 0) return
+        const oldest = messages.reduce((acc, message) => {
+          const date = message.date || ''
+          return date && (!acc || date < acc) ? date : acc
+        }, '')
+        if (!oldest) return
+        setLoadingOlder(true)
+        try {
+          await call('/history/backfill', { accountId: target, folder: 'INBOX', before: oldest, limit: 50 })
+          await loadMessages()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setLoadingOlder(false)
+        }
+      }
 
       const selectMessage = async (id) => {
         setSelectedId(id)
@@ -1945,7 +2000,17 @@ window.__ModuleLoader__.load({
         h(
           'section',
           { style: { ...styles.list, width: layout.list }, 'aria-label': t('messages') },
-          h(MessageList, { t, messages, selectedId, onSelect: selectMessage, onSync: syncNow, syncing }),
+          h(MessageList, {
+            t,
+            messages,
+            selectedId,
+            onSelect: selectMessage,
+            onSync: syncNow,
+            syncing,
+            onLoadOlder: loadOlder,
+            loadingOlder,
+            notice: note,
+          }),
         ),
         handle('list'),
         h(MessageDetail, {
@@ -2062,6 +2127,7 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
+      const [loadingOlder, setLoadingOlder] = React.useState(false)
 
       const accountAddress = account ? account.address : ''
 
@@ -2149,6 +2215,30 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** 往更早的方向继续拉，用于 30 天以外的历史邮件。 */
+      const loadOlder = async () => {
+        if (!account || !folder || loadingOlder || messages.length === 0) return
+        const oldest = messages.reduce((acc, message) => {
+          const date = message.date || ''
+          return date && (!acc || date < acc) ? date : acc
+        }, '')
+        if (!oldest) return
+        setLoadingOlder(true)
+        try {
+          await call('/history/backfill', {
+            accountId: accountId || account.id,
+            folder,
+            before: oldest,
+            limit: 50,
+          })
+          await load(folder)
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setLoadingOlder(false)
+        }
+      }
+
       const items = messages.map((message) => ({
         id: message.id,
         title: message.subject || t('noSubject'),
@@ -2160,24 +2250,42 @@ window.__ModuleLoader__.load({
         storageKey,
         spec: PANE_SPEC,
         label: t('resize'),
-        left: h(GroupList, {
-          t,
-          groups,
-          selectedId,
-          onSelect: select,
-          headerActions: h(
-            'button',
-            {
-              type: 'button',
-              style: styles.iconBtn,
-              title: t('syncNow'),
-              'aria-label': t('syncNow'),
-              disabled: busy || !folder,
-              onClick: syncNow,
-            },
-            h(RefreshIcon, {}),
+        left: h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
+          h(GroupList, {
+            t,
+            groups,
+            selectedId,
+            onSelect: select,
+            headerActions: h(
+              'button',
+              {
+                type: 'button',
+                style: styles.iconBtn,
+                title: t('syncNow'),
+                'aria-label': t('syncNow'),
+                disabled: busy || !folder,
+                onClick: syncNow,
+              },
+              h(RefreshIcon, {}),
+            ),
+          }),
+          h(
+            'div',
+            { style: { padding: '6px 8px', flex: 'none' } },
+            h(
+              'button',
+              {
+                type: 'button',
+                style: { ...styles.btnSmall, width: '100%' },
+                disabled: loadingOlder || !folder || messages.length === 0,
+                onClick: loadOlder,
+              },
+              t('loadOlder'),
+            ),
           ),
-        }),
+        ),
         right: note
           ? h('div', { style: styles.detail }, h('p', { style: styles.muted }, note))
           : h(MessageDetail, {
@@ -3281,6 +3389,77 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 备份：手动触发 + 最近备份列表。 */
+    function formatBytes(size) {
+      const bytes = Number(size)
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+      if (bytes < 1024) return `${bytes} B`
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    }
+
+    function BackupSection({ t }) {
+      const [backups, setBackups] = React.useState([])
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      const load = React.useCallback(async () => {
+        try {
+          const value = await call('/backups', {})
+          setBackups((value && value.backups) || [])
+        } catch {
+          setBackups([])
+        }
+      }, [])
+
+      React.useEffect(() => {
+        void load()
+      }, [load])
+
+      const run = async () => {
+        if (busy) return
+        setBusy(true)
+        setNote(null)
+        try {
+          const value = await call('/backup', {})
+          setNote(`${t('backupDone')} · ${formatBytes(value && value.size)}`)
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(
+        'div',
+        null,
+        h(
+          'div',
+          { style: styles.row },
+          h('span', { style: styles.rowKey }, t('backupTitle')),
+          h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: run }, t('backupNow')),
+        ),
+        h('p', { style: { ...styles.muted, margin: '0 0 6px' } }, t('settingsBackupHint')),
+        backups.length > 0
+          ? h(
+              'div',
+              null,
+              h('p', { style: { ...styles.muted, margin: '0 0 4px' } }, t('backupsRecent')),
+              backups.slice(0, 5).map((item) =>
+                h(
+                  'div',
+                  { key: item.path, style: { ...styles.muted, display: 'flex', gap: 8 } },
+                  h('span', null, String(item.path).split(/[\\/]/).pop()),
+                  h('span', null, formatBytes(item.size)),
+                ),
+              ),
+            )
+          : h('p', { style: styles.muted }, t('backupEmpty')),
+        note ? h('p', { style: { ...styles.muted, margin: '4px 0 0' } }, note) : null,
+      )
+    }
+
     function SettingsView({ t, status, onRefresh }) {
       const core = (status && status.core) || {}
       const accounts = (status && status.accounts) || []
@@ -3296,6 +3475,7 @@ window.__ModuleLoader__.load({
           h(Row, { label: t('coreDb'), value: core.dbPath || '—' }),
           h(Row, { label: t('coreDataDir'), value: core.dataDir || '—' }),
           h(SyncIntervalField, { t, status, onRefresh }),
+          h(BackupSection, { t }),
           h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),
           core.error
             ? h('p', { style: { ...styles.error, marginTop: 8 } }, `${t('coreError')}: ${core.error.code} · ${core.error.message}`)

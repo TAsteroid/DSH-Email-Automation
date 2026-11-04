@@ -78,8 +78,8 @@ class SchemaV6MigrationTests(unittest.TestCase):
         store = Store(path)
         self.addCleanup(store.close)
 
-        self.assertEqual(SCHEMA_VERSION, 6)
-        self.assertEqual(store.schema_version, 6)
+        self.assertGreaterEqual(SCHEMA_VERSION, 6)
+        self.assertEqual(store.schema_version, SCHEMA_VERSION)
 
         columns = {
             row[1] for row in store._conn.execute("PRAGMA table_info(approvals)")

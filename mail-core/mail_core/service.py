@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import crypto, drafts, imap_client, pop3_client, sender, smtp_client
+from . import backup, crypto, drafts, imap_client, pop3_client, sender, smtp_client
 from . import protocol
 from . import sync
 from .protocol import (
@@ -193,6 +193,9 @@ class Service:
             "message.list": self._message_list,
             "message.get": self._message_get,
             "message.search": self._message_search,
+            "thread.list": self._thread_list,
+            "thread.get": self._thread_get,
+            "history.backfill": self._history_backfill,
             "contact.list": self._contact_list,
             "contact.add": self._contact_add,
             "contact.update": self._contact_update,
@@ -209,6 +212,8 @@ class Service:
             "approval.approve": self._approval_approve,
             "approval.reject": self._approval_reject,
             "action.execute": self._action_execute,
+            "admin.backup": self._admin_backup,
+            "admin.backups": self._admin_backups,
             "shutdown": self._shutdown,
         }
 
@@ -381,15 +386,8 @@ class Service:
         }
         return {"counters": counters, "lastSyncAt": self.store.latest_sync_at()}
 
-    def _sync_run(self, params: dict) -> dict:
-        account_id = _require_str(params, "accountId")
-        folder = _optional_str(params, "folder", sync.DEFAULT_FOLDER) or ""
-        if not folder.strip():
-            raise bad_request("field folder must be a non-empty string")
-        limit = _optional_int(
-            params, "limit", sync.DEFAULT_LIMIT, minimum=1, maximum=sync.MAX_LIMIT
-        )
-
+    def _account_credentials(self, account_id: str) -> tuple[dict, str]:
+        """Resolve an account and its decrypted password (never logged)."""
         account = self.store.get_account(account_id)
         if account is None:
             raise MailCoreError(NOT_FOUND, "account not found")
@@ -400,12 +398,34 @@ class Service:
                 CREDENTIAL_MISSING, "no credential stored for this account"
             )
         try:
-            password = crypto.decrypt_password(blob)
+            return account, crypto.decrypt_password(blob)
         except MailCoreError:
             raise MailCoreError(
                 CREDENTIAL_MISSING, "stored credential could not be decrypted"
             ) from None
 
+    def _sync_run(self, params: dict) -> dict:
+        account_id = _require_str(params, "accountId")
+        folder = _optional_str(params, "folder", sync.DEFAULT_FOLDER) or ""
+        if not folder.strip():
+            raise bad_request("field folder must be a non-empty string")
+        limit = _optional_int(
+            params, "limit", sync.DEFAULT_LIMIT, minimum=1, maximum=sync.MAX_LIMIT
+        )
+
+        # ``mode: "backfill"`` is the same operation as ``history.backfill``;
+        # it lives here too so callers did not have to learn two entry points.
+        mode = _optional_str(params, "mode", "")
+        if mode:
+            if mode != "backfill":
+                raise bad_request("field mode must be 'backfill' when given")
+            before = sync.normalize_before(_require_str(params, "before"))
+            account, password = self._account_credentials(account_id)
+            return sync.backfill_history(
+                self.store, account, password, folder.strip(), before, limit
+            )
+
+        account, password = self._account_credentials(account_id)
         return sync.run_sync(
             self.store, account, password, folder.strip(), limit
         )
@@ -430,6 +450,26 @@ class Service:
         removed = self.store.delete_messages(account_id, folder)
         self.store.set_sync_state(account_id, folder, uidvalidity=0, last_uid=0, status="idle", error="")
         return {"accountId": account_id, "folder": folder, "removed": removed}
+
+    def _history_backfill(self, params: dict) -> dict:
+        """Fetch mail older than ``before`` that is not indexed yet.
+
+        Idempotent by UID: a second call with the same arguments stores
+        nothing.  The forward sync cursor is left untouched.
+        """
+        account_id = _require_str(params, "accountId")
+        folder = _optional_str(params, "folder", sync.DEFAULT_FOLDER) or ""
+        if not folder.strip():
+            raise bad_request("field folder must be a non-empty string")
+        before = sync.normalize_before(_require_str(params, "before"))
+        limit = _optional_int(
+            params, "limit", sync.DEFAULT_LIMIT, minimum=1, maximum=sync.MAX_LIMIT
+        )
+
+        account, password = self._account_credentials(account_id)
+        return sync.backfill_history(
+            self.store, account, password, folder.strip(), before, limit
+        )
 
     # -- messages ----------------------------------------------------------
 
@@ -482,6 +522,26 @@ class Service:
             query.strip(), limit=limit, offset=offset
         )
         return {"total": total, "messages": messages}
+
+    # -- threads -----------------------------------------------------------
+
+    def _thread_list(self, params: dict) -> dict:
+        """Thread summaries, newest activity first (local index only)."""
+        account_id = _optional_id(params, "accountId")
+        folder = _optional_id(params, "folder")
+        limit = _optional_int(params, "limit", 50, minimum=1, maximum=200)
+        return {
+            "threads": self.store.list_threads(
+                account_id=account_id, folder=folder, limit=limit
+            )
+        }
+
+    def _thread_get(self, params: dict) -> dict:
+        thread_id = _require_str(params, "threadId")
+        thread = self.store.get_thread(thread_id)
+        if thread is None:
+            raise MailCoreError(NOT_FOUND, "thread not found")
+        return thread
 
     # -- contacts ----------------------------------------------------------
 
@@ -785,6 +845,20 @@ class Service:
                 ALREADY_EXECUTED,
                 "this approval (or idempotency key) was already executed",
             ) from None
+
+    # -- admin -------------------------------------------------------------
+
+    def _admin_backup(self, _params: dict) -> dict:
+        """Snapshot mail.db into ``<dataDir>/backups/`` and cap the history."""
+        backup_dir = self.data_dir / backup.BACKUP_DIRNAME
+        result = backup.create_backup(self.db_path, backup_dir)
+        backup.prune_backups(backup_dir, keep=backup.DEFAULT_KEEP)
+        return result
+
+    def _admin_backups(self, _params: dict) -> dict:
+        return {
+            "backups": backup.list_backups(self.data_dir / backup.BACKUP_DIRNAME)
+        }
 
     # -- lifecycle ---------------------------------------------------------
 

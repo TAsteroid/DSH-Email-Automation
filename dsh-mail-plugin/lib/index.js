@@ -399,6 +399,7 @@ export function apply(ctx, config) {
         coreDir,
         dataDir,
         version: coreStatus.info?.version ?? '',
+        schemaVersion: coreStatus.info?.schemaVersion ?? 0,
         dbPath: coreStatus.info?.dbPath ?? '',
         error: coreStatus.lastError,
       },
@@ -1277,6 +1278,34 @@ export function apply(ctx, config) {
     })
 
     route('/sync/all', async () => syncAllAccounts())
+
+    // ---- 线程 / 历史回溯 ---------------------------------------------------
+    route('/threads', async (body) => {
+      const params = {}
+      if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
+      if (typeof body.folder === 'string' && body.folder.trim()) params.folder = body.folder.trim()
+      if (body.limit !== undefined) params.limit = Number(body.limit)
+      return requireCoreResult(await callCore('thread.list', params))
+    })
+
+    route('/thread', async (body) => {
+      const threadId = requireText(body.threadId, 'threadId')
+      return requireCoreResult(await callCore('thread.get', { threadId }))
+    })
+
+    route('/history/backfill', async (body) => {
+      const accountId = requireText(body.accountId, 'accountId')
+      const folder = requireText(body.folder, 'folder')
+      const params = { accountId, folder }
+      if (typeof body.before === 'string' && body.before.trim()) params.before = body.before.trim()
+      if (body.limit !== undefined) params.limit = Number(body.limit)
+      return requireCoreResult(await callCore('history.backfill', params, { timeoutMs: SYNC_TIMEOUT_MS }))
+    })
+
+    // ---- 备份 --------------------------------------------------------------
+    route('/backup', async () => requireCoreResult(await callCore('admin.backup', {}, { timeoutMs: 120_000 })))
+
+    route('/backups', async () => requireCoreResult(await callCore('admin.backups', {})))
 
     route('/sync/reset', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')

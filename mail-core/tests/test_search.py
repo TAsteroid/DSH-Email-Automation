@@ -24,6 +24,7 @@ MESSAGE_KEYS = {
     "date",
     "snippet",
     "seen",
+    "threadId",
 }
 
 ACCOUNT_ROW = """
