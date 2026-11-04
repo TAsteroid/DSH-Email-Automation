@@ -214,6 +214,50 @@ export function apply(ctx, config) {
   /** 同步是长活：逐封 FETCH，整批可能几分钟，不能套 20s 的默认超时。 */
   const SYNC_TIMEOUT_MS = 300_000
 
+  let syncing = false
+
+  /** 同步所有启用账号的 INBOX；已经在跑时直接跳过（界面按钮与心跳共用）。 */
+  async function syncAllAccounts() {
+    if (syncing) return { skipped: true, accounts: [] }
+    if (!ready) {
+      try {
+        await ensureCore()
+      } catch (error) {
+        return { skipped: true, accounts: [], reason: error?.message ?? String(error) }
+      }
+    }
+    syncing = true
+    const results = []
+    try {
+      const list = await core.request('account.list', {})
+      for (const account of list?.accounts ?? []) {
+        if (account.enabled === false) continue
+        try {
+          const value = await core.request(
+            'sync.run',
+            { accountId: account.id, folder: 'INBOX', limit: 50 },
+            { timeoutMs: SYNC_TIMEOUT_MS },
+          )
+          results.push({
+            accountId: account.id,
+            address: account.address,
+            fetched: value?.fetched ?? 0,
+            stored: value?.stored ?? 0,
+          })
+        } catch (error) {
+          results.push({ accountId: account.id, address: account.address, error: error?.message ?? String(error) })
+          log(`sync failed for ${account.address}: ${error?.message ?? error}`)
+        }
+      }
+    } catch (error) {
+      log(`sync all failed: ${error?.message ?? error}`)
+      syncing = false
+      return { skipped: false, accounts: results, error: error?.message ?? String(error) }
+    }
+    syncing = false
+    return { skipped: false, accounts: results }
+  }
+
   /** 审批记录只带 draftId，界面需要主题与收件人，这里按草稿补上。 */
   function decorateApprovals(list, draftsResult) {
     const drafts = (draftsResult && draftsResult.available && draftsResult.value?.drafts) || []
@@ -1061,6 +1105,8 @@ export function apply(ctx, config) {
       )
     })
 
+    route('/sync/all', async () => syncAllAccounts())
+
     route('/sync/reset', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')
       const folder = typeof body.folder === 'string' && body.folder.trim() ? body.folder.trim() : 'INBOX'
@@ -1073,7 +1119,6 @@ export function apply(ctx, config) {
   }, 'mail: http bridge')
 
   // 4) 心跳：刷新 Core 状态 + 自动同步兜底（IDLE 尚未实现，先按间隔拉）
-  let syncing = false
   ctx.effect(() => {
     const tick = async () => {
       if (core.state === 'failed') {
@@ -1087,27 +1132,8 @@ export function apply(ctx, config) {
           // 状态由 core 自己上报
         }
       }
-      if (!ready || syncing) return
-      syncing = true
-      try {
-        const list = await core.request('account.list', {})
-        for (const account of list?.accounts ?? []) {
-          if (account.enabled === false) continue
-          try {
-            await core.request(
-              'sync.run',
-              { accountId: account.id, folder: 'INBOX', limit: 50 },
-              { timeoutMs: SYNC_TIMEOUT_MS },
-            )
-          } catch (error) {
-            log(`sync failed for ${account.address}: ${error?.message ?? error}`)
-          }
-        }
-      } catch (error) {
-        log(`auto sync skipped: ${error?.message ?? error}`)
-      } finally {
-        syncing = false
-      }
+      if (!ready) return
+      await syncAllAccounts()
     }
     void tick()
     const interval = syncIntervalMs(config)

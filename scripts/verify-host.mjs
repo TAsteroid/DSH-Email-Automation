@@ -607,6 +607,15 @@ const syncRoute = await invoke('/api/dsh-mail/sync', {
 })
 check(syncRoute && syncRoute.status === 200, `sync 路由应 200，实际 ${syncRoute && syncRoute.status}`)
 
+const syncAllRoute = await invoke('/api/dsh-mail/sync/all', { method: 'POST', body: '{}' })
+check(syncAllRoute && syncAllRoute.status === 200, `sync/all 应 200，实际 ${syncAllRoute && syncAllRoute.status}`)
+if (syncAllRoute && syncAllRoute.body) {
+  const parsed = JSON.parse(syncAllRoute.body)
+  check(parsed.value.skipped === false, 'sync/all 应真正执行')
+  check(parsed.value.accounts.length === 1, 'sync/all 应对每个启用账号返回结果')
+  check(parsed.value.accounts[0].stored === 2, 'sync/all 应透传 stored 计数')
+}
+
 const syncBadLimit = await invoke('/api/dsh-mail/sync', {
   method: 'POST',
   body: JSON.stringify({ accountId: 'acc_1', limit: 999 }),

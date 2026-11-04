@@ -262,7 +262,7 @@ window.__ModuleLoader__.load({
         loading: '加载中…',
         failed: '加载失败',
         retry: '重试',
-        refreshStatus: '刷新状态（不会同步邮件）',
+        refreshStatus: '同步所有账户并刷新',
         phase0: 'Phase 0 骨架：入口与数据通道已打通，邮件同步尚未实现。',
         settingsBackend: 'Mail Core 地址',
         settingsPoll: '自动同步间隔',
@@ -444,7 +444,7 @@ window.__ModuleLoader__.load({
         loading: 'Loading…',
         failed: 'Failed to load',
         retry: 'Retry',
-        refreshStatus: 'Refresh status (does not sync mail)',
+        refreshStatus: 'Sync all accounts and refresh',
         phase0: 'Phase 0 skeleton: entry point and data channel work; mail sync is not implemented yet.',
         settingsBackend: 'Mail Core URL',
         settingsPoll: 'Auto sync interval',
@@ -3295,7 +3295,7 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 顶栏 --------------------------------------------------------------
-    function TopBar({ t, status, onRefresh, query, onQueryChange, onCompose }) {
+    function TopBar({ t, status, onSync, syncing, query, onQueryChange, onCompose }) {
       const core = (status && status.core) || null
       const ok = Boolean(core && core.state === 'ready')
       const pending = (status && status.counters && status.counters.pendingAi) || 0
@@ -3345,7 +3345,7 @@ window.__ModuleLoader__.load({
         h('span', { style: styles.pill(ok), title }, h('span', { style: styles.dot(ok) }), label),
         h(
           'button',
-          { type: 'button', style: styles.iconBtn, onClick: onRefresh, title: t('refreshStatus'), 'aria-label': t('refreshStatus') },
+          { type: 'button', style: styles.iconBtn, onClick: onSync, disabled: syncing, title: t('refreshStatus'), 'aria-label': t('refreshStatus') },
           h(RefreshIcon, {}),
         ),
       )
@@ -3381,6 +3381,20 @@ window.__ModuleLoader__.load({
 
       const refresh = () => load(new AbortController().signal)
 
+      const [syncingAll, setSyncingAll] = React.useState(false)
+      const syncAll = async () => {
+        if (syncingAll) return
+        setSyncingAll(true)
+        try {
+          await call('/sync/all', {})
+        } catch {
+          // 同步失败也要刷新状态，让顶栏反映 Core 状态
+        } finally {
+          setSyncingAll(false)
+          refresh()
+        }
+      }
+
       const activeAccountId =
         accountId || (status && status.accounts && status.accounts.length > 0 ? status.accounts[0].id : undefined)
 
@@ -3412,7 +3426,8 @@ window.__ModuleLoader__.load({
         h(TopBar, {
           t,
           status,
-          onRefresh: refresh,
+          onSync: syncAll,
+          syncing: syncingAll,
           query,
           onQueryChange: setQuery,
           onCompose: () => setNewCompose({ mode: 'send', to: '', cc: '', subject: '', body: '' }),
