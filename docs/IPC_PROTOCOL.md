@@ -257,6 +257,30 @@ POP3 结果：
 - 分词器是 FTS5 默认的 `unicode61`：**连续汉字算一个词**，所以 `季度报告` 能命中「季度报告」，但 `合同` 命中不了「合同确认书」（两个不同的词）。调用方要按用户输入原样传，别自己加通配符。
 - 索引由触发器维护，`sync.run` / `sync.reset` 增删的邮件自动进/出索引；v3 老库升级到 v4 时会重建一次索引，不需要重新同步。
 
+### `message.delete`
+
+参数：
+
+```json
+{"id": "msg_xxx", "permanent": false}
+```
+
+结果：
+
+```json
+{"deleted": true, "trashed": true, "localOnly": false}
+```
+
+- `permanent` 必须由调用方**显式**给出、核心层不根据文件夹名猜测：`false`（缺省）表示移动到「已删除」，`true` 表示彻底删除；非布尔值 → `BAD_REQUEST`。
+- IMAP 移动到「已删除」：从本地缓存的 `folder.list`（`account.test` 落库）里按 `/deleted|trash|已删除|废纸/i` 找 Trash 文件夹，依次执行 `UID COPY <uid> <Trash>` → `UID STORE <uid> +FLAGS (\Deleted)` → `EXPUNGE`，返回 `trashed: true`。按规格用的是 `EXPUNGE` 而不是 `UID EXPUNGE`：它会把该文件夹里**所有**已标记 `\Deleted` 的邮件一起清掉（通常只有本次这一封）；服务器支持 UIDPLUS 时以后可以收紧成 `UID EXPUNGE`。
+- 找不到 Trash 文件夹（或文件夹缓存为空——从没成功跑过 `account.test`）→ **退化为彻底删除**，返回 `trashed: false`。
+- IMAP 彻底删除（`permanent: true`）→ `UID STORE +FLAGS (\Deleted)` + `EXPUNGE`，不 `COPY`；若邮件本来就在 Trash 里，再按「移动」删也走这条路径（避免 COPY 到自身产生副本），返回 `trashed: false`。
+- 服务器操作成功后删除本地 `messages` 行（移动到 Trash 的情况也删；下一次同步 Trash 会重新入库）。此后 `message.get` 对该 id 返回 `NOT_FOUND`。
+- 服务器操作失败（连接 / SELECT / COPY / STORE / EXPUNGE / 权限）→ `IMAP_ERROR`，**本地行保留**可重试；message 带服务器原文，绝不包含密码。
+- POP3 服务端没有单封删除语义：**只删本地副本、不连服务器**，返回 `{"deleted": true, "trashed": false, "localOnly": true}`，界面应提示「仅从本机删除，服务器上仍保留」。`permanent` 对 POP3 无意义。
+- 同一 `id` 重复删除（本地行已不存在）→ `NOT_FOUND`。
+- 字段含义：`trashed` = 这次操作把邮件放进了「已删除」文件夹；`localOnly` = 只动了本地副本（服务器上还在）。两者不会同时为 `true`。
+
 ### `thread.list`
 
 参数（全部可省略）：

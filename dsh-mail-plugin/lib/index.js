@@ -1263,6 +1263,12 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('message.get', { id }))
     })
 
+    route('/messages/delete', async (body) => {
+      const id = requireText(body.id, 'id')
+      const params = { id, permanent: body.permanent === true }
+      return requireCoreResult(await callCore('message.delete', params, { timeoutMs: 60_000 }))
+    })
+
     route('/sync', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')
       const folder = typeof body.folder === 'string' && body.folder.trim() ? body.folder.trim() : 'INBOX'

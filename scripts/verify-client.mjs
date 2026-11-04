@@ -413,6 +413,21 @@ function runRealReactPass() {
     const noSelectionMarkup = renderToStaticMarkup(h(views.MessageDetail, { t, message: null }))
     check(noSelectionMarkup.includes('t:mail.selectMessage'), '[真实渲染] 未选中时应显示占位')
 
+    // 删除确认弹窗
+    const confirmMarkup = renderToStaticMarkup(
+      h(views.ConfirmDialog, {
+        t,
+        title: 't:mail.confirmDeleteTitle',
+        body: 't:mail.confirmDeleteToTrash',
+        confirmLabel: 't:mail.deleteConfirm',
+        onConfirm: () => {},
+        onCancel: () => {},
+      }),
+    )
+    check(confirmMarkup.includes('t:mail.deleteConfirm'), '[真实渲染] 确认弹窗应有确认按钮')
+    check(confirmMarkup.includes('t:mail.cancel'), '[真实渲染] 确认弹窗应有取消按钮')
+    check(confirmMarkup.includes('role="dialog"'), '[真实渲染] 确认弹窗应有 dialog 角色')
+
     // 回复 / 回复全部 / 转发 / 发送 的预填规则
     const baseMessage = {
       id: 'm1',

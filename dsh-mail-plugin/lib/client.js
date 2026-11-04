@@ -169,6 +169,15 @@ window.__ModuleLoader__.load({
         backupsRecent: '最近备份',
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
+        deleteMail: '删除',
+        confirmDeleteTitle: '删除这封邮件？',
+        confirmDeleteToTrash: '邮件会移到「已删除」。',
+        confirmDeletePermanent: '邮件将被永久删除，无法恢复。',
+        deleteConfirm: '确认删除',
+        cancel: '取消',
+        deletedOk: '已删除',
+        deleteLocalOnly: 'POP3 账户：只删除了本地副本，服务器上的邮件仍在。',
+
         sentOk: '已发送',
         decidedByUser: '用户批准',
         decidedByPolicy: '策略放行',
@@ -363,6 +372,15 @@ window.__ModuleLoader__.load({
         backupEmpty: 'No backups yet',
         backupsRecent: 'Recent backups',
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
+
+        deleteMail: 'Delete',
+        confirmDeleteTitle: 'Delete this message?',
+        confirmDeleteToTrash: 'The message will move to Deleted.',
+        confirmDeletePermanent: 'The message will be deleted permanently.',
+        deleteConfirm: 'Delete',
+        cancel: 'Cancel',
+        deletedOk: 'Deleted',
+        deleteLocalOnly: 'POP3 account: only the local copy was removed; the server copy remains.',
 
         sentOk: 'Sent',
         decidedByUser: 'approved by user',
@@ -1768,6 +1786,27 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 通用二次确认弹窗（删除等破坏性操作）。 */
+    function ConfirmDialog({ t, title, body, confirmLabel, onConfirm, onCancel, busy }) {
+      return h(
+        'div',
+        { style: styles.modalBackdrop, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        h(
+          'div',
+          { style: styles.modal },
+          h('div', { style: styles.modalHead }, h('h2', { style: styles.msgSubject }, title)),
+          h('p', { style: styles.muted }, body),
+          h(
+            'div',
+            { style: styles.formActions },
+            h('span', { style: styles.spacer }),
+            h('button', { type: 'button', style: styles.btnSmall, onClick: onCancel, disabled: busy }, t('cancel')),
+            h('button', { type: 'button', style: styles.dangerBtn, onClick: onConfirm, disabled: busy }, confirmLabel),
+          ),
+        ),
+      )
+    }
+
     /** 右栏：选中邮件的正文。 */
     function MessageDetail({ t, message, accountAddress, actions, agentChat }) {
       if (!message) {
@@ -1842,6 +1881,25 @@ window.__ModuleLoader__.load({
 
       const [loadingOlder, setLoadingOlder] = React.useState(false)
       const [note, setNote] = React.useState(null)
+      const [pendingDelete, setPendingDelete] = React.useState(null)
+      const [deleting, setDeleting] = React.useState(false)
+
+      const doDelete = async () => {
+        if (!pendingDelete || deleting) return
+        setDeleting(true)
+        try {
+          const value = await call('/messages/delete', { id: pendingDelete.id, permanent: false })
+          setPendingDelete(null)
+          setSelectedId(null)
+          setDetail(null)
+          await loadMessages()
+          if (value && value.localOnly) setNote(t('deleteLocalOnly'))
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setDeleting(false)
+        }
+      }
 
       /** 收件箱也支持往更早方向回溯。 */
       const loadOlder = async () => {
@@ -2023,6 +2081,7 @@ window.__ModuleLoader__.load({
                 { key: 'reply', label: t('reply'), onClick: () => openCompose('reply') },
                 { key: 'replyAll', label: t('replyAll'), onClick: () => openCompose('replyAll') },
                 { key: 'forward', label: t('forward'), onClick: () => openCompose('forward') },
+                { key: 'delete', label: t('deleteMail'), onClick: () => setPendingDelete(detail) },
               ]
             : [],
           agentChat: true,
@@ -2037,6 +2096,17 @@ window.__ModuleLoader__.load({
                 if (onRefresh) onRefresh()
               },
               onClose: () => setCompose(null),
+            })
+          : null,
+        pendingDelete
+          ? h(ConfirmDialog, {
+              t,
+              title: t('confirmDeleteTitle'),
+              body: `${pendingDelete.subject || t('noSubject')} · ${t('confirmDeleteToTrash')}`,
+              confirmLabel: t('deleteConfirm'),
+              busy: deleting,
+              onCancel: () => setPendingDelete(null),
+              onConfirm: doDelete,
             })
           : null,
       )
@@ -2128,22 +2198,46 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
       const [loadingOlder, setLoadingOlder] = React.useState(false)
+      const [pendingDelete, setPendingDelete] = React.useState(null)
+      const [deleting, setDeleting] = React.useState(false)
 
       const accountAddress = account ? account.address : ''
 
+      /** 已删除文件夹里是永久删除，其它文件夹移到「已删除」。 */
+      const deletePermanent = storageKey === 'deleted'
+
+      const doDelete = async () => {
+        if (!pendingDelete || deleting) return
+        setDeleting(true)
+        try {
+          const value = await call('/messages/delete', { id: pendingDelete.id, permanent: deletePermanent })
+          setPendingDelete(null)
+          setSelectedId(null)
+          setDetail(null)
+          await load(folder)
+          if (value && value.localOnly) setNote(t('deleteLocalOnly'))
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setDeleting(false)
+        }
+      }
+
       const folderActions = (message) => {
         if (!message) return []
+        const remove = { key: 'delete', label: t('deleteMail'), onClick: () => setPendingDelete(message) }
         if (composeMode === 'send') {
-          return [{ key: 'send', label: t('send'), onClick: () => setCompose(buildCompose('send', message, t)) }]
+          return [{ key: 'send', label: t('send'), onClick: () => setCompose(buildCompose('send', message, t)) }, remove]
         }
         if (composeMode === 'reply') {
           return [
             { key: 'reply', label: t('reply'), onClick: () => setCompose(buildCompose('reply', message, t)) },
             { key: 'replyAll', label: t('replyAll'), onClick: () => setCompose(buildCompose('replyAll', message, t)) },
             { key: 'forward', label: t('forward'), onClick: () => setCompose(buildCompose('forward', message, t)) },
+            remove,
           ]
         }
-        return []
+        return [remove]
       }
 
       const load = React.useCallback(
@@ -2321,6 +2415,19 @@ window.__ModuleLoader__.load({
                 if (onRefresh) onRefresh()
               },
               onClose: () => setCompose(null),
+            })
+          : null,
+        pendingDelete
+          ? h(ConfirmDialog, {
+              t,
+              title: t('confirmDeleteTitle'),
+              body: `${pendingDelete.subject || t('noSubject')} · ${
+                deletePermanent ? t('confirmDeletePermanent') : t('confirmDeleteToTrash')
+              }`,
+              confirmLabel: t('deleteConfirm'),
+              busy: deleting,
+              onCancel: () => setPendingDelete(null),
+              onConfirm: doDelete,
             })
           : null,
       )
@@ -3722,6 +3829,7 @@ window.__ModuleLoader__.load({
       // 仅用于本地渲染测试（scripts/verify-client.mjs）；宿主只读 inject / apply。
       __test: {
         MailPanel,
+        ConfirmDialog,
         InboxView,
         AccountRail,
         SentView,

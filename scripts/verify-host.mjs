@@ -182,6 +182,7 @@ function handleMethod(method, params) {
   if (method === 'admin.backups') {
     return { backups: [{ path: 'C:\\data\\backups\\mail-20261104-120000.db', size: 4096, createdAt: '2026-11-04T12:00:00Z' }] }
   }
+  if (method === 'message.delete') return { deleted: true, trashed: params.permanent !== true, localOnly: false }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -695,6 +696,29 @@ check(backupsRoute && backupsRoute.status === 200, `backups 应 200，实际 ${b
 if (backupsRoute && backupsRoute.body) {
   const parsed = JSON.parse(backupsRoute.body)
   check(parsed.value.backups.length === 1, 'backups 应返回列表')
+}
+
+// ---- 删除邮件 -------------------------------------------------------------
+const deleteNoId = await invoke('/api/dsh-mail/messages/delete', { method: 'POST', body: '{}' })
+check(deleteNoId && deleteNoId.status === 400, `删信缺 id 应 400，实际 ${deleteNoId && deleteNoId.status}`)
+
+const deleteToTrash = await invoke('/api/dsh-mail/messages/delete', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'msg_1' }),
+})
+check(deleteToTrash && deleteToTrash.status === 200, `删信应 200，实际 ${deleteToTrash && deleteToTrash.status}`)
+if (deleteToTrash && deleteToTrash.body) {
+  const parsed = JSON.parse(deleteToTrash.body)
+  check(parsed.value.deleted === true && parsed.value.trashed === true, '默认应移到已删除')
+}
+
+const deletePermanent = await invoke('/api/dsh-mail/messages/delete', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'msg_1', permanent: true }),
+})
+if (deletePermanent && deletePermanent.body) {
+  const parsed = JSON.parse(deletePermanent.body)
+  check(parsed.value.trashed === false, 'permanent=true 应为永久删除')
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

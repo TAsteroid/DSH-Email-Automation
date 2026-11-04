@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import backup, crypto, drafts, imap_client, pop3_client, sender, smtp_client
+from . import backup, crypto, delete, drafts, imap_client, pop3_client, sender, smtp_client
 from . import protocol
 from . import sync
 from .protocol import (
@@ -193,6 +193,7 @@ class Service:
             "message.list": self._message_list,
             "message.get": self._message_get,
             "message.search": self._message_search,
+            "message.delete": self._message_delete,
             "thread.list": self._thread_list,
             "thread.get": self._thread_get,
             "history.backfill": self._history_backfill,
@@ -522,6 +523,34 @@ class Service:
             query.strip(), limit=limit, offset=offset
         )
         return {"total": total, "messages": messages}
+
+    def _message_delete(self, params: dict) -> dict:
+        """Delete one synced message (see ``message.delete``).
+
+        ``permanent`` is an explicit parameter, never inferred from the
+        folder: ``false`` (default) moves the message to the account's Trash
+        folder (or permanently deletes it when there is none), ``true``
+        expunges it outright.  POP3 cannot delete a single server-side
+        message, so those accounts only lose the local row and the result
+        carries ``localOnly: true`` for the UI to explain.
+        """
+        message_id = _require_str(params, "id")
+        permanent = _optional_bool(params, "permanent", False)
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise MailCoreError(NOT_FOUND, "message not found")
+
+        account = self.store.get_account(message["accountId"])
+        if account is None:  # unreachable: messages cascade with the account
+            raise MailCoreError(NOT_FOUND, "account not found")
+        if (account.get("protocol") or "imap") == "pop3":
+            delete.delete_local(self.store, message)
+            return {"deleted": True, "trashed": False, "localOnly": True}
+
+        account, password = self._account_credentials(message["accountId"])
+        return delete.delete_imap(
+            self.store, account, password, message, permanent=permanent
+        )
 
     # -- threads -----------------------------------------------------------
 

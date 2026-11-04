@@ -940,6 +940,19 @@ class Store:
             )
         return cursor.rowcount
 
+    def delete_message(self, message_id: str) -> bool:
+        """Delete one cached message row; ``False`` when it was already gone.
+
+        The FTS triggers keep the search index in step; the caller only gets
+        here after the server operation succeeded, so a failed delete leaves
+        the row (and its body) in place.
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM messages WHERE id = ?", (message_id,)
+            )
+        return cursor.rowcount > 0
+
     def count_messages(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
         return int(row["n"])

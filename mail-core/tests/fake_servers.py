@@ -455,6 +455,10 @@ class FakeImapServer(_LoopbackServer):
         )
         self.logins: list[tuple[str, str]] = []
         self.selected: list[tuple[str, bool]] = []
+        # Deletion bookkeeping for ``message.delete`` tests.
+        self.copies: list[tuple[int, str]] = []
+        self.stores: list[tuple[int, str]] = []
+        self.expunges: int = 0
 
     # -- protocol helpers --------------------------------------------------
 
@@ -527,6 +531,10 @@ class FakeImapServer(_LoopbackServer):
                     self._ok(connection, tag, "LIST completed")
                 elif command == "UID":
                     self._handle_uid(connection, tag, arguments)
+                elif command == "EXPUNGE":
+                    self.expunges += 1
+                    self._send(connection, b"* 1 EXPUNGE\r\n")
+                    self._ok(connection, tag, "EXPUNGE completed")
                 elif command == "LOGOUT":
                     self._send(connection, b"* BYE fake IMAP server logging out\r\n")
                     self._ok(connection, tag, "LOGOUT completed")
@@ -565,6 +573,20 @@ class FakeImapServer(_LoopbackServer):
                 self._send(connection, raw)
                 self._send(connection, b")\r\n")
             self._ok(connection, tag, "UID FETCH completed")
+        elif subcommand in ("COPY", "STORE"):
+            uid_token, _, rest = sub_arguments.partition(" ")
+            try:
+                uid = int(uid_token)
+            except ValueError:
+                self._send(connection, f"{tag} BAD invalid UID\r\n")
+                return
+            if subcommand == "COPY":
+                tokens = _imap_tokens(rest.strip())
+                self.copies.append((uid, tokens[0] if tokens else ""))
+                self._ok(connection, tag, "UID COPY completed")
+            else:
+                self.stores.append((uid, rest.strip()))
+                self._ok(connection, tag, "UID STORE completed")
         else:
             self._send(connection, f"{tag} BAD unsupported UID command\r\n")
 
