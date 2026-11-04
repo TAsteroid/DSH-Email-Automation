@@ -422,13 +422,20 @@ def _imap_tokens(text: str) -> list[str]:
 
 
 class FakeImapServer(_LoopbackServer):
-    """Speaks enough IMAP4rev1 for the sync path.
+    """Speaks enough IMAP4rev1 for the sync and delete paths.
 
     Supported: ``CAPABILITY``, ``LOGIN``, ``LIST``, ``SELECT``/``EXAMINE``,
-    ``UID SEARCH``, ``UID FETCH`` (literal body) and ``LOGOUT``.  ``messages``
-    is one raw RFC 822 byte string per message; mailbox UID ``n`` is
-    ``messages[n - 1]``.  ``uidvalidity`` can be changed between syncs to
-    exercise the reset path.
+    ``UID SEARCH`` (``ALL``, ``UID n``, ``UID n:m``, ``UID n:*``),
+    ``UID FETCH`` (literal body), ``UID COPY``, ``UID STORE``, ``EXPUNGE``
+    and ``LOGOUT``.  ``messages`` is one raw RFC 822 byte string per message;
+    mailbox UID ``n`` is ``messages[n - 1]``.  ``uidvalidity`` can be changed
+    between syncs to exercise the reset path.
+
+    Copies and expunges are modelled per selected mailbox so a test can check
+    that a delete really landed: ``COPY`` adds a new UID to the target
+    mailbox, ``EXPUNGE`` removes the flagged UIDs from the selected mailbox.
+    ``copy_noop`` / ``expunge_noop`` inject the two "server says OK but did
+    nothing" failures the delete path must detect.
     """
 
     def __init__(
@@ -437,6 +444,8 @@ class FakeImapServer(_LoopbackServer):
         *,
         uidvalidity: int = 12345,
         folder_lines: list[bytes] | None = None,
+        copy_noop: bool = False,
+        expunge_noop: bool = False,
     ) -> None:
         super().__init__()
         self.messages = (
@@ -459,6 +468,17 @@ class FakeImapServer(_LoopbackServer):
         self.copies: list[tuple[int, str]] = []
         self.stores: list[tuple[int, str]] = []
         self.expunges: int = 0
+        # Fault injection: reply OK but leave the mailbox unchanged.
+        self.copy_noop = bool(copy_noop)
+        self.expunge_noop = bool(expunge_noop)
+        # Per-mailbox UID state.  The base messages are visible in every
+        # mailbox (the fake has no per-folder content); copies only add a UID
+        # to their target mailbox.
+        self.extra_uids: dict[str, list[int]] = {}
+        self.deleted_uids: dict[str, set[int]] = {}
+        self._pending_deleted: dict[str, set[int]] = {}
+        self._mailbox = ""
+        self._next_uid = len(self.messages) + 1
 
     # -- protocol helpers --------------------------------------------------
 
@@ -469,6 +489,12 @@ class FakeImapServer(_LoopbackServer):
 
     def _ok(self, connection: socket.socket, tag: str, text: str) -> None:
         self._send(connection, f"{tag} OK {text}\r\n")
+
+    def _current_uids(self) -> list[int]:
+        uids = set(range(1, len(self.messages) + 1))
+        uids.update(self.extra_uids.get(self._mailbox, ()))
+        uids.difference_update(self.deleted_uids.get(self._mailbox, ()))
+        return sorted(uids)
 
     def handle(self, connection: socket.socket) -> None:
         self._send(connection, b"* OK fake IMAP server ready\r\n")
@@ -502,13 +528,16 @@ class FakeImapServer(_LoopbackServer):
                 elif command in ("SELECT", "EXAMINE"):
                     mailbox = _imap_tokens(arguments)
                     name = mailbox[0] if mailbox else ""
+                    self._mailbox = name
                     readonly = command == "EXAMINE"
                     self.selected.append((name, readonly))
                     self._send(
                         connection,
                         b"* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n",
                     )
-                    self._send(connection, f"* {len(self.messages)} EXISTS\r\n")
+                    self._send(
+                        connection, f"* {len(self._current_uids())} EXISTS\r\n"
+                    )
                     self._send(connection, b"* 0 RECENT\r\n")
                     self._send(
                         connection,
@@ -533,7 +562,17 @@ class FakeImapServer(_LoopbackServer):
                     self._handle_uid(connection, tag, arguments)
                 elif command == "EXPUNGE":
                     self.expunges += 1
-                    self._send(connection, b"* 1 EXPUNGE\r\n")
+                    removed = 0
+                    if not self.expunge_noop:
+                        pending = self._pending_deleted.get(self._mailbox, set())
+                        if pending:
+                            self.deleted_uids.setdefault(self._mailbox, set()).update(
+                                pending
+                            )
+                            removed = len(pending)
+                            pending.clear()
+                    if removed:
+                        self._send(connection, f"* {removed} EXPUNGE\r\n")
                     self._ok(connection, tag, "EXPUNGE completed")
                 elif command == "LOGOUT":
                     self._send(connection, b"* BYE fake IMAP server logging out\r\n")
@@ -582,18 +621,32 @@ class FakeImapServer(_LoopbackServer):
                 return
             if subcommand == "COPY":
                 tokens = _imap_tokens(rest.strip())
-                self.copies.append((uid, tokens[0] if tokens else ""))
+                target = tokens[0] if tokens else ""
+                self.copies.append((uid, target))
+                if not self.copy_noop and target:
+                    self.extra_uids.setdefault(target, []).append(self._next_uid)
+                    self._next_uid += 1
                 self._ok(connection, tag, "UID COPY completed")
             else:
                 self.stores.append((uid, rest.strip()))
+                if "\\DELETED" in rest.upper():
+                    self._pending_deleted.setdefault(self._mailbox, set()).add(uid)
                 self._ok(connection, tag, "UID STORE completed")
         else:
             self._send(connection, f"{tag} BAD unsupported UID command\r\n")
 
     def _search_uids(self, arguments: str) -> list[int]:
-        all_uids = list(range(1, len(self.messages) + 1))
-        match = re.search(r"UID\s+(\d+):(\d+|\*)", arguments, re.IGNORECASE)
+        all_uids = self._current_uids()
+        text = arguments.strip()
+        if not text or text.upper() == "ALL":
+            return all_uids
+        single = re.fullmatch(r"UID\s+(\d+)", text, re.IGNORECASE)
+        if single is not None:
+            uid = int(single.group(1))
+            return [uid] if uid in all_uids else []
+        match = re.search(r"UID\s+(\d+):(\d+|\*)", text, re.IGNORECASE)
         if match is None:
+            # Criteria the fake does not model (e.g. BEFORE): no filtering.
             return all_uids
         start = int(match.group(1))
         end_token = match.group(2)

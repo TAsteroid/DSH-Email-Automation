@@ -183,6 +183,7 @@ function handleMethod(method, params) {
     return { backups: [{ path: 'C:\\data\\backups\\mail-20261104-120000.db', size: 4096, createdAt: '2026-11-04T12:00:00Z' }] }
   }
   if (method === 'message.delete') return { deleted: true, trashed: params.permanent !== true, localOnly: false }
+  if (method === 'message.restore') return { restored: true, folder: params.folder ?? 'INBOX' }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -757,6 +758,20 @@ if (relatedTool) {
     related.items.every((item) => item.reason),
     'mail_related 每条都要说明命中原因',
   )
+}
+
+// ---- 从已删除恢复 ---------------------------------------------------------
+const restoreNoId = await invoke('/api/dsh-mail/messages/restore', { method: 'POST', body: '{}' })
+check(restoreNoId && restoreNoId.status === 400, `恢复缺 id 应 400，实际 ${restoreNoId && restoreNoId.status}`)
+
+const restoreRoute = await invoke('/api/dsh-mail/messages/restore', {
+  method: 'POST',
+  body: JSON.stringify({ id: 'msg_1' }),
+})
+check(restoreRoute && restoreRoute.status === 200, `恢复应 200，实际 ${restoreRoute && restoreRoute.status}`)
+if (restoreRoute && restoreRoute.body) {
+  const parsed = JSON.parse(restoreRoute.body)
+  check(parsed.value.restored === true && parsed.value.folder === 'INBOX', '恢复默认回 INBOX')
 }
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })

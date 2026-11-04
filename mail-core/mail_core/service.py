@@ -194,6 +194,7 @@ class Service:
             "message.get": self._message_get,
             "message.search": self._message_search,
             "message.delete": self._message_delete,
+            "message.restore": self._message_restore,
             "thread.list": self._thread_list,
             "thread.get": self._thread_get,
             "history.backfill": self._history_backfill,
@@ -551,6 +552,47 @@ class Service:
         return delete.delete_imap(
             self.store, account, password, message, permanent=permanent
         )
+
+    def _message_restore(self, params: dict) -> dict:
+        """Copy a Trash message back to a real folder (see ``message.restore``).
+
+        Only local preconditions are checked here (IMAP account, source is a
+        Trash folder, explicit target exists in the cached ``folder.list``);
+        the send-side verification lives in :func:`delete.restore_imap` and
+        keeps the local row whenever the server copy did not actually happen.
+        """
+        message_id = _require_str(params, "id")
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise MailCoreError(NOT_FOUND, "message not found")
+
+        account_id = message["accountId"]
+        account = self.store.get_account(account_id)
+        if account is None:  # unreachable: messages cascade with the account
+            raise MailCoreError(NOT_FOUND, "account not found")
+        if (account.get("protocol") or "imap") == "pop3":
+            raise bad_request("message.restore only supports IMAP accounts")
+
+        source = str(message.get("folder") or "")
+        if not delete.is_trash_folder(source):
+            raise bad_request(
+                f"message is not in a trash folder (folder: {source!r})"
+            )
+
+        target = "INBOX"
+        raw_folder = params.get("folder")
+        if raw_folder is not None:
+            if not isinstance(raw_folder, str) or not raw_folder.strip():
+                raise bad_request(
+                    "field folder must be a non-empty string when given"
+                )
+            target = raw_folder.strip()
+            folders = {folder["name"] for folder in self.store.list_folders(account_id)}
+            if target not in folders:
+                raise bad_request(f"folder not found: {target}")
+
+        account, password = self._account_credentials(account_id)
+        return delete.restore_imap(self.store, account, password, message, target)
 
     # -- threads -----------------------------------------------------------
 

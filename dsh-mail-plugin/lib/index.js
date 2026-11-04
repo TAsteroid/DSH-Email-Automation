@@ -260,6 +260,47 @@ export function apply(ctx, config) {
     return targets
   }
 
+  /** 删除后把「已删除」补同步一次，让界面当场一致。 */
+  async function syncTrashFolders() {
+    try {
+      const list = await core.request('account.list', {})
+      for (const account of list?.accounts ?? []) {
+        if (account.enabled === false) continue
+        const folders = await core.request('folder.list', { accountId: account.id })
+        const trash = (folders?.folders ?? []).find((folder) => /deleted|trash|已删除|废纸/i.test(folder.name || ''))
+        if (!trash) continue
+        await core.request(
+          'sync.run',
+          { accountId: account.id, folder: trash.name, limit: 50 },
+          { timeoutMs: SYNC_TIMEOUT_MS },
+        )
+      }
+    } catch (error) {
+      log(`trash sync skipped: ${error?.message ?? error}`)
+    }
+  }
+
+  /** 同步指定名字的文件夹（所有账号），用于删除/恢复之后让界面即时更新。 */
+  async function syncFolderByName(folderName) {
+    if (!folderName) return
+    try {
+      const list = await core.request('account.list', {})
+      for (const account of list?.accounts ?? []) {
+        if (account.enabled === false) continue
+        const folders = await core.request('folder.list', { accountId: account.id })
+        const match = (folders?.folders ?? []).find((folder) => (folder.name || '') === folderName)
+        if (!match) continue
+        await core.request(
+          'sync.run',
+          { accountId: account.id, folder: match.name, limit: 50 },
+          { timeoutMs: SYNC_TIMEOUT_MS },
+        )
+      }
+    } catch (error) {
+      log(`folder sync skipped (${folderName}): ${error?.message ?? error}`)
+    }
+  }
+
   /** 发送成功后把「已发送」补同步一次，否则界面上看不到刚发出的信。 */
   async function syncSentFolders() {
     try {
@@ -1558,10 +1599,24 @@ export function apply(ctx, config) {
     route('/messages/delete', async (body) => {
       const id = requireText(body.id, 'id')
       const params = { id, permanent: body.permanent === true }
-      return requireCoreResult(await callCore('message.delete', params, { timeoutMs: 60_000 }))
+      const value = requireCoreResult(await callCore('message.delete', params, { timeoutMs: 60_000 }))
+      // 移到已删除后立刻补同步一次，否则「已删除」页签要等下次心跳才看到
+      if (value && value.trashed) await syncTrashFolders()
+      return value
     })
 
-    // ---- 界面上下文（谁也不用批准，纯读取用户当前操作位置）------------------
+    // ---- 恢复已删除邮件 -----------------------------------------------------
+    route('/messages/restore', async (body) => {
+      const id = requireText(body.id, 'id')
+      const params = { id }
+      if (typeof body.folder === 'string' && body.folder.trim()) params.folder = body.folder.trim()
+      const value = requireCoreResult(await callCore('message.restore', params, { timeoutMs: 60_000 }))
+      // 恢复后立刻同步目标文件夹，界面当场能看到
+      if (value && value.folder) await syncFolderByName(value.folder)
+      return value
+    })
+
+    // ---- 界面上下文（读取用户当前操作位置，不需审批）------------------------
     route('/ui/state', async (body) => {
       uiState = {
         messageId: typeof body.messageId === 'string' ? body.messageId.trim() : '',

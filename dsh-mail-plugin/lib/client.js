@@ -170,6 +170,8 @@ window.__ModuleLoader__.load({
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
         deleteMail: '删除',
+        restoreMail: '恢复',
+        restoredOk: '已恢复到',
         confirmDeleteTitle: '删除这封邮件？',
         confirmDeleteToTrash: '邮件会移到「已删除」。',
         confirmDeletePermanent: '邮件将被永久删除，无法恢复。',
@@ -374,6 +376,8 @@ window.__ModuleLoader__.load({
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
 
         deleteMail: 'Delete',
+        restoreMail: 'Restore',
+        restoredOk: 'Restored to',
         confirmDeleteTitle: 'Delete this message?',
         confirmDeleteToTrash: 'The message will move to Deleted.',
         confirmDeletePermanent: 'The message will be deleted permanently.',
@@ -2211,8 +2215,27 @@ window.__ModuleLoader__.load({
       const [loadingOlder, setLoadingOlder] = React.useState(false)
       const [pendingDelete, setPendingDelete] = React.useState(null)
       const [deleting, setDeleting] = React.useState(false)
+      const [restoring, setRestoring] = React.useState(false)
 
       const accountAddress = account ? account.address : ''
+
+      /** 把「已删除」里的邮件恢复到收件箱。 */
+      const doRestore = async (message) => {
+        if (!message || restoring) return
+        setRestoring(true)
+        try {
+          const value = await call('/messages/restore', { id: message.id })
+          setSelectedId(null)
+          setDetail(null)
+          await load(folder)
+          if (onRefresh) onRefresh()
+          setNote(`${t('restoredOk')} ${(value && value.folder) || 'INBOX'}`)
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setRestoring(false)
+        }
+      }
 
       /** 已删除文件夹里是永久删除，其它文件夹移到「已删除」。 */
       const deletePermanent = storageKey === 'deleted'
@@ -2237,18 +2260,20 @@ window.__ModuleLoader__.load({
       const folderActions = (message) => {
         if (!message) return []
         const remove = { key: 'delete', label: t('deleteMail'), onClick: () => setPendingDelete(message) }
+        const restore = { key: 'restore', label: t('restoreMail'), onClick: () => doRestore(message) }
+        const tail = storageKey === 'deleted' ? [restore, remove] : [remove]
         if (composeMode === 'send') {
-          return [{ key: 'send', label: t('send'), onClick: () => setCompose(buildCompose('send', message, t)) }, remove]
+          return [{ key: 'send', label: t('send'), onClick: () => setCompose(buildCompose('send', message, t)) }, ...tail]
         }
         if (composeMode === 'reply') {
           return [
             { key: 'reply', label: t('reply'), onClick: () => setCompose(buildCompose('reply', message, t)) },
             { key: 'replyAll', label: t('replyAll'), onClick: () => setCompose(buildCompose('replyAll', message, t)) },
             { key: 'forward', label: t('forward'), onClick: () => setCompose(buildCompose('forward', message, t)) },
-            remove,
+            ...tail,
           ]
         }
-        return [remove]
+        return tail
       }
 
       const load = React.useCallback(

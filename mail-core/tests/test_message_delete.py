@@ -1,9 +1,10 @@
-"""``message.delete``: Trash-move, permanent expunge, POP3 local-only.
+"""``message.delete`` / ``message.restore`` against a fake IMAP server.
 
-IMAP deletion runs against a real loopback server (``FakeImapServer``), so the
-test can inspect the exact ``UID COPY`` / ``UID STORE`` / ``EXPUNGE`` it
-received and, more importantly, that the local row is only dropped once the
-server operation succeeded.
+The delete path (Trash-move, permanent expunge, POP3 local-only) and the
+restore path run against a real loopback server (``FakeImapServer``), so the
+tests can inspect the exact ``UID COPY`` / ``UID STORE`` / ``EXPUNGE`` the
+server received, count mailbox growth, and prove the local row is only
+dropped once the server-side change was actually verified.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ MESSAGES = [
 
 INBOX_LINE = b'* LIST (\\HasNoChildren) "/" INBOX\r\n'
 TRASH_LINE = b'* LIST (\\HasNoChildren) "/" Trash\r\n'
+ARCHIVE_LINE = b'* LIST (\\HasNoChildren) "/" Archive\r\n'
 DELETED_LINE = (
     '* LIST (\\HasNoChildren) "/" ' + imap_utf7.encode("已删除") + "\r\n"
 ).encode("utf-8")
@@ -200,6 +202,56 @@ class MessageDeleteTests(unittest.TestCase):
         self.assertIsNotNone(kept)
         self.assertEqual(kept["uid"], 1)
 
+    def test_copy_that_does_not_land_fails_and_keeps_the_local_row(self):
+        server = FakeImapServer(
+            MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE], copy_noop=True
+        )
+        with server:
+            account_id = self._imap_ready(server)
+            message = self._message(account_id, uid=2)
+
+            with self.assertRaises(MailCoreError) as context:
+                self.service.dispatch("message.delete", {"id": message["id"]})
+            self.assertEqual(context.exception.code, "IMAP_ERROR")
+            self.assertIn("did not land", context.exception.message)
+            self.assertEqual(server.stores, [], "must not expunge after a no-op copy")
+            self.assertEqual(server.expunges, 0)
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
+
+    def test_expunge_that_leaves_the_message_fails_and_keeps_the_local_row(self):
+        server = FakeImapServer(
+            MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE], expunge_noop=True
+        )
+        with server:
+            account_id = self._imap_ready(server)
+            message = self._message(account_id, uid=1)
+
+            with self.assertRaises(MailCoreError) as context:
+                self.service.dispatch("message.delete", {"id": message["id"]})
+            self.assertEqual(context.exception.code, "IMAP_ERROR")
+            self.assertIn("still on the server", context.exception.message)
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
+
+    def test_permanent_delete_does_not_check_the_trash_count(self):
+        # ``copy_noop`` proves the permanent path never looks at Trash.
+        server = FakeImapServer(
+            MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE], copy_noop=True
+        )
+        with server:
+            account_id = self._imap_ready(server)
+            message = self._message(account_id, uid=3)
+
+            result = self.service.dispatch(
+                "message.delete", {"id": message["id"], "permanent": True}
+            )
+            copies = list(server.copies)
+
+        self.assertEqual(result["trashed"], False)
+        self.assertEqual(copies, [])
+        self.assertIsNone(self.service.store.get_message(message["id"]))
+
     def test_repeated_delete_is_not_found(self):
         with FakeImapServer(MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE]) as server:
             account_id = self._imap_ready(server)
@@ -253,6 +305,176 @@ class MessageDeleteTests(unittest.TestCase):
         self.assertEqual(
             self.service.dispatch("message.list", {"accountId": account_id})["total"], 2
         )
+
+
+class MessageRestoreTests(unittest.TestCase):
+    """``message.restore``: Trash -> real folder, with the same fail-closed checks."""
+
+    def setUp(self):
+        self._tmp = workspace_temporary_directory()
+        self.addCleanup(self._tmp.cleanup)
+        self.service = Service(Path(self._tmp.name))
+        self.addCleanup(self.service.close)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _add_account(self, port: int, *, protocol: str = "imap") -> str:
+        return self.service.dispatch(
+            "account.add",
+            {
+                "address": "me@example.com",
+                "displayName": "测试邮箱",
+                "protocol": protocol,
+                "imapHost": "127.0.0.1",
+                "imapPort": port,
+                "imapSecurity": "none",
+                "username": "me@example.com",
+                "password": PASSWORD,
+                "smtpHost": "",
+            },
+        )["id"]
+
+    def _ready(self, server, *, with_archive: bool = False) -> str:
+        folder_lines = [INBOX_LINE, TRASH_LINE]
+        if with_archive:
+            folder_lines.append(ARCHIVE_LINE)
+        server.folder_lines = folder_lines
+        account_id = self._add_account(server.port)
+        self.service.dispatch("account.test", {"id": account_id})
+        self.service.dispatch("sync.run", {"accountId": account_id, "folder": "INBOX"})
+        self.service.dispatch("sync.run", {"accountId": account_id, "folder": "Trash"})
+        return account_id
+
+    def _message(self, account_id: str, *, uid: int = 1, folder: str = "Trash") -> dict:
+        messages = self.service.dispatch(
+            "message.list", {"accountId": account_id, "folder": folder}
+        )["messages"]
+        return next(item for item in messages if item["uid"] == uid)
+
+    def _restore(self, message_id: str, **params) -> dict:
+        params["id"] = message_id
+        return self.service.dispatch("message.restore", params)
+
+    # -- IMAP --------------------------------------------------------------
+
+    def test_restore_to_inbox_copies_back_and_drops_local_row(self):
+        with FakeImapServer(MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE]) as server:
+            account_id = self._ready(server)
+            message = self._message(account_id, uid=2)
+            before_inbox = len(server.extra_uids.get("INBOX", []))
+
+            result = self._restore(message["id"])
+            copies = list(server.copies)
+            inbox_uid_count = len(server.extra_uids.get("INBOX", []))
+            trashed_uids = set(server.deleted_uids.get("Trash", set()))
+            stores = list(server.stores)
+
+        self.assertEqual(result, {"restored": True, "folder": "INBOX"})
+        self.assertEqual(copies, [(2, "INBOX")])
+        self.assertEqual(inbox_uid_count, before_inbox + 1, "target grew by one")
+        self.assertIn(2, trashed_uids, "source uid is gone after the expunge")
+        self.assertEqual([uid for uid, _flags in stores], [2])
+
+        # Only the Trash row is gone; the INBOX row for the same UID remains.
+        self.assertIsNone(self.service.store.get_message(message["id"]))
+        inbox_messages = self.service.dispatch(
+            "message.list", {"accountId": account_id, "folder": "INBOX"}
+        )["messages"]
+        self.assertEqual(len(inbox_messages), 3)
+        self.assertTrue(any(item["uid"] == 2 for item in inbox_messages))
+
+    def test_restore_to_explicit_existing_folder(self):
+        with FakeImapServer(
+            MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE, ARCHIVE_LINE]
+        ) as server:
+            account_id = self._ready(server, with_archive=True)
+            message = self._message(account_id, uid=1)
+
+            result = self._restore(message["id"], folder="Archive")
+            copies = list(server.copies)
+            archive_uids = list(server.extra_uids.get("Archive", []))
+
+        self.assertEqual(result, {"restored": True, "folder": "Archive"})
+        self.assertEqual(copies, [(1, "Archive")])
+        self.assertEqual(len(archive_uids), 1)
+        self.assertIsNone(self.service.store.get_message(message["id"]))
+
+    def test_restore_to_missing_folder_is_bad_request(self):
+        with FakeImapServer(MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE]) as server:
+            account_id = self._ready(server)
+            message = self._message(account_id, uid=1)
+
+            with self.assertRaises(MailCoreError) as context:
+                self._restore(message["id"], folder="Archive")
+            self.assertEqual(context.exception.code, "BAD_REQUEST")
+            self.assertEqual(server.copies, [])
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
+
+    def test_restore_of_non_trash_message_is_bad_request(self):
+        with FakeImapServer(MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE]) as server:
+            account_id = self._ready(server)
+            message = self._message(account_id, uid=1, folder="INBOX")
+
+            with self.assertRaises(MailCoreError) as context:
+                self._restore(message["id"])
+            self.assertEqual(context.exception.code, "BAD_REQUEST")
+            self.assertEqual(server.copies, [])
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
+
+    def test_restore_copy_that_does_not_land_keeps_the_local_row(self):
+        server = FakeImapServer(
+            MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE], copy_noop=True
+        )
+        with server:
+            account_id = self._ready(server)
+            message = self._message(account_id, uid=2)
+
+            with self.assertRaises(MailCoreError) as context:
+                self._restore(message["id"])
+            self.assertEqual(context.exception.code, "IMAP_ERROR")
+            self.assertEqual(server.stores, [], "no expunge after a failed copy")
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
+
+    def test_restore_expunge_that_leaves_the_message_keeps_the_local_row(self):
+        server = FakeImapServer(
+            MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE], expunge_noop=True
+        )
+        with server:
+            account_id = self._ready(server)
+            message = self._message(account_id, uid=1)
+
+            with self.assertRaises(MailCoreError) as context:
+                self._restore(message["id"])
+            self.assertEqual(context.exception.code, "IMAP_ERROR")
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
+
+    def test_restore_unknown_message_is_not_found(self):
+        with self.assertRaises(MailCoreError) as context:
+            self._restore("msg_missing")
+        self.assertEqual(context.exception.code, "NOT_FOUND")
+
+    # -- POP3 --------------------------------------------------------------
+
+    def test_restore_on_pop3_is_bad_request(self):
+        with FakePop3Server(messages=2) as server:
+            account_id = self._add_account(server.port, protocol="pop3")
+            self.service.dispatch("account.test", {"id": account_id})
+            self.service.dispatch("sync.run", {"accountId": account_id})
+            messages = self.service.dispatch(
+                "message.list", {"accountId": account_id}
+            )["messages"]
+            message = messages[0]
+
+            with self.assertRaises(MailCoreError) as context:
+                self._restore(message["id"])
+            self.assertEqual(context.exception.code, "BAD_REQUEST")
+            self.assertIn("IMAP", context.exception.message)
+
+        self.assertIsNotNone(self.service.store.get_message(message["id"]))
 
 
 if __name__ == "__main__":

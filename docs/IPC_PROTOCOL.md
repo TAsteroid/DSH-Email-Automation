@@ -273,13 +273,36 @@ POP3 结果：
 
 - `permanent` 必须由调用方**显式**给出、核心层不根据文件夹名猜测：`false`（缺省）表示移动到「已删除」，`true` 表示彻底删除；非布尔值 → `BAD_REQUEST`。
 - IMAP 移动到「已删除」：从本地缓存的 `folder.list`（`account.test` 落库）里按 `/deleted|trash|已删除|废纸/i` 找 Trash 文件夹，依次执行 `UID COPY <uid> <Trash>` → `UID STORE <uid> +FLAGS (\Deleted)` → `EXPUNGE`，返回 `trashed: true`。按规格用的是 `EXPUNGE` 而不是 `UID EXPUNGE`：它会把该文件夹里**所有**已标记 `\Deleted` 的邮件一起清掉（通常只有本次这一封）；服务器支持 UIDPLUS 时以后可以收紧成 `UID EXPUNGE`。
-- 找不到 Trash 文件夹（或文件夹缓存为空——从没成功跑过 `account.test`）→ **退化为彻底删除**，返回 `trashed: false`。
+- **删除必须可验证（fail closed）**：`OK` 回复不算成功。COPY 前后各用只读 `SELECT` + `UID SEARCH ALL` 数一次 Trash 数量，数量没有增加 → `IMAP_ERROR`「COPY 未落地」；`STORE`/`EXPUNGE` 之后重新只读 `SELECT` 源文件夹并 `UID SEARCH UID <uid>`，仍能查到 → `IMAP_ERROR`「邮件仍在服务器」。两项校验都通过才删本地行；任一失败都**保留本地行**，避免「本地删了、服务器还在、下次同步又回来」。
+- 找不到 Trash 文件夹（或文件夹缓存为空——从没成功跑过 `account.test`）→ **退化为彻底删除**，返回 `trashed: false`；永久删除路径不检查 Trash 数量。
 - IMAP 彻底删除（`permanent: true`）→ `UID STORE +FLAGS (\Deleted)` + `EXPUNGE`，不 `COPY`；若邮件本来就在 Trash 里，再按「移动」删也走这条路径（避免 COPY 到自身产生副本），返回 `trashed: false`。
-- 服务器操作成功后删除本地 `messages` 行（移动到 Trash 的情况也删；下一次同步 Trash 会重新入库）。此后 `message.get` 对该 id 返回 `NOT_FOUND`。
-- 服务器操作失败（连接 / SELECT / COPY / STORE / EXPUNGE / 权限）→ `IMAP_ERROR`，**本地行保留**可重试；message 带服务器原文，绝不包含密码。
+- 服务器操作成功（且校验通过）后删除本地 `messages` 行（移动到 Trash 的情况也删；下一次同步 Trash 会重新入库）。此后 `message.get` 对该 id 返回 `NOT_FOUND`。
+- 服务器操作失败（连接 / SELECT / COPY / STORE / EXPUNGE / 权限 / 上述校验不通过）→ `IMAP_ERROR`，**本地行保留**可重试；message 带服务器原文或校验结论，绝不包含密码。
 - POP3 服务端没有单封删除语义：**只删本地副本、不连服务器**，返回 `{"deleted": true, "trashed": false, "localOnly": true}`，界面应提示「仅从本机删除，服务器上仍保留」。`permanent` 对 POP3 无意义。
 - 同一 `id` 重复删除（本地行已不存在）→ `NOT_FOUND`。
 - 字段含义：`trashed` = 这次操作把邮件放进了「已删除」文件夹；`localOnly` = 只动了本地副本（服务器上还在）。两者不会同时为 `true`。
+
+### `message.restore`
+
+参数：
+
+```json
+{"id": "msg_xxx", "folder": "INBOX"}
+```
+
+结果：
+
+```json
+{"restored": true, "folder": "INBOX"}
+```
+
+- 把「已删除」里的邮件恢复到普通文件夹，仅支持 **IMAP**；POP3 账号 → `BAD_REQUEST`（message 说明只支持 IMAP）。
+- 只允许恢复**位于 Trash 类文件夹**的邮件：`folder`（邮件本地记录所在的文件夹）按 `/deleted|trash|已删除|废纸/i` 判断，不是 Trash → `BAD_REQUEST`。
+- `folder` 省略时用 `INBOX`；显式给出时必须存在于本地缓存的 `folder.list`（`account.test` 落库），否则 → `BAD_REQUEST`。
+- 执行顺序：只读 `SELECT` 目标文件夹并 `UID SEARCH ALL` 记下数量 → `SELECT` 源 Trash 文件夹 → `UID COPY <uid> <目标>` → 重新只读 `SELECT` 目标文件夹再数一次，**数量没有增加 → `IMAP_ERROR`「COPY 未落地」** → `SELECT` 源 Trash 文件夹 → `UID STORE +FLAGS (\Deleted)` + `EXPUNGE` → 重新只读 `SELECT` 源文件夹并 `UID SEARCH UID <uid>`，**仍能查到 → `IMAP_ERROR`「邮件仍在服务器」**。
+- 任一步校验失败 → `IMAP_ERROR`，**本地行保留**（同 `message.delete` 的 fail-closed 规则）；响应 message 不含密码。
+- 成功 → 删除本地行（下一次同步目标文件夹会重新入库），返回 `{"restored": true, "folder": "<目标>"}`。
+- `id` 不存在 → `NOT_FOUND`。
 
 ### `thread.list`
 
