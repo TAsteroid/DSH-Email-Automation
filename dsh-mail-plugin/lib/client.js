@@ -1604,6 +1604,51 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 账户栏：收件箱与待跟进共用；null 表示「全部账户」。 */
+    function AccountRail({ t, accounts, accountId, onSelect }) {
+      const label = (account) => (account.displayName ? account.displayName : account.address)
+      const row = (key, text, withIcon) =>
+        h(
+          'button',
+          {
+            key,
+            type: 'button',
+            onClick: () => onSelect(key === 'all' ? null : key),
+            'aria-pressed': key === 'all' ? accountId === null : accountId === key,
+            style: {
+              ...styles.railItem,
+              width: '100%',
+              border: 'none',
+              textAlign: 'left',
+              cursor: 'pointer',
+              background:
+                (key === 'all' ? accountId === null : accountId === key)
+                  ? 'var(--dsw-alias-interactive-bg-hover)'
+                  : 'transparent',
+            },
+          },
+          withIcon ? h(MailIcon, { size: 14 }) : null,
+          text,
+        )
+
+      return h(
+        'div',
+        { style: { ...styles.rail, width: '100%', boxSizing: 'border-box' }, 'aria-label': t('accounts') },
+        h('div', { style: styles.railTitle }, t('accounts')),
+        accounts.length === 0
+          ? h(
+              'div',
+              { style: { padding: '4px 8px' } },
+              h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('noAccount')),
+              h('p', { style: styles.muted }, t('noAccountHint')),
+            )
+          : [
+              row('all', t('allAccounts'), false),
+              ...accounts.map((account) => row(account.id, label(account), true)),
+            ],
+      )
+    }
+
     // ---- 收件箱 ------------------------------------------------------------
     /** 中间栏：本地索引的邮件列表（按时间倒序）。 */
     function MessageList({ t, messages, selectedId, onSelect, onSync, syncing }) {
@@ -1709,6 +1754,7 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = React.useState(null)
       const [syncing, setSyncing] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
+      const [accountId, setAccountId] = React.useState(null)
 
       const openCompose = (mode) => {
         if (detail) setCompose(buildCompose(mode, detail, t))
@@ -1718,13 +1764,13 @@ window.__ModuleLoader__.load({
         try {
           // 必须限定文件夹：不带 folder 会把这个账号所有邮件（含已发送）都列出来
           const params = { folder: 'INBOX', limit: 100 }
-          if (accounts.length > 0) params.accountId = accounts[0].id
+          if (accountId) params.accountId = accountId
           const value = await call('/messages', params)
           setMessages(value && value.messages ? value.messages : [])
         } catch {
           setMessages([])
         }
-      }, [accounts])
+      }, [accountId])
 
       React.useEffect(() => {
         void loadMessages()
@@ -1741,11 +1787,14 @@ window.__ModuleLoader__.load({
       }
 
       const syncNow = async () => {
-        const account = accounts[0]
-        if (!account || syncing) return
+        if (syncing) return
+        const targets = accountId ? accounts.filter((account) => account.id === accountId) : accounts
+        if (targets.length === 0) return
         setSyncing(true)
         try {
-          await call('/sync', { accountId: account.id, folder: 'INBOX', limit: 50 })
+          for (const account of targets) {
+            await call('/sync', { accountId: account.id, folder: 'INBOX', limit: 50 })
+          }
           await loadMessages()
         } catch {
           // 同步失败保留原列表；错误由顶栏的 Core 状态反映
@@ -1856,24 +1905,9 @@ window.__ModuleLoader__.load({
           style: { display: 'flex', flex: 1, minHeight: 0, userSelect: dragging ? 'none' : undefined },
         },
         h(
-          'aside',
-          { style: { ...styles.rail, width: layout.rail }, 'aria-label': t('accounts') },
-          h('div', { style: styles.railTitle }, t('accounts')),
-          accounts.length === 0
-            ? h(
-                'div',
-                { style: { padding: '4px 8px' } },
-                h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('noAccount')),
-                h('p', { style: styles.muted }, t('noAccountHint')),
-              )
-            : accounts.map((account) =>
-                h(
-                  'div',
-                  { key: account.id, style: styles.railItem },
-                  h(MailIcon, { size: 14 }),
-                  account.displayName ? account.displayName : account.address,
-                ),
-              ),
+          'div',
+          { style: { flex: 'none', width: layout.rail, minWidth: 0, overflow: 'hidden' } },
+          h(AccountRail, { t, accounts, accountId, onSelect: setAccountId }),
         ),
         handle('rail'),
         h(
@@ -1885,7 +1919,8 @@ window.__ModuleLoader__.load({
         h(MessageDetail, {
           t,
           message: detail,
-          accountAddress: accounts.length > 0 ? accounts[0].address : '',
+          accountAddress: (accountId ? accounts.find((account) => account.id === accountId) : accounts[0] || {})
+            .address || '',
           actions: detail
             ? [
                 { key: 'reply', label: t('reply'), onClick: () => openCompose('reply') },
@@ -1921,50 +1956,11 @@ window.__ModuleLoader__.load({
       const visible = accountId === null ? accounts : accounts.filter((account) => account.id === accountId)
       const groups = visible.map((account) => ({ id: account.id, title: label(account), items: [] }))
 
-      const railButton = (key, text, active, onClick) =>
-        h(
-          'button',
-          {
-            key,
-            type: 'button',
-            onClick,
-            style: {
-              ...styles.railItem,
-              width: '100%',
-              border: 'none',
-              textAlign: 'left',
-              cursor: 'pointer',
-              background: active ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
-            },
-          },
-          accounts.length > 0 && key !== 'all' ? h(MailIcon, { size: 14 }) : null,
-          text,
-        )
-
-      const rail = h(
-        'div',
-        { style: { ...styles.rail, width: '100%', boxSizing: 'border-box' }, 'aria-label': t('accounts') },
-        h('div', { style: styles.railTitle }, t('accounts')),
-        accounts.length === 0
-          ? h(
-              'div',
-              { style: { padding: '4px 8px' } },
-              h('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('noAccount')),
-              h('p', { style: styles.muted }, t('noAccountHint')),
-            )
-          : [
-              railButton('all', t('allAccounts'), accountId === null, () => setAccountId(null)),
-              ...accounts.map((account) =>
-                railButton(account.id, label(account), accountId === account.id, () => setAccountId(account.id)),
-              ),
-            ],
-      )
-
       return h(SplitPane, {
         storageKey: 'todoAccounts',
         spec: RAIL_SPEC,
         label: t('resize'),
-        left: rail,
+        left: h(AccountRail, { t, accounts, accountId, onSelect: setAccountId }),
         right: h(SplitPane, {
           storageKey: 'todo',
           spec: PANE_SPEC,
@@ -3281,6 +3277,7 @@ window.__ModuleLoader__.load({
       __test: {
         MailPanel,
         InboxView,
+        AccountRail,
         SentView,
         DraftsMailView,
         DeletedView,

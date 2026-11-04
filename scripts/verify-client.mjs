@@ -554,6 +554,11 @@ function runRealReactPass() {
     check(inboxWithNames.includes('工作邮箱'), '[真实渲染] 有显示名称时应显示名称')
     check(!inboxWithNames.includes('one@b.com'), '[真实渲染] 有显示名称时不再显示地址')
     check(inboxWithNames.includes('two@b.com'), '[真实渲染] 没有显示名称时回落到地址')
+    check(inboxWithNames.includes('t:mail.allAccounts'), '[真实渲染] 收件箱账户栏应有「全部账户」')
+    check(
+      (inboxWithNames.match(/aria-pressed="(true|false)"/g) || []).length >= 2,
+      '[真实渲染] 账户栏应渲染为可点击按钮（带 aria-pressed）',
+    )
 
     const todoWithAccounts = renderToStaticMarkup(
       h(views.TodoView, { t, status: { ...statusPayload, accounts: twoAccounts } }),
