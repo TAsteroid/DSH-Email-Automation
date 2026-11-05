@@ -62,8 +62,7 @@ class AccountTestTests(unittest.TestCase):
             result, {"ok": True, "protocol": "pop3", "messages": 7}
         )
         self.assertNotIn("folders", result)
-        self.assertNotIn("smtp", result)
-        # The stored DPAPI blob was decrypted and used for the POP3 login.
+        self.assertNotIn("smtp", result)        # The stored DPAPI blob was decrypted and used for the POP3 login.
         self.assertEqual(server.credentials, [("a@b.com", PASSWORD)])
         self.assertNotIn(PASSWORD, json.dumps(result))
 
@@ -126,6 +125,41 @@ class AccountTestTests(unittest.TestCase):
         self.assertFalse(
             any(command.startswith(("MAIL", "RCPT", "DATA")) for command in commands)
         )
+
+    def test_update_credential_replaces_the_stored_password(self):
+        new_password = "new-pass-2026"
+        with FakePop3Server(messages=1) as pop3:
+            account_id = self._add(protocol="pop3", imapPort=pop3.port)
+
+            result = self.service.dispatch(
+                "account.updateCredential",
+                {"id": account_id, "password": new_password},
+            )
+            self.assertEqual(result["id"], account_id)
+            self.assertTrue(result["updatedAt"].endswith("Z"))
+
+            tested = self.service.dispatch("account.test", {"id": account_id})
+            self.assertTrue(tested["ok"])
+
+        self.assertEqual(pop3.credentials, [("a@b.com", new_password)])
+        # The new plaintext must not reach the database files either.
+        for name in ("mail.db", "mail.db-wal"):
+            path = self.service.data_dir / name
+            if path.exists():
+                self.assertNotIn(new_password.encode("utf-8"), path.read_bytes())
+
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch(
+                "account.updateCredential",
+                {"id": "acc_missing", "password": new_password},
+            )
+        self.assertEqual(context.exception.code, "NOT_FOUND")
+
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch(
+                "account.updateCredential", {"id": account_id, "password": "   "}
+            )
+        self.assertEqual(context.exception.code, "BAD_REQUEST")
 
 
 if __name__ == "__main__":

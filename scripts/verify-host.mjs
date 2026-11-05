@@ -224,6 +224,9 @@ function handleMethod(method, params) {
       attachments: [{ id: 'att_1', filename: '报价表.xlsx', size: 2048, fetchedAt: '' }],
     }
   }
+  if (method === 'account.updateCredential') return { id: params.id, updatedAt: '2026-11-05T00:00:00Z' }
+  if (method === 'idle.stop') return { stopped: ['acc_1'] }
+  if (method === 'idle.start') return { started: ['acc_1'], skipped: [] }
   if (method === 'contactSession.get') {
     return params.email === 'a@b.com'
       ? { sessionId: 'sess_1', workspaceId: 'ws_1', title: 'A', updatedAt: '2026-11-04T12:00:00Z' }
@@ -965,6 +968,12 @@ if (dataDirSame && dataDirSame.body) {
   const parsed = JSON.parse(dataDirSame.body)
   check(parsed.value.moved === false, '相同目录不应复制数据')
 }
+
+const pwdNoPass = await invoke('/api/dsh-mail/accounts/password', { method: 'POST', body: JSON.stringify({ id: 'acc_1' }) })
+check(pwdNoPass && pwdNoPass.status === 400, `改密码缺 password 应 400，实际 ${pwdNoPass && pwdNoPass.status}`)
+
+const pwdRoute = await invoke('/api/dsh-mail/accounts/password', { method: 'POST', body: JSON.stringify({ id: 'acc_1', password: 'new-secret' }) })
+check(pwdRoute && pwdRoute.status === 200, `改密码应 200，实际 ${pwdRoute && pwdRoute.status}`)
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })
 if (statuses && statuses.body) {

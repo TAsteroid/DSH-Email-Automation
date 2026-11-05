@@ -205,6 +205,7 @@ class Service:
             "account.add": self._account_add,
             "account.remove": self._account_remove,
             "account.test": self._account_test,
+            "account.updateCredential": self._account_update_credential,
             "folder.list": self._folder_list,
             "sync.status": self._sync_status,
             "sync.run": self._sync_run,
@@ -427,6 +428,26 @@ class Service:
                 account["smtpSecurity"],
             )
         return result
+
+    def _account_update_credential(self, params: dict) -> dict:
+        """Replace one account's password, re-encrypted with DPAPI.
+
+        The plaintext is used only to build the blob; it is never logged,
+        returned or written in the clear.  An auth-failed IDLE worker can be
+        restarted with ``idle.start`` after this call.
+        """
+        account_id = _require_str(params, "id")
+        password = params.get("password")
+        if not isinstance(password, str) or not password.strip():
+            raise bad_request("field password must be a non-empty string")
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        password_blob = crypto.encrypt_password(password)
+        updated_at = self.store.set_credential(account_id, password_blob)
+        if updated_at is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+        return {"id": account_id, "updatedAt": updated_at}
 
     # -- folders -----------------------------------------------------------
 

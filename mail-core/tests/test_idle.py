@@ -227,7 +227,7 @@ class IdleTests(unittest.TestCase):
             self.assertEqual(len(status), 1)
             self.assertEqual(
                 set(status[0]),
-                {"accountId", "state", "lastEventAt", "reconnects"},
+                {"accountId", "state", "lastEventAt", "reconnects", "lastError"},
             )
             self.assertEqual(
                 self.service.dispatch(
@@ -235,6 +235,79 @@ class IdleTests(unittest.TestCase):
                 ),
                 {"stopped": [account_id]},
             )
+
+    def test_login_failure_stops_the_worker_without_retrying(self):
+        with FakeImapServer(
+            [make_message(subject="一", message_id="<auth@example.com>")],
+            concurrent=True,
+            reject_login=True,
+        ) as server:
+            account_id = self._add_imap_account(server.port)
+            started = self.service.dispatch(
+                "idle.start", {"accountId": account_id}
+            )
+            self.assertEqual(started["started"], [account_id])
+            worker = self.service._idle_workers[account_id]
+
+            self.assertTrue(_wait_for(lambda: not worker.is_alive(), timeout=5))
+            status = self.service.dispatch("idle.status", {})["workers"]
+
+            self.assertEqual(len(server.logins), 1, "no retry after auth failure")
+            self.assertEqual(
+                sum(
+                    1
+                    for line in server.commands
+                    if line.strip().upper().endswith(" IDLE")
+                ),
+                0,
+            )
+            self.assertEqual(status[0]["state"], "auth-failed")
+            self.assertEqual(status[0]["reconnects"], 0)
+            self.assertTrue(status[0]["lastError"])
+            self.assertNotIn(PASSWORD, status[0]["lastError"])
+
+            # After the credential is updated, idle.start replaces the dead
+            # worker with a fresh one.
+            self.service.dispatch(
+                "account.updateCredential",
+                {"id": account_id, "password": "new-pass"},
+            )
+            restarted = self.service.dispatch(
+                "idle.start", {"accountId": account_id}
+            )
+            self.assertEqual(restarted["started"], [account_id])
+            self.assertIsNot(
+                self.service._idle_workers[account_id], worker
+            )
+
+    def test_network_error_keeps_retrying(self):
+        with FakeImapServer(
+            [make_message(subject="一", message_id="<net@example.com>")],
+        ) as server:
+            account_id = self._add_imap_account(server.port)
+            account = self.service.store.get_account(account_id)
+            server.stop()  # connection refused from now on
+
+            worker = IdleWorker(
+                account=account,
+                password=PASSWORD,
+                on_new_mail=lambda _account_id: None,
+                backoff_initial=0.05,
+                backoff_max=0.1,
+            )
+            self.addCleanup(worker.stop)
+            worker.start()
+
+            self.assertTrue(
+                _wait_for(
+                    lambda: worker.status()["reconnects"] >= 1, timeout=5
+                )
+            )
+            status = worker.status()
+            self.assertNotEqual(status["state"], "auth-failed")
+
+        self.assertGreaterEqual(status["reconnects"], 1)
+        self.assertIn("lastError", status)
 
 
 if __name__ == "__main__":

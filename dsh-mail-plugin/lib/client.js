@@ -297,6 +297,10 @@ window.__ModuleLoader__.load({
         accountSubmitting: '保存中…',
         accountSaved: '账户已保存',
         accountFailed: '保存失败',
+        accountPassword: '改密码',
+        accountPasswordPlaceholder: '输入邮箱当前密码 / 授权码',
+        accountPasswordSaved: '密码已更新，正在重启连接',
+        saving: '保存中…',
         accountTest: '测试连接',
         accountTesting: '连接中…',
         accountRemove: '删除',
@@ -527,6 +531,10 @@ window.__ModuleLoader__.load({
         accountSubmitting: 'Saving…',
         accountSaved: 'Account saved',
         accountFailed: 'Save failed',
+        accountPassword: 'Password',
+        accountPasswordPlaceholder: 'Current mailbox password / app password',
+        accountPasswordSaved: 'Password updated, restarting connection',
+        saving: 'Saving…',
         accountTest: 'Test connection',
         accountTesting: 'Connecting…',
         accountRemove: 'Remove',
@@ -3735,6 +3743,25 @@ window.__ModuleLoader__.load({
     function AccountRow({ t, account, onChanged }) {
       const [busy, setBusy] = React.useState(null)
       const [note, setNote] = React.useState(null)
+      const [editing, setEditing] = React.useState(false)
+      const [password, setPassword] = React.useState('')
+
+      const savePassword = async () => {
+        if (!password.trim() || busy !== null) return
+        setBusy('password')
+        setNote(null)
+        try {
+          await call('/accounts/password', { id: account.id, password })
+          setPassword('')
+          setEditing(false)
+          setNote(t('accountPasswordSaved'))
+          if (onChanged) onChanged()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(null)
+        }
+      }
 
       const test = async () => {
         setBusy('test')
@@ -3785,9 +3812,32 @@ window.__ModuleLoader__.load({
         ),
         h(
           'button',
+          { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: () => setEditing((prev) => !prev) },
+          t('accountPassword'),
+        ),
+        h(
+          'button',
           { type: 'button', style: styles.dangerBtn, disabled: busy !== null, onClick: remove },
           t('accountRemove'),
         ),
+        editing
+          ? h(
+              'div',
+              { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, width: '100%' } },
+              h('input', {
+                type: 'password',
+                value: password,
+                placeholder: t('accountPasswordPlaceholder'),
+                onChange: (event) => setPassword(event.target.value),
+                style: { ...styles.textInput, flex: 1, minWidth: 0, padding: '4px 8px' },
+              }),
+              h(
+                'button',
+                { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: savePassword },
+                busy === 'password' ? t('saving') : t('save'),
+              ),
+            )
+          : null,
       )
     }
 

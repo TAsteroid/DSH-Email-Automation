@@ -1911,6 +1911,20 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('account.test', { id }))
     })
 
+    // 更新密码（不删账号，保数据）；成功后重启 IDLE
+    route('/accounts/password', async (body) => {
+      const id = requireText(body.id, 'id')
+      const password = requireText(body.password, 'password')
+      const value = requireCoreResult(await callCore('account.updateCredential', { id, password }))
+      try {
+        await callCore('idle.stop', {})
+        await callCore('idle.start', {})
+      } catch (error) {
+        log(`idle restart skipped: ${error?.message ?? error}`)
+      }
+      return value
+    })
+
     route('/folders', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')
       return requireCoreResult(await callCore('folder.list', { accountId }))

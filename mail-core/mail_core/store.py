@@ -735,13 +735,21 @@ class Store:
             cursor = self._conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         return cursor.rowcount > 0
 
-    def set_credential(self, account_id: str, password_blob: Optional[str]) -> bool:
+    def set_credential(
+        self, account_id: str, password_blob: Optional[str]
+    ) -> Optional[str]:
+        """Replace the stored DPAPI blob; returns the new ``updated_at``.
+
+        ``None`` means the account id is unknown.  The plaintext never enters
+        this layer: the service encrypts it first.
+        """
+        timestamp = utc_now()
         with self._conn:
             cursor = self._conn.execute(
                 "UPDATE accounts SET password_blob = ?, updated_at = ? WHERE id = ?",
-                (password_blob, utc_now(), account_id),
+                (password_blob, timestamp, account_id),
             )
-        return cursor.rowcount > 0
+        return timestamp if cursor.rowcount > 0 else None
 
     def get_credential(self, account_id: str) -> Optional[str]:
         """Return the stored DPAPI blob (base64) or ``None``; never plaintext."""

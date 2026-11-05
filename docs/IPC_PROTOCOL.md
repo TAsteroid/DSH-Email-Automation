@@ -145,6 +145,16 @@ POP3 结果：
 - 收信失败返回 `IMAP_ERROR`（POP3 沿用同一个错误码，message 带协议前缀）或 `CREDENTIAL_MISSING`。
 - `folders[].name` 是**解码后的 UTF-8 名字**：IMAP 服务器返回的 modified UTF-7（RFC 3501 §5.1.3，如 `&XfJT0ZAB-`）已在核心层解码成 `已发送`，可直接显示、可按名字匹配。
 
+### `account.updateCredential`
+
+参数：`{"id": "acc_xxx", "password": "<新明文密码，仅此一次>"}`
+
+结果：`{"id": "acc_xxx", "updatedAt": "2026-11-04T12:00:00Z"}`
+
+- 用 DPAPI 重新加密后覆盖 `password_blob` 并刷新 `updatedAt`；明文**不写日志、不落盘、不在响应里返回**。
+- 空密码 / 全空白 / 非字符串 → `BAD_REQUEST`；`id` 不存在 → `NOT_FOUND`。
+- 密码已失效的 IDLE worker 会停在 `auth-failed`；更新凭据后再调 [`idle.start`](#idlestart) 即可为该账号拉起新的 worker。
+
 ### `folder.list`
 
 参数：`{"accountId": "acc_xxx"}`
@@ -220,9 +230,10 @@ POP3 结果：
 ```
 
 - 为每个**启用的 IMAP 账号**启动一个后台 IDLE 线程（POP3 不启动；没有可用密码的账号也不会启动）。
-- `accountId` 省略时为全部账号启动；`started` 是本次真正启动的账号，`skipped` 是 POP3 / 已禁用 / 已在运行 / 没有凭据而跳过的账号。
+- `accountId` 省略时为全部账号启动；`started` 是本次真正启动的账号，`skipped` 是 POP3 / 已禁用 / 已在运行 / 没有凭据而跳过的账号。已因认证失败退出的 worker 不在运行，再次 `idle.start` 会为它创建新线程（配合 [`account.updateCredential`](#accountupdatecredential) 用于密码失效后的恢复）。
 - 显式指定不存在的账号 → `NOT_FOUND`。
-- IDLE 线程：`LOGIN` → `SELECT INBOX` → `IDLE`；socket 超时 **240 秒**（短于服务器约 5 分钟的断连时间），超时后主动发 `DONE` 并重新 `IDLE`；断连/异常按 1s→60s 指数退避重连，线程不退出。
+- IDLE 线程：`LOGIN` → `SELECT INBOX` → `IDLE`；socket 超时 **240 秒**（短于服务器约 5 分钟的断连时间），超时后主动发 `DONE` 并重新 `IDLE`；断连/网络类异常按 1s→60s 指数退避重连，线程不退出。
+- **认证失败立即停**：登录返回 `AUTHENTICATIONFAILED` / `LOGIN failed` / `INVALID CREDENTIALS` 这类认证错误时，worker 进入 `auth-failed`，记录 `lastError`，**不再退避重试**（避免反复登录触发服务商风控）；密码更新后需再调 `idle.start`。
 - 收到 `* n EXISTS` → 用 Service 锁跑一次 **INBOX 增量同步**，成功后推送 [`mail.new`](#事件行) 事件并继续 IDLE；失败只更新状态、不推事件。
 
 ### `idle.stop`
@@ -243,13 +254,15 @@ POP3 结果：
 ```json
 {"workers": [
   {"accountId": "acc_xxx", "state": "idling",
-   "lastEventAt": "2026-11-04T12:00:00Z", "reconnects": 0}
+   "lastEventAt": "2026-11-04T12:00:00Z", "reconnects": 0,
+   "lastError": ""}
 ]}
 ```
 
-- `state`：`connecting` | `connected` | `idling` | `error` | `stopped`。
+- `state`：`connecting` | `connected` | `idling` | `error` | `auth-failed` | `stopped`。
+- `lastError`：最近一次错误（已脱敏，不含密码）；`auth-failed` 时说明认证失败原因，`connected` 成功后会清空。认证失败后线程停止，`reconnects` 不再增长，状态保持 `auth-failed` 供界面提示。
 - `lastEventAt`：最近一次收到 `* n EXISTS` 的时间（UTC，空串表示还没有收到过）；`reconnects`：断线重连次数。
-- 只返回当前正在运行的 worker；`idle.stop` 之后数组为空。
+- 只返回当前由 `idle.start` 创建的 worker（认证失败后仍保留记录，直到 `idle.stop` 或重新 `idle.start` 替换）；`idle.stop` 之后数组为空。
 
 ### `message.list`
 

@@ -41,9 +41,22 @@ _IMAP_FAILURES = (imaplib.IMAP4.error, OSError, socket.timeout, ValueError)
 
 _EXISTS_RE = re.compile(rb"^\* (\d+) EXISTS", re.IGNORECASE)
 
+# A login that the server rejected (bad/expired password) is terminal until
+# the user updates the credential: retrying only feeds provider rate limits.
+_AUTH_FAILURE_RE = re.compile(
+    r"AUTHENTICATIONFAILED|AUTHENTICATION FAILED|AUTHENTICATION ERROR|"
+    r"LOGIN FAILED|LOGIN AUTHENTICATION FAILED|AUTH FAILED|"
+    r"INVALID CREDENTIALS|INVALID USERNAME|INVALID PASSWORD",
+    re.IGNORECASE,
+)
+
 
 class IdleTimeout(Exception):
     """The idle read timed out; the caller sends DONE and re-enters IDLE."""
+
+
+class _AuthFailed(Exception):
+    """Terminal login failure; the worker stops instead of retrying."""
 
 
 def _one_line(text) -> str:
@@ -82,12 +95,13 @@ class IdleWorker(threading.Thread):
     # -- public API --------------------------------------------------------
 
     def status(self) -> dict:
-        """Protocol shape for ``idle.status``."""
+        """Protocol shape for ``idle.status`` (``lastError`` is redacted)."""
         return {
             "accountId": self.account_id,
             "state": self._state,
             "lastEventAt": self._last_event_at,
             "reconnects": self._reconnects,
+            "lastError": self._error,
         }
 
     @property
@@ -123,6 +137,7 @@ class IdleWorker(threading.Thread):
 
     def run(self) -> None:
         backoff = self._backoff_initial
+        auth_failed = False
         while not self._stop_event.is_set():
             connection = None
             try:
@@ -139,8 +154,11 @@ class IdleWorker(threading.Thread):
                         self.account["username"], self.password
                     )
                 except _IMAP_FAILURES as exc:
+                    message = self._redact(exc)
+                    if _AUTH_FAILURE_RE.search(message):
+                        raise _AuthFailed(message) from None
                     raise imap_client.ImapError(
-                        f"login failed: {self._redact(exc)}"
+                        f"login failed: {message}"
                     ) from None
 
                 status, data = connection.select(FOLDER)
@@ -154,6 +172,12 @@ class IdleWorker(threading.Thread):
 
                 while not self._stop_event.is_set():
                     self._idle_once(connection)
+            except _AuthFailed as exc:
+                # Terminal until the credential is updated: no backoff, no
+                # reconnect.  ``idle.start`` can start a fresh worker.
+                self._state = "auth-failed"
+                self._error = _one_line(str(exc))
+                auth_failed = True
             except MailCoreError as exc:
                 if self._stop_event.is_set():
                     break
@@ -163,18 +187,19 @@ class IdleWorker(threading.Thread):
                 if self._stop_event.is_set():
                     break
                 self._state = "error"
-                self._error = _one_line(f"{type(exc).__name__}: {exc}")
+                self._error = self._redact(f"{type(exc).__name__}: {exc}")
             finally:
                 self._close(connection)
                 with self._connection_lock:
                     self._connection = None
 
-            if self._stop_event.is_set():
+            if self._stop_event.is_set() or auth_failed:
                 break
             self._reconnects += 1
             self._stop_event.wait(backoff)
             backoff = min(backoff * 2, self._backoff_max)
-        self._state = "stopped"
+        if not auth_failed:
+            self._state = "stopped"
 
     # -- IDLE --------------------------------------------------------------
 

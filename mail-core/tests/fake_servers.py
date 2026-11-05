@@ -513,9 +513,11 @@ class FakeImapServer(_LoopbackServer):
         copy_noop: bool = False,
         expunge_noop: bool = False,
         concurrent: bool = False,
+        reject_login: bool = False,
     ) -> None:
         super().__init__()
         self.concurrent = bool(concurrent)
+        self.reject_login = bool(reject_login)
         self.messages = (
             list(messages)
             if messages is not None
@@ -609,7 +611,13 @@ class FakeImapServer(_LoopbackServer):
                     self.logins.append(
                         (tokens[0] if tokens else "", tokens[1] if len(tokens) > 1 else "")
                     )
-                    self._ok(connection, tag, "LOGIN completed")
+                    if self.reject_login:
+                        self._send(
+                            connection,
+                            f"{tag} NO AUTHENTICATIONFAILED LOGIN failed\r\n",
+                        )
+                    else:
+                        self._ok(connection, tag, "LOGIN completed")
                 elif command in ("SELECT", "EXAMINE"):
                     mailbox = _imap_tokens(arguments)
                     name = mailbox[0] if mailbox else ""
