@@ -453,6 +453,7 @@ class AttachmentTests(unittest.TestCase):
         *,
         content_type: str = "application/octet-stream",
         downloaded: bool = True,
+        root: Path | None = None,
     ) -> str:
         store = self.service.store
         if store.get_account("acc_text") is None:
@@ -492,7 +493,8 @@ class AttachmentTests(unittest.TestCase):
             if item["filename"] == filename
         )
         if downloaded:
-            path = Path(self._tmp.name) / filename
+            path = (root or Path(self._tmp.name)) / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             store.set_attachment_download(
                 attachment["id"],
@@ -578,6 +580,65 @@ class AttachmentTests(unittest.TestCase):
         self.assertIsNone(re.search(r"[\x80-\xff]{3,}", result["text"]))
         # The control-char-heavy text line is dropped by the 30% ratio rule.
         self.assertNotIn("Bad", result["text"])
+
+    def test_delete_local_removes_file_and_is_idempotent(self):
+        data = b"\x89PNG local file payload"
+        attachments_root = self.service.data_dir / "attachments"
+        attachment_id = self._downloaded_attachment(
+            "cached.png",
+            data,
+            content_type="image/png",
+            root=attachments_root,
+        )
+        stored = self.service.store.get_attachment(attachment_id)
+        path = Path(stored["path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(stored["fetchedAt"], "2026-11-05T01:00:00Z")
+
+        result = self.service.dispatch(
+            "attachment.deleteLocal", {"id": attachment_id}
+        )
+        self.assertEqual(
+            result,
+            {"deleted": True, "id": attachment_id, "freedBytes": len(data)},
+        )
+        self.assertFalse(path.exists())
+        cleared = self.service.store.get_attachment(attachment_id)
+        self.assertEqual(cleared["fetchedAt"], "")
+        self.assertEqual(cleared["path"], "")
+        self.assertEqual(cleared["sha256"], "")
+        self.assertFalse(cleared["downloaded"])
+        # The metadata row and its message association are kept.
+        self.assertEqual(cleared["messageId"], stored["messageId"])
+
+        again = self.service.dispatch(
+            "attachment.deleteLocal", {"id": attachment_id}
+        )
+        self.assertEqual(
+            again,
+            {"deleted": True, "id": attachment_id, "freedBytes": 0},
+        )
+
+        # A path outside <data-dir>/attachments must never be deleted.
+        outside_id = self._downloaded_attachment(
+            "outside.txt", b"outside", root=Path(self._tmp.name)
+        )
+        outside_path = Path(
+            self.service.store.get_attachment(outside_id)["path"]
+        )
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch(
+                "attachment.deleteLocal", {"id": outside_id}
+            )
+        self.assertEqual(context.exception.code, "BAD_REQUEST")
+        self.assertTrue(outside_path.is_file())
+
+    def test_delete_local_unknown_attachment_is_not_found(self):
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch(
+                "attachment.deleteLocal", {"id": "att_missing"}
+            )
+        self.assertEqual(context.exception.code, "NOT_FOUND")
 
 
 class AttachmentBackfillTests(unittest.TestCase):

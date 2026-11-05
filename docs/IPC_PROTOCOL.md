@@ -629,6 +629,19 @@ POP3 结果：
 - 其它扩展名/类型 → `BAD_REQUEST`，message 列出支持的扩展名。
 - 解析失败（损坏的 ZIP/XML/PDF、无法解码等）统一转成 `BAD_REQUEST`，message 只含错误类别，不返回文件路径或正文内容。
 
+### `attachment.deleteLocal`
+
+参数：`{"id": "att_xxx"}`
+
+结果：`{"deleted": true, "id": "att_xxx", "freedBytes": 48123}`
+
+- 删除该附件已下载到本地的**文件**，并清空 `local_path` / `sha256` / `fetched_at`；**附件元数据行和邮件关联保留**，之后可重新 `attachment.fetch` 下载。
+- `freedBytes` 是实际删掉的文件字节数；文件本来就不存在时为 `0`（同样成功）。
+- **幂等**：重复调用返回 `deleted: true`、`freedBytes: 0`。
+- `id` 不存在 → `NOT_FOUND`。
+- 安全限制：只允许删除解析后位于 `<data-dir>/attachments/` 内的文件；`local_path` 越界（被手工改坏、指向别处）→ `BAD_REQUEST` 且不删文件、不改记录。
+- 只动本地文件与这三列，不联网、不碰 `dismissed_at`、不影响 `attachment.list` 的其它字段。
+
 ### `attachment.get`
 
 参数：`{"id": "att_xxx"}`

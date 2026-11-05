@@ -758,6 +758,9 @@ function runRealReactPass() {
     check(searchMarkup.includes('t:mail.searchEmpty'), '[真实渲染] 无结果时应有空态')
 
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
+    check(kbMarkup.includes('▾'), '[真实渲染] 知识库分类应可折叠（有折叠箭头）')
+    check(kbMarkup.includes('aria-expanded="true"'), '[真实渲染] 知识库分类默认展开')
+
     for (const key of ['kbSummaries', 'kbFiles', 'kbContacts', 'kbCompanies']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)
     }

@@ -230,6 +230,7 @@ class Service:
             "attachment.backfill": self._attachment_backfill,
             "attachment.dismiss": self._attachment_dismiss,
             "attachment.text": self._attachment_text,
+            "attachment.deleteLocal": self._attachment_delete_local,
             "contact.list": self._contact_list,
             "contact.add": self._contact_add,
             "contact.update": self._contact_update,
@@ -908,6 +909,51 @@ class Service:
             "text": text,
             "chars": len(text),
             "truncated": truncated,
+        }
+
+    def _attachment_delete_local(self, params: dict) -> dict:
+        """Delete the downloaded file, keeping the attachment metadata row.
+
+        Only files inside ``<data-dir>/attachments`` may be removed; a path
+        that resolves outside that directory is rejected (a corrupted or
+        tampered ``local_path`` must never let the service unlink elsewhere).
+        """
+        attachment_id = _require_str(params, "id")
+        attachment = self.store.get_attachment(attachment_id)
+        if attachment is None:
+            raise MailCoreError(NOT_FOUND, "attachment not found")
+
+        freed_bytes = 0
+        local_path = str(attachment.get("path") or "").strip()
+        if local_path:
+            attachments_root = (self.data_dir / "attachments").resolve()
+            try:
+                target = Path(local_path).resolve()
+            except (OSError, RuntimeError):
+                raise bad_request("attachment path cannot be resolved") from None
+            try:
+                target.relative_to(attachments_root)
+            except ValueError:
+                raise bad_request(
+                    "attachment path is outside the attachments directory"
+                ) from None
+            if target.is_file():
+                try:
+                    freed_bytes = target.stat().st_size
+                    target.unlink()
+                except FileNotFoundError:
+                    freed_bytes = 0
+                except OSError:
+                    raise bad_request(
+                        "could not delete the attachment file"
+                    ) from None
+
+        if not self.store.clear_attachment_download(attachment_id):
+            raise MailCoreError(NOT_FOUND, "attachment not found")
+        return {
+            "deleted": True,
+            "id": attachment_id,
+            "freedBytes": int(freed_bytes),
         }
 
     # -- contacts ----------------------------------------------------------

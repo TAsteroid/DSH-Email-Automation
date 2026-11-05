@@ -115,6 +115,11 @@ window.__ModuleLoader__.load({
         templates: '模板',
         contacts: '通讯录',
         searchPlaceholder: '搜索联系人 / 主题 / 邮件内容',
+        searchFilesPlaceholder: '搜索文件名 / 来源邮件',
+        kbDeleteFile: '删除文件',
+        kbDeleteConfirmTitle: '删除这个本地文件？',
+        kbDeleteConfirmBody: '只删本地副本，附件元数据保留，之后可以重新下载。',
+        kbDeleted: '本地文件已删除',
         searchResults: '搜索结果',
         searchEmpty: '没有匹配的邮件',
         folderMissing: '没找到对应文件夹，先到设置里点一次「测试连接」把文件夹列表拉下来。',
@@ -363,6 +368,11 @@ window.__ModuleLoader__.load({
         templates: 'Templates',
         contacts: 'Contacts',
         searchPlaceholder: 'Search contacts, subjects, mail bodies',
+        searchFilesPlaceholder: 'Search file names and source mails',
+        kbDeleteFile: 'Delete file',
+        kbDeleteConfirmTitle: 'Delete this local file?',
+        kbDeleteConfirmBody: 'Only the local copy is removed; metadata stays so it can be downloaded again.',
+        kbDeleted: 'Local file deleted',
         searchResults: 'Search results',
         searchEmpty: 'No matching mail',
         folderMissing: 'Folder not found. Run "Test connection" in Settings once to load the folder list.',
@@ -3805,7 +3815,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 知识库：总结归档、已下载附件、联系人及其公司；右侧显示选中项详情。 */
-    function KnowledgeView({ t, status, accountId, onSelectAccount }) {
+    function KnowledgeView({ t, status, accountId, onSelectAccount, query }) {
       const accounts = (status && status.accounts) || []
       const [summaries, setSummaries] = React.useState([])
       const [attachments, setAttachments] = React.useState([])
@@ -3813,6 +3823,9 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = React.useState('')
       const [preview, setPreview] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
+      const [collapsed, setCollapsed] = React.useState({})
+      const [pendingDelete, setPendingDelete] = React.useState(null)
+      const [note, setNote] = React.useState(null)
 
       const load = React.useCallback(async () => {
         const params = accountId ? { accountId } : {}
@@ -3842,11 +3855,25 @@ window.__ModuleLoader__.load({
 
       const companies = [...new Set(contacts.map((item) => item.company).filter(Boolean))]
 
+      // 顶栏搜索在知识库页只过滤文件/总结/联系人
+      const needle = String(query || '').trim().toLowerCase()
+      const hit = (...values) => values.some((value) => String(value || '').toLowerCase().includes(needle))
+      const filteredSummaries = needle
+        ? summaries.filter((item) => hit(item.subject, item.summary, item.category))
+        : summaries
+      const filteredAttachments = needle
+        ? attachments.filter((item) => hit(item.filename, item.subject, item.fromAddr))
+        : attachments
+      const filteredContacts = needle
+        ? contacts.filter((item) => hit(item.name, item.email, item.company))
+        : contacts
+      const filteredCompanies = needle ? companies.filter((name) => hit(name)) : companies
+
       const groups = [
         {
           id: 'summaries',
-          title: `${t('kbSummaries')} · ${summaries.length}`,
-          items: summaries.map((item) => ({
+          title: `${t('kbSummaries')} · ${filteredSummaries.length}`,
+          items: filteredSummaries.map((item) => ({
             id: `sum:${item.id}`,
             title: item.subject || t('noSubject'),
             meta: [item.category, item.createdAt].filter(Boolean).join(' · '),
@@ -3854,17 +3881,18 @@ window.__ModuleLoader__.load({
         },
         {
           id: 'attachments',
-          title: `${t('kbFiles')} · ${attachments.length}`,
-          items: attachments.map((item) => ({
+          title: `${t('kbFiles')} · ${filteredAttachments.length}`,
+          items: filteredAttachments.map((item) => ({
             id: `att:${item.id}`,
             title: item.filename,
             meta: `${formatBytes(item.size)} · ${item.fetchedAt}`,
+            deletable: true,
           })),
         },
         {
           id: 'contacts',
-          title: `${t('kbContacts')} · ${contacts.length}`,
-          items: contacts.map((item) => ({
+          title: `${t('kbContacts')} · ${filteredContacts.length}`,
+          items: filteredContacts.map((item) => ({
             id: `con:${item.id}`,
             title: item.name || item.email || '(未命名)',
             meta: [item.company, item.email].filter(Boolean).join(' · '),
@@ -3872,8 +3900,8 @@ window.__ModuleLoader__.load({
         },
         {
           id: 'companies',
-          title: `${t('kbCompanies')} · ${companies.length}`,
-          items: companies.map((name) => ({ id: `cmp:${name}`, title: name, meta: '' })),
+          title: `${t('kbCompanies')} · ${filteredCompanies.length}`,
+          items: filteredCompanies.map((name) => ({ id: `cmp:${name}`, title: name, meta: '' })),
         },
       ]
 
@@ -3958,11 +3986,95 @@ window.__ModuleLoader__.load({
         return h(DetailPane, { t, titleKey: 'kbDetailTitle', hintKey: 'kbDetailHint' })
       })()
 
+      /** 删除本地文件副本（元数据保留，可重新下载）。 */
+      const deleteAttachment = async () => {
+        if (!pendingDelete) return
+        setBusy(true)
+        try {
+          await call('/attachments/delete', { id: pendingDelete.id })
+          setPendingDelete(null)
+          setSelected('')
+          setPreview(null)
+          setNote(t('kbDeleted'))
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      // 左列：分类可折叠；文件条目右侧带删除按钮
+      const listColumn = h(
+        'div',
+        { style: styles.listColumn },
+        groups.map((group) => {
+          const isCollapsed = collapsed[group.id] === true
+          return h(
+            'div',
+            { key: group.id },
+            h(
+              'button',
+              {
+                type: 'button',
+                onClick: () => setCollapsed((prev) => ({ ...prev, [group.id]: !isCollapsed })),
+                'aria-expanded': isCollapsed ? 'false' : 'true',
+                style: {
+                  ...styles.listHead,
+                  width: '100%',
+                  border: 'none',
+                  cursor: 'pointer',
+                  background: 'transparent',
+                },
+              },
+              h('span', { style: { fontSize: 11, marginRight: 6 } }, isCollapsed ? '▸' : '▾'),
+              group.title,
+            ),
+            isCollapsed
+              ? null
+              : group.items.length === 0
+                ? h('p', { style: { ...styles.muted, padding: '8px 16px', margin: 0 } }, t('emptyList'))
+                : group.items.map((item) =>
+                    h(
+                      'div',
+                      { key: item.id, style: { display: 'flex', alignItems: 'stretch' } },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          'aria-pressed': selected === item.id,
+                          onClick: () => selectItem(item.id),
+                          style:
+                            selected === item.id
+                              ? { ...styles.listItem, flex: 1, background: 'var(--dsw-alias-interactive-bg-hover)' }
+                              : { ...styles.listItem, flex: 1 },
+                        },
+                        h('span', null, item.title),
+                        item.meta ? h('span', { style: styles.listItemMeta }, item.meta) : null,
+                      ),
+                      item.deletable
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              style: { ...styles.btnSmall, margin: '6px 8px', flex: 'none' },
+                              onClick: () => setPendingDelete({ id: item.id.slice(4), filename: item.title }),
+                            },
+                            t('kbDeleteFile'),
+                          )
+                        : null,
+                    ),
+                  ),
+          )
+        }),
+        note ? h('p', { style: { ...styles.muted, padding: '6px 16px', margin: 0 } }, note) : null,
+      )
+
       const content = h(SplitPane, {
         storageKey: 'knowledge',
         spec: PANE_SPEC,
         label: t('resize'),
-        left: h(GroupList, { t, groups, selectedId: selected, onSelect: selectItem }),
+        left: listColumn,
         right: detail,
       })
 
@@ -3976,6 +4088,17 @@ window.__ModuleLoader__.load({
           left: h(AccountRail, { t, accounts, accountId, onSelect: onSelectAccount }),
           right: content,
         }),
+        pendingDelete
+          ? h(ConfirmDialog, {
+              t,
+              title: t('kbDeleteConfirmTitle'),
+              body: `${pendingDelete.filename || ''} · ${t('kbDeleteConfirmBody')}`,
+              confirmLabel: t('kbDeleteFile'),
+              busy,
+              onCancel: () => setPendingDelete(null),
+              onConfirm: deleteAttachment,
+            })
+          : null,
       )
     }
 
@@ -4644,7 +4767,8 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 顶栏 --------------------------------------------------------------
-    function TopBar({ t, status, onSync, syncing, query, onQueryChange, onCompose }) {
+    function TopBar({ t, status, tab, onSync, syncing, query, onQueryChange, onCompose }) {
+      const searchKey = tab === 'knowledge' ? 'searchFilesPlaceholder' : 'searchPlaceholder'
       const core = (status && status.core) || null
       const ok = Boolean(core && core.state === 'ready')
       const pending = (status && status.counters && status.counters.pendingAi) || 0
@@ -4685,8 +4809,8 @@ window.__ModuleLoader__.load({
           h('input', {
             style: styles.searchInput,
             value: query,
-            placeholder: t('searchPlaceholder'),
-            'aria-label': t('searchPlaceholder'),
+            placeholder: t(searchKey),
+            'aria-label': t(searchKey),
             onChange: (event) => onQueryChange(event.target.value),
           }),
         ),
@@ -4843,7 +4967,9 @@ window.__ModuleLoader__.load({
         accountId || (status && status.accounts && status.accounts.length > 0 ? status.accounts[0].id : undefined)
 
       let content
-      if (query.trim().length > 0) content = h(SearchView, { t, query: query.trim(), status })
+      if (tab === 'knowledge')
+        content = h(KnowledgeView, { t, status, accountId, onSelectAccount: setAccountId, query: query.trim() })
+      else if (query.trim().length > 0) content = h(SearchView, { t, query: query.trim(), status })
       else if (tab === 'inbox')
         content = h(InboxView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
       else if (tab === 'todo')
@@ -4859,9 +4985,6 @@ window.__ModuleLoader__.load({
       else if (tab === 'templates')
         content = h(TemplatesView, { t, status, onRefresh: refresh, accountId, onSelectAccount: setAccountId })
       else if (tab === 'contacts') content = h(ContactsView, { t, status, accountId, onSelectAccount: setAccountId })
-      else if (tab === 'ai') content = h(AiWorkbench, { t, status })
-      else if (tab === 'knowledge')
-        content = h(KnowledgeView, { t, status, accountId, onSelectAccount: setAccountId })
       else content = h(SettingsView, { t, status, onRefresh: refresh })
 
       return h(
@@ -4871,6 +4994,7 @@ window.__ModuleLoader__.load({
         h(TopBar, {
           t,
           status,
+          tab,
           onSync: syncAll,
           syncing: syncingAll,
           query,

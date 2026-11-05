@@ -2109,6 +2109,12 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('attachment.dismiss', { id }))
     })
 
+    // 删除本地文件副本（保留元数据，之后可重新下载）
+    route('/attachments/delete', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('attachment.deleteLocal', { id }))
+    })
+
     // 提取附件文本，供 Agent 阅读
     route('/attachments/text', async (body) => {
       const id = requireText(body.id, 'id')

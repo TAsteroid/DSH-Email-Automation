@@ -1480,6 +1480,21 @@ class Store:
             )
         return cursor.rowcount > 0
 
+    def clear_attachment_download(self, attachment_id: str) -> bool:
+        """Forget the downloaded file of one attachment (metadata row stays).
+
+        ``local_path`` / ``sha256`` / ``fetched_at`` are reset so the row shows
+        up as not-downloaded again and ``attachment.fetch`` can refetch it.
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE attachments "
+                "SET local_path = '', sha256 = '', fetched_at = '' "
+                "WHERE id = ?",
+                (attachment_id,),
+            )
+        return cursor.rowcount > 0
+
     def dismiss_attachment(self, attachment_id: str) -> Optional[str]:
         """Mark one attachment as handled; returns its ``dismissed_at``.
 

@@ -201,6 +201,7 @@ function handleMethod(method, params) {
       ],
     }
   }
+  if (method === 'attachment.deleteLocal') return { deleted: true, id: params.id, freedBytes: 2048 }
   if (method === 'attachment.dismiss') return { id: params.id, dismissedAt: '2026-11-05T00:00:00Z' }
   if (method === 'attachment.fetch') {
     return { id: params.id, path: 'C:\\data\\attachments\\msg_1\\报价表.xlsx', size: 2048, sha256: 'abc123', fetchedAt: '2026-11-04T12:00:00Z' }
@@ -848,6 +849,11 @@ const dismissNoId = await invoke('/api/dsh-mail/attachments/dismiss', { method: 
 check(dismissNoId && dismissNoId.status === 400, `附件已处理缺 id 应 400，实际 ${dismissNoId && dismissNoId.status}`)
 const dismissRoute = await invoke('/api/dsh-mail/attachments/dismiss', { method: 'POST', body: JSON.stringify({ id: 'att_1' }) })
 check(dismissRoute && dismissRoute.status === 200, `附件已处理应 200，实际 ${dismissRoute && dismissRoute.status}`)
+
+const deleteFileNoId = await invoke('/api/dsh-mail/attachments/delete', { method: 'POST', body: '{}' })
+check(deleteFileNoId && deleteFileNoId.status === 400, `删除文件缺 id 应 400，实际 ${deleteFileNoId && deleteFileNoId.status}`)
+const deleteFileRoute = await invoke('/api/dsh-mail/attachments/delete', { method: 'POST', body: JSON.stringify({ id: 'att_1' }) })
+check(deleteFileRoute && deleteFileRoute.status === 200, `删除文件应 200，实际 ${deleteFileRoute && deleteFileRoute.status}`)
 
 const fetchNoId = await invoke('/api/dsh-mail/attachments/fetch', { method: 'POST', body: '{}' })
 check(fetchNoId && fetchNoId.status === 400, `附件下载缺 id 应 400，实际 ${fetchNoId && fetchNoId.status}`)
