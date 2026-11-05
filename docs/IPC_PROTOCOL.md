@@ -592,6 +592,30 @@ POP3 结果：
 - `id` 不存在 → `NOT_FOUND`。
 - 标记后该附件不再出现在 `pendingOnly: true` 的列表里；非 `pendingOnly` 列表照常返回并带 `dismissedAt`。
 
+### `attachment.text`
+
+参数：`{"id": "att_xxx", "maxChars": 20000}`
+
+结果：
+
+```json
+{"id": "att_xxx", "filename": "报价.xlsx",
+ "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+ "kind": "xlsx", "text": "客户\t金额\n…", "chars": 120, "truncated": false}
+```
+
+- 把**已下载**的附件内容提取成 Agent 可读的纯文本，全部用 Python 标准库实现，不需要网络。
+- 必须先 `attachment.fetch`：`fetchedAt` 为空（或本地文件已丢失）→ `BAD_REQUEST`，message 提示先下载；附件 / 邮件不存在 → `NOT_FOUND`。
+- `maxChars` 缺省 20000、上限 100000（小于 1 → `BAD_REQUEST`）。超出按 `maxChars` 截断并置 `truncated: true`；`chars` 是**实际返回文本**的字符数。
+- `kind` 是实际使用的解析器，取值：`text` | `xlsx` | `docx` | `pdf`。
+- 支持的格式（按扩展名优先，其次按 `Content-Type` 归类）：
+  - `kind: "text"` — `.txt` / `.md` / `.csv` / `.json` / `.ics` / `.log`：按 UTF-8（容忍 BOM）读取，失败退回 GBK。
+  - `kind: "xlsx"` — `.xlsx`：ZIP 里读 `xl/sharedStrings.xml` 与 `xl/worksheets/*.xml`，输出 TSV——单元格用 `\t` 分隔、行用 `\n` 分隔；支持共享字符串、inlineStr、数字/布尔值。
+  - `kind: "docx"` — `.docx`：读 `word/document.xml`，每个段落一行。
+  - `kind: "pdf"` — `.pdf`：标准库小解析器，解 FlateDecode 流并提取 `Tj` / `TJ` 文本，只适用于**有文本层**的简单 PDF；提取不到（扫描件/纯图片）→ `BAD_REQUEST`，message 为「PDF 无可提取文本（可能是扫描件）」。
+- 其它扩展名/类型 → `BAD_REQUEST`，message 列出支持的扩展名。
+- 解析失败（损坏的 ZIP/XML/PDF、无法解码等）统一转成 `BAD_REQUEST`，message 只含错误类别，不返回文件路径或正文内容。
+
 ### `attachment.get`
 
 参数：`{"id": "att_xxx"}`
@@ -625,6 +649,7 @@ POP3 结果：
 - `maxBytes` 缺省 25 MiB，上限 100 MiB（超过按 100 MiB 处理；小于 1 → `BAD_REQUEST`）。元数据里的 `size` 或实际解码后的字节数超过 `maxBytes` → `BAD_REQUEST`，不落盘、不改记录。
 - 落盘路径：`<data-dir>/attachments/<messageId>/<安全文件名>`。文件名先去掉路径分隔符和控制字符、清理 `.` / `..`、限制长度（保留扩展名），空名用 `attachment`；同名文件自动加 `-2` / `-3` 后缀；任何情况下路径都不能逃出 `attachments` 目录。
 - 保存后计算 SHA-256 并写回 `local_path` / `sha256` / `fetched_at`；**重复 fetch 同一附件**直接返回已有文件（不重新联网、不改 `fetchedAt`）。
+- 下载成功后可用 [`attachment.text`](#attachmenttext) 把内容读成纯文本交给 Agent。
 - 失败：附件 / 邮件不存在 → `NOT_FOUND`；没有可用密码 → `CREDENTIAL_MISSING`；服务器拒绝、UIDVALIDITY 已变化、网络失败 → `IMAP_ERROR`。错误 message 不含密码。
 
 ### `attachment.backfill`

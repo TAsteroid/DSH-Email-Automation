@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import attachments, backup, crypto, delete, drafts, idle, imap_client, pop3_client, sender, smtp_client, summaries
+from . import attachment_text, attachments, backup, crypto, delete, drafts, idle, imap_client, pop3_client, sender, smtp_client, summaries
 from . import protocol
 from . import sync
 from .protocol import (
@@ -227,6 +227,7 @@ class Service:
             "attachment.fetch": self._attachment_fetch,
             "attachment.backfill": self._attachment_backfill,
             "attachment.dismiss": self._attachment_dismiss,
+            "attachment.text": self._attachment_text,
             "contact.list": self._contact_list,
             "contact.add": self._contact_add,
             "contact.update": self._contact_update,
@@ -846,6 +847,44 @@ class Service:
         if dismissed_at is None:
             raise MailCoreError(NOT_FOUND, "attachment not found")
         return {"dismissed": True, "dismissedAt": dismissed_at}
+
+    def _attachment_text(self, params: dict) -> dict:
+        """Extract the text an Agent can read from a downloaded attachment."""
+        attachment_id = _require_str(params, "id")
+        max_chars = _optional_int(
+            params, "maxChars", 20000, minimum=1, maximum=100000
+        )
+        attachment = self.store.get_attachment(attachment_id)
+        if attachment is None:
+            raise MailCoreError(NOT_FOUND, "attachment not found")
+        if not attachment.get("downloaded"):
+            raise bad_request(
+                "attachment is not downloaded yet; call attachment.fetch first"
+            )
+        path = Path(str(attachment.get("path") or ""))
+        if not path.is_file():
+            raise bad_request(
+                "attachment file is missing from the local cache; fetch it again"
+            )
+        try:
+            kind, text = attachment_text.extract(
+                path, attachment["filename"], attachment["contentType"]
+            )
+        except attachment_text.ExtractError as exc:
+            raise bad_request(str(exc)) from None
+
+        truncated = len(text) > max_chars
+        if truncated:
+            text = text[:max_chars]
+        return {
+            "id": attachment["id"],
+            "filename": attachment["filename"],
+            "contentType": attachment["contentType"],
+            "kind": kind,
+            "text": text,
+            "chars": len(text),
+            "truncated": truncated,
+        }
 
     # -- contacts ----------------------------------------------------------
 

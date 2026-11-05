@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import unittest
+import zipfile
 from email.header import Header
 from pathlib import Path
 
@@ -116,6 +118,28 @@ def _traversal_message() -> bytes:
         "ZXZpbA==",  # evil
     ]
     return _build_message([TEXT_PART, part], message_id="<evil@example.com>")
+
+
+_XLSX_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def _minimal_xlsx() -> bytes:
+    """A tiny workbook: one inline string, one shared string, two numbers."""
+    shared = f'<sst xmlns="{_XLSX_NS}"><si><t>Score</t></si></sst>'.encode(
+        "utf-8"
+    )
+    sheet = (
+        f'<worksheet xmlns="{_XLSX_NS}"><sheetData>'
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>姓名</t></is></c>'
+        '<c r="B1" t="s"><v>0</v></c></row>'
+        '<row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>90</v></c></row>'
+        "</sheetData></worksheet>"
+    ).encode("utf-8")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", shared)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buffer.getvalue()
 
 
 class AttachmentTests(unittest.TestCase):
@@ -372,6 +396,125 @@ class AttachmentTests(unittest.TestCase):
 
         # Without pendingOnly both copies (INBOX + Sent) are still listed.
         self.assertEqual(len(self._list(accountId=account_id)), 4)
+
+    # -- text extraction (standard library only) ---------------------------
+
+    def _downloaded_attachment(
+        self,
+        filename: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        downloaded: bool = True,
+    ) -> str:
+        store = self.service.store
+        if store.get_account("acc_text") is None:
+            store.add_account(
+                account_id="acc_text",
+                address="me@example.com",
+                imap_host="imap.example.com",
+                imap_port=993,
+                imap_security="ssl",
+                username="me@example.com",
+            )
+        uid = store.count_messages() + 1
+        store.insert_message(
+            account_id="acc_text",
+            folder="INBOX",
+            uidvalidity=1,
+            uid=uid,
+            message_id=f"<text{uid}@example.com>",
+            subject="附件文本",
+            attachments=[
+                {
+                    "filename": filename,
+                    "contentType": content_type,
+                    "size": len(data),
+                    "partId": "2",
+                }
+            ],
+        )
+        message = store._conn.execute(
+            "SELECT id FROM messages ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        attachment = next(
+            item
+            for item in store.list_attachments(
+                message_id=message["id"], include_inline=True
+            )
+            if item["filename"] == filename
+        )
+        if downloaded:
+            path = Path(self._tmp.name) / filename
+            path.write_bytes(data)
+            store.set_attachment_download(
+                attachment["id"],
+                local_path=str(path),
+                sha256=hashlib.sha256(data).hexdigest(),
+                fetched_at="2026-11-05T01:00:00Z",
+            )
+        return attachment["id"]
+
+    def _text(self, attachment_id: str, **params) -> dict:
+        return self.service.dispatch(
+            "attachment.text", {"id": attachment_id, **params}
+        )
+
+    def test_text_reads_utf8_and_gbk_and_truncates(self):
+        attachment_id = self._downloaded_attachment(
+            "notes.txt",
+            "第一行\n第二行 hello".encode("utf-8-sig"),
+            content_type="text/plain",
+        )
+        result = self._text(attachment_id)
+        self.assertEqual(result["kind"], "text")
+        self.assertEqual(result["filename"], "notes.txt")
+        self.assertEqual(result["text"], "第一行\n第二行 hello")
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["chars"], len(result["text"]))
+
+        truncated = self._text(attachment_id, maxChars=4)
+        self.assertEqual(truncated["text"], "第一行\n")
+        self.assertEqual(truncated["chars"], 4)
+        self.assertTrue(truncated["truncated"])
+
+        gbk_id = self._downloaded_attachment(
+            "legacy.log", "中文GBK内容".encode("gbk"), content_type="text/plain"
+        )
+        self.assertEqual(self._text(gbk_id)["text"], "中文GBK内容")
+
+    def test_text_extracts_xlsx_as_tsv(self):
+        attachment_id = self._downloaded_attachment(
+            "表格.xlsx",
+            _minimal_xlsx(),
+            content_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            ),
+        )
+        result = self._text(attachment_id)
+        self.assertEqual(result["kind"], "xlsx")
+        self.assertEqual(result["text"], "姓名\tScore\n1\t90")
+        self.assertFalse(result["truncated"])
+
+    def test_text_requires_a_downloaded_attachment(self):
+        attachment_id = self._downloaded_attachment(
+            "未下载.txt", b"hello", content_type="text/plain", downloaded=False
+        )
+        with self.assertRaises(MailCoreError) as context:
+            self._text(attachment_id)
+        self.assertEqual(context.exception.code, "BAD_REQUEST")
+        self.assertIn("download", context.exception.message)
+
+    def test_text_rejects_unsupported_type(self):
+        attachment_id = self._downloaded_attachment(
+            "photo.png", b"\x89PNG\r\n", content_type="image/png"
+        )
+        with self.assertRaises(MailCoreError) as context:
+            self._text(attachment_id)
+        self.assertEqual(context.exception.code, "BAD_REQUEST")
+        self.assertIn("supported", context.exception.message)
+        self.assertIn(".pdf", context.exception.message)
 
 
 class AttachmentBackfillTests(unittest.TestCase):

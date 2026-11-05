@@ -1501,6 +1501,70 @@ export function apply(ctx, config) {
     'mail: register mail_attachments tool',
   )
 
+  ctx.effect(
+    () =>
+      ctx.tools.register({
+        name: 'mail_attachment_text',
+        description:
+          'Read the text of one downloaded attachment (PDF text layer, xlsx sheets, docx paragraphs, plain text files). Use mail_attachments first to get its id; the file must have been downloaded by the user in the Mail panel.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            attachmentId: { type: 'string', description: 'Attachment id from mail_attachments' },
+            maxChars: { type: 'number', description: 'Max characters to return (default 20000, cap 100000)' },
+          },
+          required: ['attachmentId'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              available: { type: 'boolean' },
+              reason: { type: 'string' },
+              filename: { type: 'string' },
+              kind: { type: 'string' },
+              chars: { type: 'number' },
+              truncated: { type: 'boolean' },
+              text: { type: 'string' },
+            },
+            required: ['available'],
+          },
+          render(_args, value) {
+            if (!value.available) return [{ type: 'text', text: `attachment text unavailable: ${value.reason ?? 'unknown'}` }]
+            return [
+              {
+                type: 'text',
+                text: `${value.filename} (${value.kind}, ${value.chars} chars${value.truncated ? ', truncated' : ''})\n${value.text}`,
+              },
+            ]
+          },
+        },
+        timeoutMs: 60_000,
+        isConcurrencySafe: () => true,
+        async execute(args) {
+          const params = { id: args.attachmentId }
+          if (args.maxChars !== undefined) params.maxChars = args.maxChars
+          const result = await callCore('attachment.text', params, { timeoutMs: 60_000 })
+          if (!result.available) {
+            return { available: false, reason: result.reason.message, filename: '', kind: '', chars: 0, truncated: false, text: '' }
+          }
+          const value = result.value || {}
+          return {
+            available: true,
+            reason: '',
+            filename: value.filename ?? '',
+            kind: value.kind ?? '',
+            chars: Number(value.chars) || 0,
+            truncated: Boolean(value.truncated),
+            text: value.text ?? '',
+          }
+        },
+      }),
+    'mail: register mail_attachment_text tool',
+  )
+
   // ---- 待办总结三件套 -------------------------------------------------------
 
   const SUMMARY_CATEGORIES = ['报价询价', '合同协议', '会议安排', '项目进展', '发票付款', '人事招聘', '通知公告', '其他']
@@ -1968,6 +2032,14 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('attachment.dismiss', { id }))
     })
 
+    // 提取附件文本，供 Agent 阅读
+    route('/attachments/text', async (body) => {
+      const id = requireText(body.id, 'id')
+      const params = { id }
+      if (body.maxChars !== undefined) params.maxChars = Number(body.maxChars)
+      return requireCoreResult(await callCore('attachment.text', params, { timeoutMs: 60_000 }))
+    })
+
     // 老邮件补附件元数据（v8 之前同步的邮件没有附件记录）
     route('/attachments/backfill', async (body) => {
       const params = {}
@@ -2035,6 +2107,11 @@ export function apply(ctx, config) {
         }
         await new Promise((resolve) => setTimeout(resolve, 300))
         copyFileSync(sourceDb, targetDb)
+        // SQLite 是 WAL 模式：最近的写入可能还在 -wal 里，必须一起复制
+        for (const suffix of ['-wal', '-shm']) {
+          const from = `${sourceDb}${suffix}`
+          if (existsSync(from)) copyFileSync(from, `${targetDb}${suffix}`)
+        }
         for (const extra of ['attachments', 'backups']) {
           const from = join(dataDir, extra)
           const to = join(target, extra)
