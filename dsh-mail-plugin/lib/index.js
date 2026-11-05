@@ -1996,8 +1996,7 @@ export function apply(ctx, config) {
 
       // 改配置会触发插件重载，Core 随之用新目录重启
       await ctx.configEditor.edit(entry, (current) => ({ ...current, dataDir: target }))
-      return { path: target, dbPath: targetDb, moved: copied }
-    })
+      return { path: target, dbPath: targetDb, moved: copied }    })
 
     // ---- 邮件工作区 & 联系人会话 -------------------------------------------
     route('/config/workspace', async () => ({ path: mailWorkspacePath(), workspaceId: mailWorkspaceId() }))
@@ -2009,8 +2008,11 @@ export function apply(ctx, config) {
       if (typeof body.path === 'string' && body.path.trim()) next.mailWorkspace = body.path.trim()
       if (typeof body.workspaceId === 'string') next.mailWorkspaceId = body.workspaceId.trim()
       if (Object.keys(next).length === 0) throw Object.assign(new Error('nothing to update'), { code: 'BAD_REQUEST' })
+      // 先在写配置前算好返回值：配置重载是异步的，这时读 config 还是旧值
+      const nextPath = typeof next.mailWorkspace === 'string' ? next.mailWorkspace : mailWorkspacePath()
+      const nextId = typeof next.mailWorkspaceId === 'string' ? next.mailWorkspaceId : mailWorkspaceId()
       await ctx.configEditor.edit(entry, (current) => ({ ...current, ...next }))
-      return { path: mailWorkspacePath(), workspaceId: mailWorkspaceId() }
+      return { path: nextPath, workspaceId: nextId }
     })
 
     route('/sessions/lookup', async (body) => {

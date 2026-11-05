@@ -23,6 +23,8 @@ window.__ModuleLoader__.load({
 
     const NS = 'mail'
     const PANEL_ID = 'mail-workspace'
+    /** 组件定义在 apply 之外，宿主上下文由 apply 注入到这个模块级变量。 */
+    let hostCtx = null
     const API = '/api/dsh-mail'
 
     // ---- 列宽 --------------------------------------------------------------
@@ -2383,8 +2385,8 @@ window.__ModuleLoader__.load({
         const accountId = item.accountId || (accounts[0] && accounts[0].id) || ''
 
         try {
-          const sessions = ctx.get ? ctx.get('sessions') : undefined
-          const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
+          const sessions = hostCtx && hostCtx.get ? hostCtx.get('sessions') : undefined
+          const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
           if (!sessions || !uiWorkspace) throw new Error('session services unavailable')
 
           const snapshot = sessions.list && sessions.list.getSnapshot ? sessions.list.getSnapshot() : null
@@ -2414,8 +2416,8 @@ window.__ModuleLoader__.load({
           } catch {
             workspaceId = ''
           }
-          if (!workspaceId && ctx.workspaces && workspacePath) {
-            const created = await ctx.workspaces.create({ path: workspacePath })
+          if (!workspaceId && hostCtx && hostCtx.workspaces && workspacePath) {
+            const created = await hostCtx.workspaces.create({ path: workspacePath })
             workspaceId = created && created.id ? created.id : ''
             if (workspaceId) {
               try {
@@ -4044,33 +4046,50 @@ window.__ModuleLoader__.load({
     }
 
     /** 数据库位置：展示路径 + 选择目录（切换时复制数据并重启 Core）。 */
-    function DataDirField({ t, onRefresh }) {
-      const [state, setState] = React.useState({ path: '', dbPath: '' })
+    /** 通用路径设置：可直接手填 + 保存；宿主支持目录选择器时再额外给一个按钮。 */
+    function PathField({ t, title, hint, pickLabel, savedLabel, loadPath, savePath, onRefresh }) {
+      const [path, setPath] = React.useState('')
+      const [draft, setDraft] = React.useState('')
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
 
+      const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
+      const canPick = Boolean(uiWorkspace && typeof uiWorkspace.pickDirectory === 'function')
+
       React.useEffect(() => {
-        call('/config/data-dir', {})
-          .then((value) => setState({ path: value.path || '', dbPath: value.dbPath || '' }))
+        loadPath()
+          .then((value) => {
+            setPath(value.path || '')
+            setDraft(value.path || '')
+          })
           .catch(() => {})
       }, [])
 
-      const pick = async () => {
-        if (busy) return
-        const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
-        if (!uiWorkspace || typeof uiWorkspace.pickDirectory !== 'function') {
-          setNote(t('todoSessionFailed'))
-          return
+      const apply = async (next) => {
+        const target = String(next || '').trim()
+        if (!target || busy) return
+        setBusy(true)
+        setNote(null)
+        try {
+          const value = await savePath(target)
+          setPath(value.path || target)
+          setDraft(value.path || target)
+          setNote(savedLabel)
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
         }
+      }
+
+      const pick = async () => {
+        if (!canPick || busy) return
         setBusy(true)
         setNote(null)
         try {
           const dir = await uiWorkspace.pickDirectory()
-          if (!dir) return
-          const value = await call('/config/data-dir/set', { path: dir })
-          setState({ path: value.path || dir, dbPath: value.dbPath || '' })
-          setNote(value.moved ? t('dataDirSaved') : t('dataDirSaved'))
-          if (onRefresh) onRefresh()
+          if (dir) await apply(dir)
         } catch (error) {
           setNote(error.message)
         } finally {
@@ -4084,71 +4103,52 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: styles.row },
-          h('span', { style: styles.rowKey }, t('dataDirTitle')),
+          h('span', { style: styles.rowKey }, title),
           h(
             'span',
-            { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
-            h('span', { style: { ...styles.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, state.path || '—'),
-            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: pick }, t('dataDirPick')),
+            { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 } },
+            h('input', {
+              type: 'text',
+              value: draft,
+              spellCheck: false,
+              placeholder: path,
+              onChange: (event) => setDraft(event.target.value),
+              style: { ...styles.textInput, flex: 1, minWidth: 0, padding: '4px 8px' },
+            }),
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => apply(draft) }, t('save')),
+            canPick ? h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: pick }, pickLabel) : null,
           ),
         ),
-        h('p', { style: { ...styles.muted, margin: 0 } }, t('dataDirHint')),
+        h('p', { style: { ...styles.muted, margin: 0 } }, hint),
         note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
       )
     }
 
+    function DataDirField({ t, onRefresh }) {
+      return h(PathField, {
+        t,
+        title: t('dataDirTitle'),
+        hint: t('dataDirHint'),
+        pickLabel: t('dataDirPick'),
+        savedLabel: t('dataDirSaved'),
+        loadPath: () => call('/config/data-dir', {}),
+        savePath: (path) => call('/config/data-dir/set', { path }),
+        onRefresh,
+      })
+    }
+
     /** 邮件工作区：展示路径 + 让用户选目录。 */
     function WorkspaceField({ t, onRefresh }) {
-      const [state, setState] = React.useState({ path: '', workspaceId: '' })
-      const [note, setNote] = React.useState(null)
-      const [busy, setBusy] = React.useState(false)
-
-      React.useEffect(() => {
-        call('/config/workspace', {})
-          .then((value) => setState({ path: value.path || '', workspaceId: value.workspaceId || '' }))
-          .catch(() => {})
-      }, [])
-
-      const pick = async () => {
-        if (busy) return
-        const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
-        if (!uiWorkspace || typeof uiWorkspace.pickDirectory !== 'function') {
-          setNote(t('todoSessionFailed'))
-          return
-        }
-        setBusy(true)
-        try {
-          const dir = await uiWorkspace.pickDirectory()
-          if (!dir) return
-          // 换目录后旧 workspaceId 失效，清空让下次自动重建
-          const next = await call('/config/workspace/set', { path: dir, workspaceId: '' })
-          setState({ path: next.path || dir, workspaceId: next.workspaceId || '' })
-          setNote(t('workspaceSaved'))
-          if (onRefresh) onRefresh()
-        } catch (error) {
-          setNote(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-
-      return h(
-        'div',
-        null,
-        h(
-          'div',
-          { style: styles.row },
-          h('span', { style: styles.rowKey }, t('workspaceTitle')),
-          h(
-            'span',
-            { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
-            h('span', { style: { ...styles.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, state.path || '—'),
-            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: pick }, t('workspacePick')),
-          ),
-        ),
-        h('p', { style: { ...styles.muted, margin: 0 } }, t('workspaceHint')),
-        note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
-      )
+      return h(PathField, {
+        t,
+        title: t('workspaceTitle'),
+        hint: t('workspaceHint'),
+        pickLabel: t('workspacePick'),
+        savedLabel: t('workspaceSaved'),
+        loadPath: () => call('/config/workspace', {}),
+        savePath: (path) => call('/config/workspace/set', { path, workspaceId: '' }),
+        onRefresh,
+      })
     }
 
     function SettingsView({ t, status, onRefresh }) {
@@ -4325,7 +4325,7 @@ window.__ModuleLoader__.load({
               })
               notification.onclick = () => {
                 try {
-                  ctx.layout.selectPanel(PANEL_ID)
+                  if (hostCtx && hostCtx.layout) hostCtx.layout.selectPanel(PANEL_ID)
                   setTab('todo')
                   window.focus()
                 } catch {
@@ -4449,6 +4449,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      hostCtx = ctx
       const t = ctx.locale ? ctx.locale.bind(NS) : (key) => key
 
       if (ctx.locale && typeof ctx.locale.register === 'function') {
