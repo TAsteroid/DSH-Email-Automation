@@ -32,6 +32,19 @@
 - 子进程**不得**在 stdout 输出任何非协议内容（`print()` 一律写 stderr）。
 - 未知字段忽略；缺少必填字段返回 `BAD_REQUEST`。
 
+## 事件行
+
+除「一请求一响应」之外，子进程还会**主动**推送事件行（目前只有 IMAP IDLE 产生）。事件行与响应共用同一个 stdout 和同一把写锁，因此一条事件行绝不会和一条响应行交错：
+
+```json
+{"event": "mail.new", "accountId": "acc_xxx", "stored": 3}
+```
+
+- 事件行**没有** `id` / `ok` / `result`，用 `event` 字段与响应区分；父进程解析每一行后先看有没有 `event`。
+- `mail.new`：IDLE 收到新邮件通知、且一次 INBOX 增量同步成功后才发一条；`stored` 是本次真正新增入库的邮件数（可能为 `0`，表示服务器有变化但本地没有新行）。
+- 同步失败**不发**事件，只更新 `idle.status` 里对应 worker 的 `state`。
+- 事件不是响应，不需要（也不能）回包。
+
 ## 错误码
 
 | code | 含义 |
@@ -195,6 +208,48 @@ POP3 结果：
 结果：`{"accountId": "acc_xxx", "folder": "INBOX", "removed": 42}`
 
 删除该文件夹的本地副本并把同步游标清零，下一次 `sync.run` 从头重拉。用于「本地索引和服务器对不上」的场景（例如改了同步窗口之后）。
+
+### `idle.start`
+
+参数：`{"accountId": "acc_xxx"}`（可省略 = 所有账号）
+
+结果：
+
+```json
+{"started": ["acc_xxx"], "skipped": ["acc_pop3"]}
+```
+
+- 为每个**启用的 IMAP 账号**启动一个后台 IDLE 线程（POP3 不启动；没有可用密码的账号也不会启动）。
+- `accountId` 省略时为全部账号启动；`started` 是本次真正启动的账号，`skipped` 是 POP3 / 已禁用 / 已在运行 / 没有凭据而跳过的账号。
+- 显式指定不存在的账号 → `NOT_FOUND`。
+- IDLE 线程：`LOGIN` → `SELECT INBOX` → `IDLE`；socket 超时 **240 秒**（短于服务器约 5 分钟的断连时间），超时后主动发 `DONE` 并重新 `IDLE`；断连/异常按 1s→60s 指数退避重连，线程不退出。
+- 收到 `* n EXISTS` → 用 Service 锁跑一次 **INBOX 增量同步**，成功后推送 [`mail.new`](#事件行) 事件并继续 IDLE；失败只更新状态、不推事件。
+
+### `idle.stop`
+
+参数：`{"accountId": "acc_xxx"}`（可省略 = 全部）
+
+结果：`{"stopped": ["acc_xxx"]}`
+
+- 向选中的 worker 发 `DONE`、关闭连接并让线程退出；未在运行的账号不出现在 `stopped` 里（不报错）。
+- `shutdown` 会停止所有 IDLE 线程。
+
+### `idle.status`
+
+参数：`{}`
+
+结果：
+
+```json
+{"workers": [
+  {"accountId": "acc_xxx", "state": "idling",
+   "lastEventAt": "2026-11-04T12:00:00Z", "reconnects": 0}
+]}
+```
+
+- `state`：`connecting` | `connected` | `idling` | `error` | `stopped`。
+- `lastEventAt`：最近一次收到 `* n EXISTS` 的时间（UTC，空串表示还没有收到过）；`reconnects`：断线重连次数。
+- 只返回当前正在运行的 worker；`idle.stop` 之后数组为空。
 
 ### `message.list`
 

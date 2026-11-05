@@ -26,7 +26,7 @@
 |---|---|---|---|
 | Phase 0 插件勘察 | 兼容性文档 + 最小插件 + 三项验收 | ✅ 完成 | `DSH_PLUGIN_COMPATIBILITY.md`；`mail_status` 工具、`main` 面板、`sidebar.panellist` 均实测 |
 | Phase 1 Mail Core 基础 | 服务可启停、库可迁移、API 认证、任务队列可恢复 | ⚠️ 大部分 | Core 由插件 `ctx.subprocess` 拉起（随 DSH 启停）；schema v1→v4 迁移；**持久化任务队列未做**（同步是同步调用） |
-| Phase 2 连接与同步 | IMAP/IDLE/增量、UIDVALIDITY、去重、线程关联 | ⚠️ 大部分 | IMAP + POP3 增量同步、UIDVALIDITY 重置、幂等去重、多账户隔离、**线程关联（v7）** ✅；**IDLE 未做**（轮询） | ⚠️ 大部分 | IMAP + POP3 增量同步、UIDVALIDITY 重置、幂等去重、多账户数据隔离；**IDLE 未做**（5 分钟轮询）；**线程关联未做** |
+| Phase 2 连接与同步 | IMAP/IDLE/增量、UIDVALIDITY、去重、线程关联 | ✅ 完成 | IMAP + POP3 增量同步、UIDVALIDITY 重置、幂等去重、多账户隔离、线程关联（v7）、**IMAP IDLE 实时推送**；POP3 保留轮询 |
 | Phase 3 解析/缓存/知识库 | MIME 解析、FTS5、30 天缓存、备份 | ✅ 主体完成 | MIME 解析、FTS5（含中文子串回退）✅；**历史回溯** ✅（按日期向前拉取）；**备份** ✅（迁移前自动 + 手动，保留 10 份）；**30 天清理被 Phase 4 阻塞**（见第 5 节） | ⚠️ 部分 | MIME 解析、FTS5（+ 中文子串回退）✅；**30 天缓存/历史回溯未做**；**备份未做** |
 | Phase 4 AI 工作流 | Agent Adapter、摘要/分类/提取/待办 | ❌ 未做 | 无 Agent 调用通道（见第 5 节） |
 | Phase 5 草稿与审批 | 草稿版本、审批哈希、SMTP 发送、删除/移动 | ✅ 发送闭环完成 | `draft.*` / `approval.*` / `action.execute`；哈希绑定、过期、幂等、审计；`scripts/e2e_send.py` 全链路实测；删除/移动等受控操作未做 |
@@ -44,7 +44,7 @@
 |---|---|---|---|
 | §1.3 / §11.2 | DSH 关闭后继续收信、用任务计划程序开机启动 | **放弃**，只在 DSH 运行时同步，启动补拉 | 宿主 timer/subprocess 随 DSH 退出终止 |
 | §4.1 | 账户字段含 `credential_reference` | 改为 `password_blob`（DPAPI 密文）+ `protocol` | 实际加密方式不同 |
-| §4.2 | IMAP IDLE + 指数退避重连 | **只做轮询**（默认 5 分钟） | IDLE 未实现 |
+| §4.2 | IMAP IDLE + 指数退避重连 | IMAP 走 IDLE（阿里邮箱约 5 分钟断连，240 秒主动重发）；POP3 仍轮询 | 按阿里云官方示例实现 |
 | §4.4 | AI 自动流水线 | **未实现** | 无 Agent 调用通道 |
 | §5.1 | 13 个工具 | 实际 11 个：`mail_status` `mail_accounts` `mail_folders` `mail_sync` `mail_messages` `mail_message` `mail_search` `mail_contacts` `mail_draft_save` `mail_request_approval` `mail_send_draft` | 其余依赖 AI 阶段 |
 | §5.3 | 6 个 DSH 事件 | **不实现** | 宿主无插件→Agent 事件通道 |
@@ -93,7 +93,7 @@
 | 1 | DSH 插件兼容性调查文档 | ✅ |
 | 2 | Mail Core Windows 后台服务 | ⚠️ 子进程形式，非独立服务 |
 | 3 | 多邮箱账户配置和凭据保护 | ✅ DPAPI；UI 目前只用第一个账户 |
-| 4 | IMAP IDLE 与增量同步 | ⚠️ 仅增量 + 轮询 |
+| 4 | IMAP IDLE 与增量同步 | ✅ IDLE + 增量（POP3 轮询） |
 | 5 | 邮件解析、去重和线程关联 | ✅ 线程关联 v7（引用链归并，跨账户不串） |
 | 6 | SQLite 知识库与 FTS5 搜索 | ⚠️ FTS5 ✅，知识库（实体）❌ |
 | 7 | AI 摘要、分类和结构化信息提取 | ❌ |
@@ -118,7 +118,7 @@
    若要真自动化（新邮件 → 自动摘要），需要 DSH 提供调用接口，或由 Core 直接调模型 API（等于绕过 DSH Agent，要单独授权与计费口径）。
 2. **发送与审批**（Phase 5）已闭环，安全模型见第 7 节。剩余：删除/移动等其它受控操作尚未走审批。
 3. **30 天缓存与回溯**（§8）。历史回溯已实现（`history.backfill`，按日期向前拉取）；**自动清理原文暂缓** —— §8.1 要求「摘要/分类已写入知识库」才允许删本地原文，而那依赖 Phase 4 的 AI 能力。现在删原文会违反计划书，故保持全量保留。
-4. **IDLE**（§4.2）。当前 5 分钟轮询；是否值得做取决于能否接受最多 5 分钟延迟。
+4. **IDLE**（§4.2）已实现：IMAP 账号由 Core 挂 IDLE 长连接（阿里邮箱约 5 分钟断连，240 秒主动 DONE 重发），收到 `EXISTS` 后自动增量同步并通过事件通知插件；POP3 账号仍按「自动同步间隔」轮询。
 5. **多账户 UI**（§1.3）。数据层支持多账户，界面目前固定用第一个。
 6. **自动同步范围**。INBOX / 已发送 / 草稿 / 已删除 / 垃圾邮件五类已纳入心跳与顶栏同步；其余自定义文件夹仍需手动同步。
 7. **Agent 对话框形态**。用户已确认最终要改成与 DSH 主对话框一致的形态（输入框 + 工具行 + 发送），当前是提示词复制式的简化版，等宿主提供注入接口后再改。

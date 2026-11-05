@@ -579,12 +579,16 @@ def add_minutes(timestamp: str, minutes: int) -> str:
 
 
 class Store:
-    """Thin wrapper over one SQLite connection (single-threaded service)."""
+    """Thin wrapper over one SQLite connection (shared by the service threads)."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+        # The IDLE worker thread runs the IDLE-triggered sync, so the
+        # connection is created in one thread and used from another.  Safety
+        # comes from Service._lock (RLock), which serialises every RPC handler
+        # and the IDLE callback, never from sqlite3's per-thread check.
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")

@@ -181,12 +181,23 @@ export function apply(ctx, config) {
       graceMs: 5000,
     })
 
+  /** Core 主动推送的事件（当前只有 IDLE 收到新邮件）。 */
+  let lastCoreEvent = null
+  let lastCoreEventAt = ''
+
   const coreOptions = () => ({
     spawn: spawnCore,
     argv: [python, '-m', 'mail_core', '--data-dir', dataDir],
     cwd: coreDir,
     env: { ...process.env, PYTHONUNBUFFERED: '1', MAIL_CORE_DATA_DIR: dataDir },
     log,
+    onEvent(event) {
+      lastCoreEvent = event
+      lastCoreEventAt = new Date().toISOString()
+      if (event.event === 'mail.new') {
+        log(`idle: new mail on ${event.accountId} (stored=${event.stored ?? 0})`)
+      }
+    },
   })
 
   let core = createCoreClient(coreOptions())
@@ -204,6 +215,12 @@ export function apply(ctx, config) {
     await core.handshake()
     ready = true
     readyError = null
+    // IMAP 账号走 IDLE 实时推送；POP3 没有 IDLE，靠心跳轮询
+    try {
+      await core.request('idle.start', {})
+    } catch (error) {
+      log(`idle.start skipped: ${error?.message ?? error}`)
+    }
   }
 
   /** 统一把 Core 调用包成 { available, value | reason }，工具和路由共用。 */
@@ -320,8 +337,8 @@ export function apply(ctx, config) {
     }
   }
 
-  /** 同步所有启用账号的 INBOX；已经在跑时直接跳过（界面按钮与心跳共用）。 */
-  async function syncAllAccounts() {
+  /** 同步所有启用账号；auto=true 时只同步 POP3（IMAP 由 IDLE 推送）。 */
+  async function syncAllAccounts({ auto = false } = {}) {
     if (syncing) return { skipped: true, accounts: [] }
     if (!ready) {
       try {
@@ -336,7 +353,8 @@ export function apply(ctx, config) {
       const list = await core.request('account.list', {})
       for (const account of list?.accounts ?? []) {
         if (account.enabled === false) continue
-        // 收件箱 + 发件箱 + 草稿 + 已删除 + 垃圾邮件：各页签都要跟着更新
+        // 自动模式只处理 POP3：IMAP 账号已经挂着 IDLE，不需要轮询
+        if (auto && account.protocol !== 'pop3') continue
         const targets = await autoSyncFolders(account.id)
         for (const folder of targets) {
           try {
@@ -475,6 +493,10 @@ export function apply(ctx, config) {
         pending: (todos.available && todos.value?.todos) || [],
       },
       lastSyncAt: (sync.available && sync.value?.lastSyncAt) || '',
+      idle: {
+        lastEventAt: lastCoreEventAt,
+        lastEvent: lastCoreEvent,
+      },
     }
   }
 
@@ -2031,6 +2053,9 @@ export function apply(ctx, config) {
 
     route('/sync/all', async () => syncAllAccounts())
 
+    // 诊断用：IDLE 工作线程状态
+    route('/idle/status', async () => requireCoreResult(await callCore('idle.status', {})))
+
     // ---- 线程 / 历史回溯 ---------------------------------------------------
     route('/threads', async (body) => {
       const params = {}
@@ -2085,7 +2110,7 @@ export function apply(ctx, config) {
         }
       }
       if (!ready) return
-      await syncAllAccounts()
+      await syncAllAccounts({ auto: true })
     }
     void tick()
     const interval = syncIntervalMs(config)

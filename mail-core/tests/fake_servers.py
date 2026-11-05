@@ -126,6 +126,10 @@ class _LoopbackServer:
         self.host = "127.0.0.1"
         self.port = int(self._listener.getsockname()[1])
         self.commands: list[str] = []
+        # When true, connections are handled in their own daemon threads.
+        # Only the IMAP fake needs this (an IDLE connection plus the sync
+        # connection the IDLE callback opens); the default stays serial.
+        self.concurrent = False
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -158,16 +162,26 @@ class _LoopbackServer:
                 continue
             except OSError:
                 return
+            if self.concurrent:
+                threading.Thread(
+                    target=self._handle_connection,
+                    args=(connection,),
+                    daemon=True,
+                ).start()
+            else:
+                self._handle_connection(connection)
+
+    def _handle_connection(self, connection: socket.socket) -> None:
+        try:
+            connection.settimeout(5.0)
+            self.handle(connection)
+        except OSError:
+            pass
+        finally:
             try:
-                connection.settimeout(5.0)
-                self.handle(connection)
+                connection.close()
             except OSError:
                 pass
-            finally:
-                try:
-                    connection.close()
-                except OSError:
-                    pass
 
     def handle(self, connection: socket.socket) -> None:  # pragma: no cover
         raise NotImplementedError
@@ -498,8 +512,10 @@ class FakeImapServer(_LoopbackServer):
         folder_lines: list[bytes] | None = None,
         copy_noop: bool = False,
         expunge_noop: bool = False,
+        concurrent: bool = False,
     ) -> None:
         super().__init__()
+        self.concurrent = bool(concurrent)
         self.messages = (
             list(messages)
             if messages is not None
@@ -531,6 +547,12 @@ class FakeImapServer(_LoopbackServer):
         self._pending_deleted: dict[str, set[int]] = {}
         self._mailbox = ""
         self._next_uid = len(self.messages) + 1
+        # IDLE: the test can push an untagged ``* n EXISTS`` while a client
+        # is idling, then ``DONE`` returns the tagged reply.
+        self.idle_count = 0
+        self.idle_event = threading.Event()
+        self._idle_connection: socket.socket | None = None
+        self._idle_tag = ""
 
     # -- protocol helpers --------------------------------------------------
 
@@ -541,6 +563,17 @@ class FakeImapServer(_LoopbackServer):
 
     def _ok(self, connection: socket.socket, tag: str, text: str) -> None:
         self._send(connection, f"{tag} OK {text}\r\n")
+
+    def push_exists(self, count: int) -> bool:
+        """Push ``* <count> EXISTS`` to the idling client (from the test)."""
+        connection = self._idle_connection
+        if connection is None:
+            return False
+        try:
+            connection.sendall(f"* {int(count)} EXISTS\r\n".encode("ascii"))
+            return True
+        except OSError:
+            return False
 
     def _current_uids(self) -> list[int]:
         uids = set(range(1, len(self.messages) + 1))
@@ -626,6 +659,30 @@ class FakeImapServer(_LoopbackServer):
                     if removed:
                         self._send(connection, f"* {removed} EXPUNGE\r\n")
                     self._ok(connection, tag, "EXPUNGE completed")
+                elif command == "IDLE":
+                    self.idle_count += 1
+                    self._idle_connection = connection
+                    self._idle_tag = tag
+                    self._send(connection, b"+ idling\r\n")
+                    self.idle_event.set()
+                    # The client leaves IDLE only by sending DONE; the test
+                    # may push untagged EXISTS lines in the meantime.
+                    connection.settimeout(60.0)
+                    while not self._stopped.is_set():
+                        raw = stream.readline()
+                        if not raw:
+                            return
+                        idle_line = raw.decode("ascii", "replace").strip()
+                        if not idle_line:
+                            continue
+                        self.commands.append(idle_line)
+                        if idle_line.upper() == "DONE":
+                            self._send(
+                                connection, f"{tag} OK IDLE terminated\r\n"
+                            )
+                            break
+                    self._idle_connection = None
+                    self._idle_tag = ""
                 elif command == "LOGOUT":
                     self._send(connection, b"* BYE fake IMAP server logging out\r\n")
                     self._ok(connection, tag, "LOGOUT completed")

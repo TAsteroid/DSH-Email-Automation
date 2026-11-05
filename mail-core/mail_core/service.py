@@ -11,11 +11,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import attachments, backup, crypto, delete, drafts, imap_client, pop3_client, sender, smtp_client, summaries
+from . import attachments, backup, crypto, delete, drafts, idle, imap_client, pop3_client, sender, smtp_client, summaries
 from . import protocol
 from . import sync
 from .protocol import (
@@ -188,8 +189,16 @@ class Service:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "mail.db"
+        # One RLock serialises every RPC handler and the IDLE-triggered sync:
+        # the whole service shares one SQLite connection.
+        self._lock = threading.RLock()
+        # stdout is shared by responses and IDLE events; every line goes
+        # through this lock so concurrent writes never interleave.
+        self._write_lock = threading.Lock()
+        self._stdout = None
         self.store = Store(self.db_path)
         self.shutdown_requested = False
+        self._idle_workers: dict[str, idle.IdleWorker] = {}
         self._methods: dict[str, Callable[[dict], Any]] = {
             "core.handshake": self._handshake,
             "account.list": self._account_list,
@@ -239,21 +248,57 @@ class Service:
             "action.execute": self._action_execute,
             "admin.backup": self._admin_backup,
             "admin.backups": self._admin_backups,
+            "idle.start": self._idle_start,
+            "idle.stop": self._idle_stop,
+            "idle.status": self._idle_status,
             "shutdown": self._shutdown,
         }
 
     def close(self) -> None:
+        self._stop_idle_workers(join=True)
         self.store.close()
 
+    # -- output (responses and IDLE events share one lock) -----------------
+
+    def attach_stdout(self, stream) -> None:
+        """Bind the protocol stream; ``None`` (tests) drops all output."""
+        self._stdout = stream
+
+    def _write_line(self, line: str) -> bool:
+        stream = self._stdout
+        if stream is None:
+            return True
+        with self._write_lock:
+            try:
+                stream.write(line)
+                stream.write("\n")
+                stream.flush()
+                return True
+            except (BrokenPipeError, ValueError, OSError):
+                return False
+
+    def emit_response(self, response: dict) -> bool:
+        """Write one response line; ``False`` means the pipe is gone."""
+        return self._write_line(protocol.dumps(response))
+
+    def emit_event(self, payload: dict) -> None:
+        """Write one unsolicited event line (never a response envelope)."""
+        self._write_line(protocol.dumps(payload))
+
     def dispatch(self, method: str, params: dict) -> Any:
-        """Run one method; returns its ``result`` payload or raises."""
+        """Run one method; returns its ``result`` payload or raises.
+
+        Handlers run under the service lock: an IDLE-triggered sync and an
+        RPC must never use the SQLite connection at the same time.
+        """
         handler = self._methods.get(method)
         if handler is None:
             raise MailCoreError(UNKNOWN_METHOD, f"unknown method: {method}")
         if not isinstance(params, dict):
             raise bad_request("field params must be an object")
         try:
-            return handler(params)
+            with self._lock:
+                return handler(params)
         except MailCoreError:
             raise
         except Exception as exc:
@@ -1177,8 +1222,102 @@ class Service:
             "backups": backup.list_backups(self.data_dir / backup.BACKUP_DIRNAME)
         }
 
+    # -- IMAP IDLE ---------------------------------------------------------
+
+    def _idle_start(self, params: dict) -> dict:
+        """Start one IDLE thread per enabled IMAP account (already-run skipped)."""
+        account_id = _optional_id(params, "accountId")
+        accounts = self.store.list_accounts()
+        if account_id is not None:
+            accounts = [item for item in accounts if item["id"] == account_id]
+            if not accounts:
+                raise MailCoreError(NOT_FOUND, "account not found")
+
+        started: list[str] = []
+        skipped: list[str] = []
+        for account in accounts:
+            current_id = account["id"]
+            if (account.get("protocol") or "imap") != "imap":
+                skipped.append(current_id)  # POP3 has no IDLE
+                continue
+            if not account.get("enabled"):
+                skipped.append(current_id)
+                continue
+            worker = self._idle_workers.get(current_id)
+            if worker is not None and worker.is_alive():
+                skipped.append(current_id)
+                continue
+            try:
+                _account, password = self._account_credentials(current_id)
+            except MailCoreError:
+                # No usable credential: starting would only produce an
+                # error/reconnect loop, so report it as skipped.
+                skipped.append(current_id)
+                continue
+            worker = idle.IdleWorker(
+                account=account,
+                password=password,
+                on_new_mail=self._idle_sync_inbox,
+            )
+            self._idle_workers[current_id] = worker
+            worker.start()
+            started.append(current_id)
+        return {"started": started, "skipped": skipped}
+
+    def _idle_stop(self, params: dict) -> dict:
+        account_id = _optional_id(params, "accountId")
+        if account_id is None:
+            targets = list(self._idle_workers)
+        elif account_id in self._idle_workers:
+            targets = [account_id]
+        else:
+            targets = []
+        stopped: list[str] = []
+        for current_id in targets:
+            worker = self._idle_workers.pop(current_id)
+            # No join: the worker may be waiting for this very RPC lock inside
+            # its sync callback, and joining here would deadlock.
+            worker.stop(join=False)
+            stopped.append(current_id)
+        return {"stopped": stopped}
+
+    def _idle_status(self, _params: dict) -> dict:
+        return {
+            "workers": [
+                self._idle_workers[account_id].status()
+                for account_id in sorted(self._idle_workers)
+            ]
+        }
+
+    def _idle_sync_inbox(self, account_id: str) -> None:
+        """IDLE callback: run the normal INBOX sync under the service lock."""
+        with self._lock:
+            account, password = self._account_credentials(account_id)
+            result = sync.run_sync(
+                self.store,
+                account,
+                password,
+                sync.DEFAULT_FOLDER,
+                sync.DEFAULT_LIMIT,
+            )
+            self.emit_event(
+                {
+                    "event": "mail.new",
+                    "accountId": account_id,
+                    "stored": int(result.get("stored") or 0),
+                }
+            )
+
+    def _stop_idle_workers(self, *, join: bool) -> None:
+        workers = list(self._idle_workers.values())
+        self._idle_workers.clear()
+        for worker in workers:
+            worker.stop(join=join)
+
     # -- lifecycle ---------------------------------------------------------
 
     def _shutdown(self, _params: dict) -> dict:
         self.shutdown_requested = True
+        # Do not join here: this runs under the RPC lock.  ``close()`` joins.
+        self._stop_idle_workers(join=False)
         return {"ok": True}

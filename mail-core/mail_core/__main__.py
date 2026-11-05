@@ -59,16 +59,17 @@ def _configure_streams() -> None:
 
 
 def serve(service: Service, stdin: TextIO, stdout: TextIO) -> None:
-    """Run the request/response loop until EOF or ``shutdown``."""
+    """Run the request/response loop until EOF or ``shutdown``.
+
+    Responses and unsolicited IDLE events share the service write lock, so a
+    ``mail.new`` line can never interleave with a response line.
+    """
+    service.attach_stdout(stdout)
     for raw_line in stdin:
         response = protocol.handle_line(service, raw_line)
         if response is None:
             continue
-        try:
-            stdout.write(protocol.dumps(response))
-            stdout.write("\n")
-            stdout.flush()
-        except (BrokenPipeError, ValueError, OSError):
+        if not service.emit_response(response):
             return
         if service.shutdown_requested:
             return

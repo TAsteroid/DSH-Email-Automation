@@ -28,7 +28,7 @@ function coreError(code, message) {
  * @param {(state: string, error: Error|null) => void} [options.onState]
  * @param {number} [options.requestTimeoutMs]
  */
-export function createCoreClient({ spawn, argv, cwd, env, log, onState, requestTimeoutMs = 20000 }) {
+export function createCoreClient({ spawn, argv, cwd, env, log, onState, onEvent, requestTimeoutMs = 20000 }) {
   let handle = null
   let state = 'stopped'
   let lastError = null
@@ -63,7 +63,11 @@ export function createCoreClient({ spawn, argv, cwd, env, log, onState, requestT
       return
     }
     const entry = pending.get(message.id)
-    if (!entry) return
+    if (!entry) {
+      // 无 id 的是 Core 主动推送的事件（如 IDLE 收到新邮件）
+      if (message.event) onEvent?.(message)
+      return
+    }
     pending.delete(message.id)
     clearTimeout(entry.timer)
     if (message.ok === true) {

@@ -21,6 +21,16 @@ class FakeService:
 
     def __init__(self) -> None:
         self.calls = []
+        self._stdout = None
+
+    def attach_stdout(self, stream) -> None:
+        self._stdout = stream
+
+    def emit_response(self, response) -> bool:
+        self._stdout.write(protocol.dumps(response))
+        self._stdout.write("\n")
+        self._stdout.flush()
+        return True
 
     def dispatch(self, method, params):
         self.calls.append((method, params))
