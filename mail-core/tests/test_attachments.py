@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import unittest
 import zipfile
 from email.header import Header
@@ -140,6 +141,43 @@ def _minimal_xlsx() -> bytes:
         archive.writestr("xl/sharedStrings.xml", shared)
         archive.writestr("xl/worksheets/sheet1.xml", sheet)
     return buffer.getvalue()
+
+
+def _pdf_with_image() -> bytes:
+    """A minimal PDF with one text stream and one binary image stream.
+
+    The image stream deliberately contains a ``(...) Tj`` fragment plus
+    high-bit bytes: a parser that ignores the object dictionary would extract
+    it as text, which is exactly the production bug this guards against.
+    """
+    text_stream = (
+        b"BT /F1 12 Tf "
+        b"(Limes Latin America) Tj T* "
+        b"(Confidential Information Memorandum) Tj T* "
+        b"(Bad\x01\x02\x03\x04\x05 line) Tj ET"
+    )
+    image_stream = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01"
+        b"(GARBAGE\x80\x81\x82\x83) Tj"
+        b"\xff\xd9"
+    )
+    parts = [
+        b"%PDF-1.4\n",
+        b"1 0 obj\n<< /Length "
+        + str(len(text_stream)).encode("ascii")
+        + b" >>\nstream\n"
+        + text_stream
+        + b"\nendstream\nendobj\n",
+        b"2 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+        b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
+        b"/Length "
+        + str(len(image_stream)).encode("ascii")
+        + b" >>\nstream\n"
+        + image_stream
+        + b"\nendstream\nendobj\n",
+        b"trailer\n<< /Root 1 0 R >>\n%%EOF\n",
+    ]
+    return b"".join(parts)
 
 
 class AttachmentTests(unittest.TestCase):
@@ -515,6 +553,22 @@ class AttachmentTests(unittest.TestCase):
         self.assertEqual(context.exception.code, "BAD_REQUEST")
         self.assertIn("supported", context.exception.message)
         self.assertIn(".pdf", context.exception.message)
+
+    def test_text_pdf_skips_image_streams_and_dirty_lines(self):
+        attachment_id = self._downloaded_attachment(
+            "memorandum.pdf", _pdf_with_image(), content_type="application/pdf"
+        )
+        result = self._text(attachment_id)
+
+        self.assertEqual(result["kind"], "pdf")
+        self.assertIn("Limes Latin America", result["text"])
+        self.assertIn("Confidential Information Memorandum", result["text"])
+        # The image stream is binary: neither its fake text operator nor the
+        # high-bit bytes may leak through.
+        self.assertNotIn("GARBAGE", result["text"])
+        self.assertIsNone(re.search(r"[\x80-\xff]{3,}", result["text"]))
+        # The control-char-heavy text line is dropped by the 30% ratio rule.
+        self.assertNotIn("Bad", result["text"])
 
 
 class AttachmentBackfillTests(unittest.TestCase):

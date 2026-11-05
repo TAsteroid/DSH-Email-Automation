@@ -314,11 +314,31 @@ def _pdf_decode(raw: bytes) -> str:
         return raw.decode("latin-1", "replace")
 
 
+_PDF_IMAGE_MARKER = re.compile(
+    rb"/Subtype\s*/Image|/DCTDecode|/JPXDecode|/CCITTFaxDecode",
+    re.IGNORECASE,
+)
+
+
+def _pdf_stream_header(data: bytes, position: int) -> bytes:
+    """The current object's dictionary (the bytes between ``obj`` and stream)."""
+    window = data[max(0, position - 4000) : position]
+    marker = window.rfind(b" obj")
+    return window[marker:] if marker >= 0 else window
+
+
+def _is_image_stream(header: bytes) -> bool:
+    """Image/XObject streams are binary and must never be parsed as text."""
+    return _PDF_IMAGE_MARKER.search(header) is not None
+
+
 def _pdf_streams(data: bytes) -> list[bytes]:
     streams: list[bytes] = []
     for match in _PDF_STREAM.finditer(data):
+        header = _pdf_stream_header(data, match.start())
+        if _is_image_stream(header):
+            continue
         raw = match.group(1)
-        header = data[max(0, match.start() - 400) : match.start()]
         if b"/FlateDecode" in header or b"FlateDecode" in header:
             try:
                 raw = zlib.decompress(raw)
@@ -329,6 +349,35 @@ def _pdf_streams(data: bytes) -> list[bytes]:
                     continue
         streams.append(raw)
     return streams
+
+
+def _clean_pdf_text(text: str) -> str:
+    """Keep printable characters/tabs, drop control + replacement characters.
+
+    A line whose non-printable ratio exceeds 30% is dropped entirely: image
+    bytes decoded as Latin-1 look like printable garbage often enough that the
+    ratio check is what keeps binary noise out of the extracted text.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
+    for raw in text.split("\n"):
+        if not raw:
+            continue
+        bad = sum(
+            1
+            for char in raw
+            if char != "\t" and (not char.isprintable() or char == "\ufffd")
+        )
+        if bad / len(raw) > 0.30:
+            continue
+        cleaned = "".join(
+            char
+            for char in raw
+            if char == "\t" or (char.isprintable() and char != "\ufffd")
+        ).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines)
 
 
 def _read_pdf(data: bytes) -> str:
@@ -342,7 +391,7 @@ def _read_pdf(data: bytes) -> str:
             else:
                 text = _pdf_decode(_pdf_unescape(operand))
             lines.append(text)
-    text = "\n".join(line for line in lines if line)
+    text = _clean_pdf_text("\n".join(lines))
     if not text.strip():
         raise ExtractError("PDF 无可提取文本（可能是扫描件）")
     return text
