@@ -2166,8 +2166,8 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
-    /** 附件事项卡片：显示来源与大小，确认后才下载。 */
-    function AttachmentCard({ t, item, fetching, result, onFetch }) {
+    /** 附件事项卡片：显示来源与大小，确认后才下载；也可以直接标为已处理。 */
+    function AttachmentCard({ t, item, fetching, result, onFetch, onDone, busy }) {
       return h(
         'article',
         { style: { ...styles.aiCard, width: '100%', height: '100%' }, 'aria-label': item.title },
@@ -2179,6 +2179,7 @@ window.__ModuleLoader__.load({
           'div',
           { style: styles.formActions },
           h('button', { type: 'button', style: styles.btn, disabled: fetching, onClick: onFetch }, t('attachmentAnalyze')),
+          h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: onDone }, t('todoDone')),
         ),
         result
           ? h(
@@ -2191,8 +2192,9 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 邮件事项卡片：总结 / 已处理。 */
-    function MailTodoCard({ t, item, onSummary, onDone, busy }) {
+    /** 邮件事项卡片：邮件本身 + 它的附件，一起作为一个待处理事项。 */
+    function MailTodoCard({ t, item, onSummary, onDone, busy, onFetchAttachment, onDismissAttachment, fetchingId, results }) {
+      const attachments = item.attachments || []
       return h(
         'article',
         { style: { ...styles.aiCard, width: '100%', height: '100%' }, 'aria-label': item.subject || item.messageId },
@@ -2206,6 +2208,45 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.btn, disabled: busy, onClick: onSummary }, t('todoSummary')),
           h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: onDone }, t('todoDone')),
         ),
+        attachments.length > 0
+          ? h(
+              'div',
+              { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
+              h('p', { style: { ...styles.sectionTitle, margin: 0 } }, t('attachmentTitle')),
+              attachments.map((attachment) =>
+                h(
+                  'div',
+                  { key: attachment.id, style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                  h('span', { style: { fontSize: 13 } }, `${attachment.filename} · ${formatBytes(attachment.size)}`),
+                  attachment.fetchedAt
+                    ? h('span', { style: styles.muted }, t('attachmentFetched'))
+                    : h(
+                        'button',
+                        {
+                          type: 'button',
+                          style: styles.btnSmall,
+                          disabled: fetchingId === attachment.id,
+                          onClick: () => onFetchAttachment(attachment),
+                        },
+                        t('attachmentAnalyze'),
+                      ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      style: styles.btnSmall,
+                      disabled: busy,
+                      onClick: () => onDismissAttachment(attachment),
+                    },
+                    t('todoDone'),
+                  ),
+                  results && results[attachment.id]
+                    ? h('span', { style: styles.muted }, results[attachment.id].error || t('attachmentFetched'))
+                    : null,
+                ),
+              ),
+            )
+          : null,
         h('p', { style: styles.muted }, t('todoSummaryHint')),
       )
     }
@@ -2230,21 +2271,31 @@ window.__ModuleLoader__.load({
         meta: item.accountId ? item.accountId : '',
       })
 
-      // 待处理附件（元数据已入库、尚未下载）与 AI 待办合并展示
-      const attachments = ((status && status.attachments && status.attachments.pending) || []).map((item) => ({
-        id: `att_${item.id}`,
-        attachmentId: item.id,
-        kind: 'attachment',
-        accountId: item.accountId || '',
-        title: item.filename || '(未命名附件)',
-        meta: `${item.subject || ''} · ${formatBytes(item.size)}`,
-        subject: item.subject || '',
-        contentType: item.contentType || '',
-        size: Number(item.size) || 0,
-        fetchedAt: item.fetchedAt || '',
-      }))
+      // 附件按所属邮件归并：附件不再单独成项，而是挂在它那封邮件下面
+      const attachmentsByMessage = new Map()
+      for (const item of (status && status.attachments && status.attachments.pending) || []) {
+        const key = item.messageId || ''
+        if (!key) continue
+        const list = attachmentsByMessage.get(key) || []
+        list.push({
+          id: item.id,
+          filename: item.filename || '(未命名附件)',
+          contentType: item.contentType || '',
+          size: Number(item.size) || 0,
+          fetchedAt: item.fetchedAt || '',
+        })
+        attachmentsByMessage.set(key, list)
+        if (!attachmentsByMessage.meta) attachmentsByMessage.meta = new Map()
+        if (!attachmentsByMessage.meta.has(key)) {
+          attachmentsByMessage.meta.set(key, {
+            subject: item.subject || '',
+            fromAddr: item.fromAddr || '',
+            accountId: item.accountId || '',
+          })
+        }
+      }
 
-      // 邮件事项：同步进来的新邮件自动登记为待处理
+      // 邮件事项：同步进来的新邮件自动登记为待处理（只来自收件箱）
       const mailTodos = ((status && status.todos && status.todos.pending) || []).map((item) => ({
         id: `todo_${item.messageId}`,
         messageId: item.messageId,
@@ -2254,9 +2305,30 @@ window.__ModuleLoader__.load({
         fromAddr: item.fromAddr || '',
         date: item.date || '',
         hasSummary: Boolean(item.hasSummary),
+        attachments: attachmentsByMessage.get(item.messageId) || [],
         title: item.subject || t('noSubject'),
         meta: `${item.fromAddr || ''} · ${item.date || ''}`,
       }))
+
+      // 有待处理附件、但邮件本身不在待办里的，也要作为同一事项出现（附件挂在邮件下）
+      const seenMessages = new Set(mailTodos.map((item) => item.messageId))
+      for (const [messageId, list] of attachmentsByMessage) {
+        if (seenMessages.has(messageId)) continue
+        const meta = (attachmentsByMessage.meta && attachmentsByMessage.meta.get(messageId)) || {}
+        mailTodos.push({
+          id: `todo_${messageId}`,
+          messageId,
+          kind: 'mail',
+          accountId: meta.accountId || '',
+          subject: meta.subject || '',
+          fromAddr: meta.fromAddr || '',
+          date: '',
+          hasSummary: false,
+          attachments: list,
+          title: meta.subject || t('noSubject'),
+          meta: meta.fromAddr || '',
+        })
+      }
 
       const groups = [
         ...visible.map((account) => ({
@@ -2264,7 +2336,6 @@ window.__ModuleLoader__.load({
           title: `${label(account)} · ${t('aiQueue')}`,
           items: [
             ...mailTodos.filter((item) => !item.accountId || item.accountId === account.id),
-            ...attachments.filter((item) => !item.accountId || item.accountId === account.id),
             ...(items.pending || [])
               .filter((item) => !item.accountId || item.accountId === account.id)
               .map(toItem),
@@ -2275,12 +2346,11 @@ window.__ModuleLoader__.load({
 
       const selected =
         mailTodos.find((item) => item.id === selectedId) ||
-        attachments.find((item) => item.id === selectedId) ||
         [...(items.pending || []), ...(items.done || [])].find((item) => item.id === selectedId) ||
         null
 
-      const [fetching, setFetching] = React.useState(false)
-      const [fetched, setFetched] = React.useState(null)
+      const [fetchingId, setFetchingId] = React.useState('')
+      const [results, setResults] = React.useState({})
       const [todoBusy, setTodoBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
 
@@ -2382,12 +2452,36 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** 当前待处理列表（按显示顺序），用于处理完一条后跳下一条。 */
+      const flatPending = () => groups.filter((group) => group.id !== 'done').flatMap((group) => group.items)
+
+      const nextAfter = (id) => {
+        const list = flatPending()
+        const index = list.findIndex((item) => item.id === id)
+        if (index < 0) return ''
+        const next = list[index + 1] || list[index - 1]
+        return next ? next.id : ''
+      }
+
       const markDone = async (item) => {
         if (todoBusy) return
+        const nextId = nextAfter(item.id)
         setTodoBusy(true)
         try {
-          await call('/todo/set', { messageId: item.messageId, state: 'done' })
-          setSelectedId(null)
+          // 邮件标为已处理，同时把它名下未处理的附件一并处理掉
+          try {
+            await call('/todo/set', { messageId: item.messageId, state: 'done' })
+          } catch {
+            // 该邮件不在待办表里也允许继续清理附件
+          }
+          for (const attachment of item.attachments || []) {
+            try {
+              await call('/attachments/dismiss', { id: attachment.id })
+            } catch {
+              // 单个附件失败不影响其它
+            }
+          }
+          setSelectedId(nextId || null)
           if (onRefresh) onRefresh()
         } catch (error) {
           setNote(error.message)
@@ -2396,18 +2490,31 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const fetchAttachment = async () => {
-        if (!selected || selected.kind !== 'attachment' || fetching) return
-        setFetching(true)
-        setFetched(null)
+      const dismissAttachment = async (attachment) => {
+        if (!attachment || todoBusy) return
+        setTodoBusy(true)
         try {
-          const value = await call('/attachments/fetch', { id: selected.attachmentId })
-          setFetched(value || {})
+          await call('/attachments/dismiss', { id: attachment.id })
           if (onRefresh) onRefresh()
         } catch (error) {
-          setFetched({ error: error.message })
+          setNote(error.message)
         } finally {
-          setFetching(false)
+          setTodoBusy(false)
+        }
+      }
+
+      /** 下载这封邮件下面某个附件（用户点了才取）。 */
+      const fetchAttachment = async (attachment) => {
+        if (!attachment || fetchingId) return
+        setFetchingId(attachment.id)
+        try {
+          const value = await call('/attachments/fetch', { id: attachment.id })
+          setResults((prev) => ({ ...prev, [attachment.id]: value || {} }))
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setResults((prev) => ({ ...prev, [attachment.id]: { error: error.message } }))
+        } finally {
+          setFetchingId('')
         }
       }
 
@@ -2440,7 +2547,15 @@ window.__ModuleLoader__.load({
                   'div',
                   { style: styles.cardHost },
                   selected.kind === 'attachment'
-                    ? h(AttachmentCard, { t, item: selected, fetching, result: fetched, onFetch: fetchAttachment })
+                    ? h(AttachmentCard, {
+                        t,
+                        item: selected,
+                        fetching: Boolean(fetchingId),
+                        result: fetched,
+                        onFetch: () => fetchAttachment({ id: selected.attachmentId }),
+                        onDone: () => dismissAttachment({ id: selected.attachmentId }),
+                        busy: todoBusy,
+                      })
                     : selected.kind === 'mail'
                       ? h(MailTodoCard, {
                           t,
@@ -2448,6 +2563,10 @@ window.__ModuleLoader__.load({
                           busy: todoBusy,
                           onSummary: () => openSummarySession(selected),
                           onDone: () => markDone(selected),
+                          onFetchAttachment: fetchAttachment,
+                          onDismissAttachment: dismissAttachment,
+                          fetchingId,
+                          results,
                         })
                       : h(AiCard, { t, item: selected, onAct: act, fluid: true }),
                 ),

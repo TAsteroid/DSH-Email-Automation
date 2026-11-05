@@ -72,12 +72,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 10}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 11}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射。**它和 `protocol` 无关**：v10 只新增表，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态。**它和 `protocol` 无关**：v11 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -569,14 +569,28 @@ POP3 结果：
 {"attachments": [{
   "id": "att_xxx", "messageId": "msg_xxx", "subject": "合同确认",
   "fromAddr": "a@b.com", "filename": "合同.pdf",
-  "contentType": "application/pdf", "size": 48123, "fetchedAt": ""
+  "contentType": "application/pdf", "size": 48123, "fetchedAt": "",
+  "dismissedAt": ""
 }]}
 ```
 
 - 只读本地元数据，**不联网、不下载**；按所属邮件的 `date` 倒序（同一天新的在前）。
-- `pendingOnly: true` 只返回 `fetchedAt == ""`（还没下载）的附件。
-- `fetchedAt` 非空表示文件已经下载到本地；`inline` 附件默认不出现，需要时用 `attachment.get` 按 id 查。
-- 字段固定为上面 8 个，不含本地路径（路径在 `attachment.get` / `attachment.fetch` 里给）。
+- `pendingOnly: true` 表示「还在等待处理」：只返回**未下载**（`fetchedAt == ""`）、**未 dismiss**（`dismissedAt == ""`）且**所属邮件位于 INBOX** 的附件。发件箱 / 已发送等其它文件夹的附件不会出现在待办里。
+- 非 `pendingOnly` 时行为不变：按 `messageId` / `accountId` 返回所有附件（含已下载、已 dismiss、非 INBOX 的）。
+- `fetchedAt` 非空表示文件已经下载到本地；`dismissedAt` 非空表示用户已把它标记为处理过（见 [`attachment.dismiss`](#attachmentdismiss)）。
+- `inline` 附件默认不出现，需要时用 `attachment.get` 按 id 查。
+- 字段固定为上面 9 个，不含本地路径（路径在 `attachment.get` / `attachment.fetch` 里给）。
+
+### `attachment.dismiss`
+
+参数：`{"id": "att_xxx"}`
+
+结果：`{"dismissed": true, "dismissedAt": "2026-11-05T01:30:00Z"}`
+
+- 把附件标记为「已处理」，只写本地 `dismissed_at`，**不联网、不删除文件**。
+- **幂等**：重复调用成功，返回第一次写入的 `dismissedAt`（不会被刷新）。
+- `id` 不存在 → `NOT_FOUND`。
+- 标记后该附件不再出现在 `pendingOnly: true` 的列表里；非 `pendingOnly` 列表照常返回并带 `dismissedAt`。
 
 ### `attachment.get`
 
@@ -943,3 +957,4 @@ POP3 结果：
 - v8 只**新增** `attachments` 表（`message_id` 外键指向 `messages.id`，`ON DELETE CASCADE`）和 `messages.attachments_synced` 标记列（旧邮件默认 0，表示附件元数据尚未提取），不改旧表结构、不删旧邮件、不在库里存附件内容。旧邮件用 `attachment.backfill` 补；新同步邮件在同一事务内写入附件行。老库（v1~v7）启动时先自动备份再升级；附件文件只落在 `<data-dir>/attachments/`。
 - v9 只**新增**：`messages.todo_state` / `messages.todo_updated_at` 两列、`accounts.todo_baseline_done` 标记列、`summaries` 表及其三个索引（另加 `messages(todo_state, date)` 列表索引）。旧数据 `todo_state` 为空串（不会被当成待办），`todo_baseline_done=0`（下一轮普通 INBOX 同步成为基线）；`summaries.message_id` 外键指向 `messages.id`，邮件删除时总结级联删除。老库（v1~v8）启动时先自动备份再升级；迁移幂等。
 - v10 只**新增** `contact_sessions` 表（邮箱地址 ↔ DSH 会话映射）与 `idx_contact_sessions_email` 索引：`(account_id, email)` 唯一，`account_id` 外键 `ON DELETE CASCADE`（删账号连带清映射），`email` 由核心层统一小写；不改旧表、不丢旧数据。老库（v1~v9）启动时先自动备份再升级；迁移幂等。
+- v11 只给 `attachments` **新增** `dismissed_at` 一列（默认空串，表示尚未标记为已处理），不改旧表结构、不丢旧数据、不删附件文件；`attachment.list` 的 `pendingOnly` 语义随之扩展为「未下载 + 未 dismiss + 属于 INBOX」。老库（v1~v10）启动时先自动备份再升级；迁移用列检查保证幂等。

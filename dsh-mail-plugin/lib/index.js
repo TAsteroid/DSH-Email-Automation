@@ -1914,6 +1914,11 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('attachment.fetch', params, { timeoutMs: 120_000 }))
     })
 
+    route('/attachments/dismiss', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('attachment.dismiss', { id }))
+    })
+
     // 老邮件补附件元数据（v8 之前同步的邮件没有附件记录）
     route('/attachments/backfill', async (body) => {
       const params = {}

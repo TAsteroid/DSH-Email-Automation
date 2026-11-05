@@ -201,6 +201,7 @@ function handleMethod(method, params) {
       ],
     }
   }
+  if (method === 'attachment.dismiss') return { id: params.id, dismissedAt: '2026-11-05T00:00:00Z' }
   if (method === 'attachment.fetch') {
     return { id: params.id, path: 'C:\\data\\attachments\\msg_1\\报价表.xlsx', size: 2048, sha256: 'abc123', fetchedAt: '2026-11-04T12:00:00Z' }
   }
@@ -837,6 +838,11 @@ if (attachmentsRoute && attachmentsRoute.body) {
   check(parsed.value.attachments[0].filename === '报价表.xlsx', '附件应带文件名')
   check(parsed.value.attachments[0].size === 2048, '附件应带大小')
 }
+
+const dismissNoId = await invoke('/api/dsh-mail/attachments/dismiss', { method: 'POST', body: '{}' })
+check(dismissNoId && dismissNoId.status === 400, `附件已处理缺 id 应 400，实际 ${dismissNoId && dismissNoId.status}`)
+const dismissRoute = await invoke('/api/dsh-mail/attachments/dismiss', { method: 'POST', body: JSON.stringify({ id: 'att_1' }) })
+check(dismissRoute && dismissRoute.status === 200, `附件已处理应 200，实际 ${dismissRoute && dismissRoute.status}`)
 
 const fetchNoId = await invoke('/api/dsh-mail/attachments/fetch', { method: 'POST', body: '{}' })
 check(fetchNoId && fetchNoId.status === 400, `附件下载缺 id 应 400，实际 ${fetchNoId && fetchNoId.status}`)

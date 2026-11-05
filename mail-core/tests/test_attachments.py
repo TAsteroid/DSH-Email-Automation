@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mail_core.protocol import MailCoreError
 from mail_core.service import Service
+from mail_core.store import MIGRATIONS, SCHEMA_VERSION
 from tests.fake_servers import FakeImapServer, FakePop3Server
 from tests.support import workspace_temporary_directory
 
@@ -301,6 +302,76 @@ class AttachmentTests(unittest.TestCase):
         with self.assertRaises(MailCoreError) as context:
             self.service.dispatch("attachment.get", {"id": "att_missing"})
         self.assertEqual(context.exception.code, "NOT_FOUND")
+
+    # -- dismissal (schema v11) --------------------------------------------
+
+    def _synced_report(self) -> tuple[str, dict]:
+        with FakeImapServer([MESSAGE]) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+        attachments = self._list(accountId=account_id)
+        return account_id, next(
+            item for item in attachments if item["filename"] == "report.pdf"
+        )
+
+    def test_dismiss_drops_from_pending_but_stays_in_the_full_list(self):
+        account_id, report = self._synced_report()
+        self.assertEqual(report["dismissedAt"], "")
+
+        result = self.service.dispatch(
+            "attachment.dismiss", {"id": report["id"]}
+        )
+        self.assertEqual(result["dismissed"], True)
+        self.assertTrue(result["dismissedAt"].endswith("Z"))
+
+        pending = self._list(accountId=account_id, pendingOnly=True)
+        self.assertEqual([item["filename"] for item in pending], ["报告.pdf"])
+
+        full = {
+            item["filename"]: item for item in self._list(accountId=account_id)
+        }
+        self.assertEqual(full["report.pdf"]["dismissedAt"], result["dismissedAt"])
+        self.assertEqual(full["报告.pdf"]["dismissedAt"], "")
+
+        # v11 is a guarded add-column migration, so re-running it is a no-op.
+        self.assertGreaterEqual(SCHEMA_VERSION, 11)
+        MIGRATIONS[11](self.service.store._conn)
+        self.assertEqual(self.service.store.schema_version, SCHEMA_VERSION)
+
+    def test_dismiss_is_idempotent(self):
+        _account_id, report = self._synced_report()
+
+        first = self.service.dispatch("attachment.dismiss", {"id": report["id"]})
+        second = self.service.dispatch("attachment.dismiss", {"id": report["id"]})
+
+        self.assertEqual(second["dismissed"], True)
+        self.assertEqual(second["dismissedAt"], first["dismissedAt"])
+
+    def test_dismiss_unknown_attachment_is_not_found(self):
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch("attachment.dismiss", {"id": "att_missing"})
+        self.assertEqual(context.exception.code, "NOT_FOUND")
+
+    def test_pending_only_ignores_attachments_outside_inbox(self):
+        with FakeImapServer([MESSAGE]) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+            self._sync(account_id, folder="Sent")
+
+        inbox_ids = {
+            message["id"]
+            for message in self.service.dispatch(
+                "message.list", {"accountId": account_id, "folder": "INBOX"}
+            )["messages"]
+        }
+        self.assertEqual(len(inbox_ids), 1)
+
+        pending = self._list(accountId=account_id, pendingOnly=True)
+        self.assertEqual(len(pending), 2)
+        self.assertTrue({item["messageId"] for item in pending} <= inbox_ids)
+
+        # Without pendingOnly both copies (INBOX + Sent) are still listed.
+        self.assertEqual(len(self._list(accountId=account_id)), 4)
 
 
 class AttachmentBackfillTests(unittest.TestCase):

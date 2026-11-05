@@ -83,7 +83,7 @@ class SchemaV9MigrationTests(unittest.TestCase):
         store = Store(path)
         self.addCleanup(store.close)
 
-        self.assertEqual(SCHEMA_VERSION, 10)
+        self.assertGreaterEqual(SCHEMA_VERSION, 9)
         self.assertEqual(store.schema_version, SCHEMA_VERSION)
 
         message_columns = {

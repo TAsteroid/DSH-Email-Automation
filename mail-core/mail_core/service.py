@@ -226,6 +226,7 @@ class Service:
             "attachment.get": self._attachment_get,
             "attachment.fetch": self._attachment_fetch,
             "attachment.backfill": self._attachment_backfill,
+            "attachment.dismiss": self._attachment_dismiss,
             "contact.list": self._contact_list,
             "contact.add": self._contact_add,
             "contact.update": self._contact_update,
@@ -837,6 +838,14 @@ class Service:
         return sync.backfill_attachment_metadata(
             self.store, account, password, folder, limit
         )
+
+    def _attachment_dismiss(self, params: dict) -> dict:
+        """Mark one attachment as already handled (idempotent)."""
+        attachment_id = _require_str(params, "id")
+        dismissed_at = self.store.dismiss_attachment(attachment_id)
+        if dismissed_at is None:
+            raise MailCoreError(NOT_FOUND, "attachment not found")
+        return {"dismissed": True, "dismissedAt": dismissed_at}
 
     # -- contacts ----------------------------------------------------------
 

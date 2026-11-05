@@ -33,6 +33,8 @@ Schema v9 adds the follow-up state (``messages.todo_state`` /
 append-only Agent ``summaries`` table, cascade-deleted with its message.
 Schema v10 adds ``contact_sessions``, the persisted mailbox-address -> DSH
 session mapping used to reuse one conversation per sender across restarts.
+Schema v11 adds ``attachments.dismissed_at`` so an attachment can be marked
+as already handled and drops out of the pending list.
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -431,6 +433,18 @@ def _migrate_to_v10(conn: sqlite3.Connection) -> None:
     )
 
 
+# Schema v11: attachment "already handled" flag.  ``dismissed_at`` is empty
+# until the user marks an attachment as dealt with; ``attachment.list
+# pendingOnly=true`` then stops offering it, while the normal list still
+# shows it with the timestamp.
+def _migrate_to_v11(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(attachments)")}
+    if "dismissed_at" not in columns:
+        conn.execute(
+            "ALTER TABLE attachments ADD COLUMN dismissed_at TEXT NOT NULL DEFAULT ''"
+        )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -442,6 +456,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     8: _migrate_to_v8,
     9: _migrate_to_v9,
     10: _migrate_to_v10,
+    11: _migrate_to_v11,
 }
 
 
@@ -1337,6 +1352,7 @@ class Store:
             "contentType": row["content_type"],
             "size": int(row["size"]),
             "fetchedAt": row["fetched_at"],
+            "dismissedAt": row["dismissed_at"],
         }
 
     def list_attachments(
@@ -1353,6 +1369,8 @@ class Store:
         Inline resources (HTML images, calendar parts) are not shown by
         default: they are not "attachments to analyse", even though their
         metadata is stored so ``attachment.get`` can still inspect it.
+        ``pending_only`` means "still waiting for the user": not downloaded
+        and not dismissed.
         """
         clauses: list[str] = []
         args: list = []
@@ -1363,7 +1381,11 @@ class Store:
             clauses.append("m.account_id = ?")
             args.append(account_id)
         if pending_only:
+            # Pending work only comes from the inbox: attachments of sent mail
+            # (or any other folder) are not follow-up items.
             clauses.append("a.fetched_at = ''")
+            clauses.append("a.dismissed_at = ''")
+            clauses.append("m.folder = 'INBOX'")
         if not include_inline:
             clauses.append("a.inline = 0")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -1425,6 +1447,28 @@ class Store:
                 (local_path, sha256, fetched_at or utc_now(), attachment_id),
             )
         return cursor.rowcount > 0
+
+    def dismiss_attachment(self, attachment_id: str) -> Optional[str]:
+        """Mark one attachment as handled; returns its ``dismissed_at``.
+
+        Repeated dismissal is a success and keeps the first timestamp; an
+        unknown id returns ``None`` (the service maps that to ``NOT_FOUND``).
+        """
+        row = self._conn.execute(
+            "SELECT dismissed_at FROM attachments WHERE id = ?", (attachment_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        existing = str(row["dismissed_at"] or "")
+        if existing:
+            return existing
+        timestamp = utc_now()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE attachments SET dismissed_at = ? WHERE id = ?",
+                (timestamp, attachment_id),
+            )
+        return timestamp
 
     def count_attachments(self, message_id: Optional[str] = None) -> int:
         if message_id is None:

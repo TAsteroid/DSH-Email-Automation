@@ -65,8 +65,8 @@ class SchemaV10MigrationTests(unittest.TestCase):
         store = Store(path)
         self.addCleanup(store.close)
 
-        self.assertEqual(SCHEMA_VERSION, 10)
-        self.assertEqual(store.schema_version, 10)
+        self.assertGreaterEqual(SCHEMA_VERSION, 10)
+        self.assertEqual(store.schema_version, SCHEMA_VERSION)
 
         tables = {
             row["name"]

@@ -628,22 +628,50 @@ function runRealReactPass() {
 
     check(pageMarkup.includes('t:mail.composeNew'), '[真实渲染] 顶栏应有新建邮件按钮')
 
-    // 附件在待跟进里作为事项出现
+    // 附件并入所属邮件：不再单独成项
     const todoWithAttachment = renderToStaticMarkup(
       h(views.TodoView, {
         t,
         status: {
           ...statusPayload,
           accounts: twoAccounts,
+          todos: {
+            pending: [
+              { messageId: 'msg_1', accountId: 'a1', subject: '报价回复', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', hasSummary: false },
+            ],
+          },
           attachments: {
             pending: [
-              { id: 'att_1', accountId: 'a1', filename: '报价表.xlsx', subject: '报价回复', contentType: 'application/vnd.ms-excel', size: 2048 },
+              { id: 'att_1', messageId: 'msg_1', accountId: 'a1', filename: '报价表.xlsx', subject: '报价回复', contentType: 'application/vnd.ms-excel', size: 2048 },
             ],
           },
         },
       }),
     )
-    check(todoWithAttachment.includes('报价表.xlsx'), '[真实渲染] 待跟进应列出待处理附件')
+    check(todoWithAttachment.includes('报价回复'), '[真实渲染] 待跟进应列出待处理邮件')
+    check(!todoWithAttachment.includes('报价表.xlsx'), '[真实渲染] 附件不应单独成为一项')
+
+    const mailTodoCardWithFiles = renderToStaticMarkup(
+      h(views.MailTodoCard, {
+        t,
+        item: {
+          subject: '报价回复',
+          fromAddr: 'a@b.com',
+          date: '2026-11-04T09:12:00Z',
+          attachments: [{ id: 'att_1', filename: '报价表.xlsx', size: 2048, fetchedAt: '' }],
+        },
+        busy: false,
+        onSummary: () => {},
+        onDone: () => {},
+        onFetchAttachment: () => {},
+        onDismissAttachment: () => {},
+        fetchingId: '',
+        results: {},
+      }),
+    )
+    check(mailTodoCardWithFiles.includes('报价表.xlsx'), '[真实渲染] 附件应挂在邮件卡片里')
+    check(mailTodoCardWithFiles.includes('t:mail.attachmentAnalyze'), '[真实渲染] 附件应有下载按钮')
+    check(mailTodoCardWithFiles.includes('t:mail.todoDone'), '[真实渲染] 附件应有已处理按钮')
 
     // 邮件事项：总结 / 已处理
     const todoWithMail = renderToStaticMarkup(
