@@ -72,12 +72,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 11}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 12}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态。**它和 `protocol` 无关**：v11 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记。**它和 `protocol` 无关**：v12 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -971,6 +971,37 @@ POP3 结果：
 - 按 `createdAt` 倒序（新的在前）；没有备份目录或没有备份时返回空数组（不报错）。
 - 只列出 `mail-*.db`，目录里的其它文件忽略。
 
+### `admin.rebasePaths`
+
+参数：`{"from": "C:\\old\\attachments", "to": "D:\\new\\attachments"}`
+
+结果：`{"updated": 2}`
+
+- 切换数据目录后，`attachments.local_path` 里仍保存旧绝对路径；本方法把这些记录重定位到新前缀，文件本身不做移动。
+- 匹配规则：路径**等于** `from`，或以 `from` 加上路径分隔符（`\` 或 `/`）开头；因此 `C:\old` 不会误改 `C:\older\x`。`from` / `to` 末尾的分隔符会被容忍（去掉后再拼接）。
+- `from` / `to` 必须是非空字符串，否则 `BAD_REQUEST`。
+- 幂等：没有匹配记录时返回 `updated: 0`，重复调用不会再次改动。
+- 只改 `local_path` 文本，不校验目标文件是否存在、不改数据库其它字段。
+
+### `admin.cleanup`
+
+参数：`{"olderThanDays": 30, "dryRun": false, "limit": 200}`
+
+结果：
+
+```json
+{"candidates": 12, "cleaned": 7, "skippedNoSummary": 4, "skippedTodo": 1}
+```
+
+- **只清本地正文，绝不删唯一副本**：满足条件的历史邮件把 `body_text` / `body_html` 置空并写 `body_purged_at`；保留 `subject` / `from` / `date` / `snippet` / `thread_id` / `message_id` / `uid` / `uidvalidity`，附件文件与元数据完全不动。
+- 候选条件：邮件 `date` **早于** `olderThanDays` 天前（默认 30，`<=` 不含当天）且尚未清理（`body_purged_at == ''`）。
+- **必须有总结**：`summaries` 里没有该邮件的记录 → 计入 `skippedNoSummary`，不清理。
+- **未处理完的不清**：`todo_state == 'pending'` → 计入 `skippedTodo`，不清理（同时无总结时按 `skippedNoSummary` 计）。
+- `dryRun: true` 只统计、不写库，返回的计数与真实执行一致（`cleaned` 表示「会清多少」）。
+- `limit` 缺省 200、上限 1000（小于 1 → `BAD_REQUEST`），按 `date` 升序处理最老的候选。
+- 计数关系：`candidates = cleaned + skippedNoSummary + skippedTodo`。已清理过的邮件不再是候选，所以重复调用最终 `cleaned: 0`。
+- 清理后正文不可从本地恢复（服务器上仍有原件；需要时重新同步会重新入库）。
+
 ### `shutdown`
 
 参数：`{}` → 结果 `{"ok": true}`，随后进程自行退出。
@@ -996,3 +1027,4 @@ POP3 结果：
 - v9 只**新增**：`messages.todo_state` / `messages.todo_updated_at` 两列、`accounts.todo_baseline_done` 标记列、`summaries` 表及其三个索引（另加 `messages(todo_state, date)` 列表索引）。旧数据 `todo_state` 为空串（不会被当成待办），`todo_baseline_done=0`（下一轮普通 INBOX 同步成为基线）；`summaries.message_id` 外键指向 `messages.id`，邮件删除时总结级联删除。老库（v1~v8）启动时先自动备份再升级；迁移幂等。
 - v10 只**新增** `contact_sessions` 表（邮箱地址 ↔ DSH 会话映射）与 `idx_contact_sessions_email` 索引：`(account_id, email)` 唯一，`account_id` 外键 `ON DELETE CASCADE`（删账号连带清映射），`email` 由核心层统一小写；不改旧表、不丢旧数据。老库（v1~v9）启动时先自动备份再升级；迁移幂等。
 - v11 只给 `attachments` **新增** `dismissed_at` 一列（默认空串，表示尚未标记为已处理），不改旧表结构、不丢旧数据、不删附件文件；`attachment.list` 的 `pendingOnly` 语义随之变为「未 dismiss + 属于 INBOX」（下载状态不影响待办，下载完仍需用户 dismiss 才消失）。老库（v1~v10）启动时先自动备份再升级；迁移用列检查保证幂等。
+- v12 只给 `messages` **新增** `body_purged_at` 一列（默认空串），记录 `admin.cleanup` 清理本地正文的时间；不改旧表结构、不删旧数据、不动附件行。老库（v1~v11）启动时先自动备份再升级；迁移用列检查保证幂等。

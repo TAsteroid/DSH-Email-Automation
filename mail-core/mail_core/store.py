@@ -35,6 +35,8 @@ Schema v10 adds ``contact_sessions``, the persisted mailbox-address -> DSH
 session mapping used to reuse one conversation per sender across restarts.
 Schema v11 adds ``attachments.dismissed_at`` so an attachment can be marked
 as already handled and drops out of the pending list.
+Schema v12 adds ``messages.body_purged_at``: ``admin.cleanup`` clears the local
+body of old, already-summarised mail and records when it did so.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -445,6 +447,18 @@ def _migrate_to_v11(conn: sqlite3.Connection) -> None:
         )
 
 
+# Schema v12: ``messages.body_purged_at`` records when the local body copy was
+# deleted by ``admin.cleanup``.  Only messages that already have a summary may
+# be purged; the row (subject/from/date/thread ids) and attachments stay, so
+# the message can still be listed, found and re-fetched.
+def _migrate_to_v12(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "body_purged_at" not in columns:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN body_purged_at TEXT NOT NULL DEFAULT ''"
+        )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -457,6 +471,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     9: _migrate_to_v9,
     10: _migrate_to_v10,
     11: _migrate_to_v11,
+    12: _migrate_to_v12,
 }
 
 
@@ -591,6 +606,12 @@ def add_minutes(timestamp: str, minutes: int) -> str:
         tzinfo=timezone.utc
     )
     return (moment + timedelta(minutes=int(minutes))).strftime(TIMESTAMP_FORMAT)
+
+
+def utc_days_ago(days: int) -> str:
+    """Protocol timestamp ``days`` ago (cutoff for ``admin.cleanup``)."""
+    moment = datetime.now(timezone.utc) - timedelta(days=int(days))
+    return moment.strftime(TIMESTAMP_FORMAT)
 
 
 class Store:
@@ -1480,6 +1501,102 @@ class Store:
                 (timestamp, attachment_id),
             )
         return timestamp
+
+    @staticmethod
+    def _strip_trailing_separator(path: str) -> str:
+        """Drop one trailing ``/`` or ``\\`` (keeping a bare root separator)."""
+        if len(path) > 1 and path[-1] in "\\/":
+            return path[:-1]
+        return path
+
+    def rebase_attachment_paths(self, old_prefix: str, new_prefix: str) -> int:
+        """Rewrite stored attachment paths that live under ``old_prefix``.
+
+        A row matches when its path equals the prefix or continues with a path
+        separator, so ``C:\\old`` never rewrites ``C:\\older\\x``.  Trailing
+        separators in either argument are tolerated.  Returns the number of
+        rows changed (0 means nothing matched; repeated calls are no-ops).
+        """
+        old = self._strip_trailing_separator(str(old_prefix))
+        new = self._strip_trailing_separator(str(new_prefix))
+        if not old:
+            return 0
+        rows = self._conn.execute(
+            "SELECT id, local_path FROM attachments WHERE local_path <> ''"
+        ).fetchall()
+        updates: list[tuple[str, str]] = []
+        for row in rows:
+            path = str(row["local_path"] or "")
+            if not path.startswith(old):
+                continue
+            rest = path[len(old) :]
+            if rest and rest[0] not in "\\/":
+                continue
+            updates.append((new + rest, str(row["id"])))
+        if updates:
+            with self._conn:
+                self._conn.executemany(
+                    "UPDATE attachments SET local_path = ? WHERE id = ?", updates
+                )
+        return len(updates)
+
+    def cleanup_bodies(
+        self,
+        *,
+        cutoff: str,
+        limit: int = 200,
+        dry_run: bool = False,
+    ) -> dict:
+        """Purge local bodies of old mail that already has an Agent summary.
+
+        Never touches a message without a summary (the summary is the only
+        surviving content, so there must be one first), never touches a
+        message still in the follow-up queue (``todo_state='pending'``), and
+        keeps every other column plus the attachment rows/metadata.  The
+        ``body_purged_at`` marker makes repeated runs return ``cleaned: 0``.
+        ``dry_run`` computes the same counts without writing.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT m.id, m.todo_state,
+                   EXISTS(
+                       SELECT 1 FROM summaries s WHERE s.message_id = m.id
+                   ) AS has_summary
+            FROM messages m
+            WHERE m.date <> '' AND m.date < ? AND m.body_purged_at = ''
+            ORDER BY m.date ASC, m.rowid ASC
+            LIMIT ?
+            """,
+            (cutoff, int(limit)),
+        ).fetchall()
+
+        skipped_no_summary = skipped_todo = 0
+        cleanable: list[str] = []
+        for row in rows:
+            if not row["has_summary"]:
+                skipped_no_summary += 1
+            elif str(row["todo_state"] or "") == "pending":
+                skipped_todo += 1
+            else:
+                cleanable.append(str(row["id"]))
+
+        if not dry_run and cleanable:
+            timestamp = utc_now()
+            with self._conn:
+                self._conn.executemany(
+                    """
+                    UPDATE messages
+                    SET body_text = '', body_html = '', body_purged_at = ?
+                    WHERE id = ?
+                    """,
+                    [(timestamp, message_id) for message_id in cleanable],
+                )
+        return {
+            "candidates": len(rows),
+            "cleaned": len(cleanable),
+            "skippedNoSummary": skipped_no_summary,
+            "skippedTodo": skipped_todo,
+        }
 
     def count_attachments(self, message_id: Optional[str] = None) -> int:
         if message_id is None:

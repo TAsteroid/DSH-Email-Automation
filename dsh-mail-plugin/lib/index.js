@@ -10,7 +10,7 @@
  * 密码在 Core 侧用 Windows DPAPI 加密后落库，插件进程不保存。
  */
 
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -220,6 +220,27 @@ export function apply(ctx, config) {
   let ready = false
   let readyError = null
 
+  /** 切库后待重定位的旧附件目录（写在数据目录里的标记文件）。 */
+  const REBASE_MARKER = '.rebase-from'
+
+  /** 启动时如果发现切库标记，把附件路径前缀改到当前数据目录。 */
+  async function applyPendingRebase() {
+    try {
+      const marker = join(dataDir, REBASE_MARKER)
+      if (!existsSync(marker)) return
+      const from = readFileSync(marker, 'utf8').trim()
+      if (!from || from === dataDir) {
+        unlinkSync(marker)
+        return
+      }
+      const result = await core.request('admin.rebasePaths', { from, to: dataDir })
+      unlinkSync(marker)
+      log(`rebase: ${result?.updated ?? 0} attachment path(s) moved from ${from}`)
+    } catch (error) {
+      log(`rebase skipped: ${error?.message ?? error}`)
+    }
+  }
+
   async function ensureCore() {
     if (ready) return
     if (core.state === 'failed') {
@@ -230,6 +251,8 @@ export function apply(ctx, config) {
     await core.handshake()
     ready = true
     readyError = null
+    // 切过数据库目录的话，把附件路径前缀改到新目录
+    await applyPendingRebase()
     // IMAP 账号走 IDLE 实时推送；POP3 没有 IDLE，靠心跳轮询
     try {
       await core.request('idle.start', {})
@@ -2164,6 +2187,12 @@ export function apply(ctx, config) {
       }
 
       // 改配置会触发插件重载，Core 随之用新目录重启
+      // 先留标记：新 Core 起来后把附件 local_path 从旧目录改到新目录
+      try {
+        writeFileSync(join(target, REBASE_MARKER), dataDir, 'utf8')
+      } catch (error) {
+        log(`rebase marker not written: ${error?.message ?? error}`)
+      }
       await ctx.configEditor.edit(entry, (current) => ({ ...current, dataDir: target }))
       return { path: target, dbPath: targetDb, moved: copied }    })
 
@@ -2199,6 +2228,21 @@ export function apply(ctx, config) {
       if (typeof body.workspaceId === 'string') params.workspaceId = body.workspaceId
       if (typeof body.title === 'string') params.title = body.title
       return requireCoreResult(await callCore('contactSession.set', params))
+    })
+
+    // ---- 维护：附件路径重定位（切库后修复历史记录）--------------------------
+    route('/admin/rebase', async (body) => {
+      const from = requireText(body.from, 'from')
+      const to = requireText(body.to, 'to')
+      return requireCoreResult(await callCore('admin.rebasePaths', { from, to }, { timeoutMs: 120_000 }))
+    })
+
+    // ---- 30 天清理 ----------------------------------------------------------
+    route('/admin/cleanup', async (body) => {      const params = {}
+      if (body.olderThanDays !== undefined) params.olderThanDays = Number(body.olderThanDays)
+      if (body.dryRun === true) params.dryRun = true
+      if (body.limit !== undefined) params.limit = Number(body.limit)
+      return requireCoreResult(await callCore('admin.cleanup', params, { timeoutMs: 300_000 }))
     })
 
     // ---- 界面上下文（读取用户当前操作位置，不需审批）------------------------

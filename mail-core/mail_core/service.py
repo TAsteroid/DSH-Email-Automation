@@ -42,6 +42,7 @@ from .store import (
     SUMMARY_CATEGORIES,
     TODO_STATES,
     Store,
+    utc_days_ago,
     utc_now,
 )
 
@@ -251,6 +252,8 @@ class Service:
             "action.execute": self._action_execute,
             "admin.backup": self._admin_backup,
             "admin.backups": self._admin_backups,
+            "admin.rebasePaths": self._admin_rebase_paths,
+            "admin.cleanup": self._admin_cleanup,
             "idle.start": self._idle_start,
             "idle.stop": self._idle_stop,
             "idle.status": self._idle_status,
@@ -1290,6 +1293,27 @@ class Service:
         return {
             "backups": backup.list_backups(self.data_dir / backup.BACKUP_DIRNAME)
         }
+
+    def _admin_rebase_paths(self, params: dict) -> dict:
+        """Rewrite attachment paths after the data directory was moved."""
+        old_prefix = _require_str(params, "from")
+        new_prefix = _require_str(params, "to")
+        return {
+            "updated": self.store.rebase_attachment_paths(old_prefix, new_prefix)
+        }
+
+    def _admin_cleanup(self, params: dict) -> dict:
+        """Purge local bodies of old, already-summarised, not-pending mail."""
+        older_than_days = _optional_int(
+            params, "olderThanDays", 30, minimum=0
+        )
+        dry_run = _optional_bool(params, "dryRun", False)
+        limit = _optional_int(params, "limit", 200, minimum=1, maximum=1000)
+        return self.store.cleanup_bodies(
+            cutoff=utc_days_ago(older_than_days),
+            limit=limit,
+            dry_run=dry_run,
+        )
 
     # -- IMAP IDLE ---------------------------------------------------------
 

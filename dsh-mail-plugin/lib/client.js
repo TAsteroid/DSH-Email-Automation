@@ -174,6 +174,16 @@ window.__ModuleLoader__.load({
         deleteMail: '删除',
         idleState: '实时推送（IDLE）',
         idleWaiting: '等待中',
+        cleanupTitle: '正文清理',
+        cleanupHint: '只清理 30 天前、已生成摘要、且不在待处理里的邮件正文；标题/发件人/摘要/定位信息保留，可回溯原文。',
+        cleanupPreview: '预览',
+        cleanupRun: '执行清理',
+        cleanupCandidates: '候选',
+        cleanupDone: '已清理',
+        cleanupNoSummary: '无摘要跳过',
+        cleanupTodo: '待处理跳过',
+        cleanupConfirmTitle: '清理旧邮件正文？',
+        cleanupConfirmBody: '只会清掉满足条件的正文，附件与摘要不受影响。',
         dataDirTitle: '数据库位置',
         dataDirPick: '选择目录',
         dataDirHint: '切换目录时会把数据库、附件和备份复制过去，然后重启 Core。之后新目录独立。',
@@ -405,6 +415,16 @@ window.__ModuleLoader__.load({
         deleteMail: 'Delete',
         idleState: 'Live push (IDLE)',
         idleWaiting: 'waiting',
+        cleanupTitle: 'Body cleanup',
+        cleanupHint: 'Purges bodies of mails older than 30 days that have a summary and are not pending. Subjects, senders, summaries and locators stay.',
+        cleanupPreview: 'Preview',
+        cleanupRun: 'Run cleanup',
+        cleanupCandidates: 'candidates',
+        cleanupDone: 'cleaned',
+        cleanupNoSummary: 'skipped (no summary)',
+        cleanupTodo: 'skipped (pending)',
+        cleanupConfirmTitle: 'Purge old mail bodies?',
+        cleanupConfirmBody: 'Only qualifying bodies are removed; attachments and summaries stay.',
         dataDirTitle: 'Database location',
         dataDirPick: 'Choose folder',
         dataDirHint: 'Switching copies the database, attachments and backups to the new folder, then restarts the Core. The new folder is independent afterwards.',
@@ -2662,7 +2682,8 @@ window.__ModuleLoader__.load({
     /** 通用文件夹视图：左侧邮件标题，右侧正文；文件夹名从服务器解码结果里按模式找。 */
     function MailFolderView({ t, status, storageKey, folderPattern, titleKey, emptyHintKey, composeMode, agentChat, onRefresh, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
-      const account = accounts.length > 0 ? accounts[0] : null
+      // 跟着账户栏的选择走：选中某账户时用它发现/同步文件夹，否则退回第一个
+      const account = (accountId ? accounts.find((item) => item.id === accountId) : null) || accounts[0] || null
       const [folder, setFolder] = React.useState(null)
       const [messages, setMessages] = React.useState([])
       const [selectedId, setSelectedId] = React.useState(null)
@@ -4255,6 +4276,61 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** 30 天正文清理：先预览，再执行（只清有摘要、未处理完的旧邮件）。 */
+    function CleanupSection({ t }) {
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+      const [confirm, setConfirm] = React.useState(false)
+
+      const format = (value) =>
+        `${t('cleanupCandidates')} ${value.candidates ?? 0} · ${t('cleanupDone')} ${value.cleaned ?? 0} · ` +
+        `${t('cleanupNoSummary')} ${value.skippedNoSummary ?? 0} · ${t('cleanupTodo')} ${value.skippedTodo ?? 0}`
+
+      const run = async (dryRun) => {
+        if (busy) return
+        setBusy(true)
+        setNote(null)
+        try {
+          const value = await call('/admin/cleanup', { dryRun, olderThanDays: 30 })
+          setNote(format(value || {}))
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+          setConfirm(false)
+        }
+      }
+
+      return h(
+        'div',
+        null,
+        h(
+          'div',
+          { style: styles.row },
+          h('span', { style: styles.rowKey }, t('cleanupTitle')),
+          h(
+            'span',
+            { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => run(true) }, t('cleanupPreview')),
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => setConfirm(true) }, t('cleanupRun')),
+          ),
+        ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('cleanupHint')),
+        note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
+        confirm
+          ? h(ConfirmDialog, {
+              t,
+              title: t('cleanupConfirmTitle'),
+              body: t('cleanupConfirmBody'),
+              confirmLabel: t('cleanupRun'),
+              busy,
+              onCancel: () => setConfirm(false),
+              onConfirm: () => run(false),
+            })
+          : null,
+      )
+    }
+
     function SettingsView({ t, status, onRefresh }) {
       const core = (status && status.core) || {}
       const accounts = (status && status.accounts) || []
@@ -4277,6 +4353,7 @@ window.__ModuleLoader__.load({
           h(DataDirField, { t, onRefresh }),
           h(WorkspaceField, { t, onRefresh }),
           h(BackupSection, { t }),
+          h(CleanupSection, { t }),
           h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),
           core.error
             ? h('p', { style: { ...styles.error, marginTop: 8 } }, `${t('coreError')}: ${core.error.code} · ${core.error.message}`)

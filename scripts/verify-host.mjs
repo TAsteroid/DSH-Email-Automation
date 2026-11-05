@@ -224,6 +224,8 @@ function handleMethod(method, params) {
       attachments: [{ id: 'att_1', filename: '报价表.xlsx', size: 2048, fetchedAt: '' }],
     }
   }
+  if (method === 'admin.cleanup') return { candidates: 3, cleaned: params.dryRun ? 0 : 2, skippedNoSummary: 1, skippedTodo: 0, dryRun: Boolean(params.dryRun) }
+  if (method === 'admin.rebasePaths') return { updated: 0 }
   if (method === 'account.updateCredential') return { id: params.id, updatedAt: '2026-11-05T00:00:00Z' }
   if (method === 'idle.stop') return { stopped: ['acc_1'] }
   if (method === 'idle.start') return { started: ['acc_1'], skipped: [] }
@@ -974,6 +976,13 @@ check(pwdNoPass && pwdNoPass.status === 400, `改密码缺 password 应 400，�
 
 const pwdRoute = await invoke('/api/dsh-mail/accounts/password', { method: 'POST', body: JSON.stringify({ id: 'acc_1', password: 'new-secret' }) })
 check(pwdRoute && pwdRoute.status === 200, `改密码应 200，实际 ${pwdRoute && pwdRoute.status}`)
+
+const cleanupDry = await invoke('/api/dsh-mail/admin/cleanup', { method: 'POST', body: JSON.stringify({ dryRun: true }) })
+check(cleanupDry && cleanupDry.status === 200, `cleanup 应 200，实际 ${cleanupDry && cleanupDry.status}`)
+if (cleanupDry && cleanupDry.body) {
+  const parsed = JSON.parse(cleanupDry.body)
+  check(parsed.value.dryRun === true && parsed.value.candidates === 3, 'cleanup dryRun 应只统计')
+}
 
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })
 if (statuses && statuses.body) {
