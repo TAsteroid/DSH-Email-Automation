@@ -286,7 +286,7 @@ pwsh -File scripts/uninstall.ps1 -Profile desktop -PurgeData  # 连数据一起�
 
 ## 14. 相关文档
 
-- 计划书（冻结）：`DSH_Email_Automation.md`
+- 计划书（冻结）：`docs/PLAN.md`
 - 计划对照与偏差：`docs/PLAN_DELTA.md`
 - Core 协议：`docs/IPC_PROTOCOL.md`
 - 实施计划（待跟进+总结）：`docs/PLAN_TODO_SUMMARY.md`

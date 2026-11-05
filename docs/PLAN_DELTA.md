@@ -1,9 +1,9 @@
 # 计划书进度对照与条款变更
 
-> **本文是唯一准绳。** `DSH_Email_Automation.md` 定格为 v1.0 历史文档，不再修改；
+> **本文是唯一准绳。** `docs/PLAN.md` 定格为 v1.0 历史文档，不再修改；
 > 两者冲突时以本文为准。计划书里没被本文列出的条款仍然有效。
 
-对照对象：`DSH_Email_Automation.md`（v1.0，不再更新）
+对照对象：`docs/PLAN.md`（v1.0，不再更新）
 更新时间：2026-11-04
 代码：`mail-core/`（Python）+ `dsh-mail-plugin/`（Cordis 插件），schema v7，真实账号已接入
 
