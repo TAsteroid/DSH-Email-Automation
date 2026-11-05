@@ -588,7 +588,7 @@ POP3 结果：
 ```
 
 - 只读本地元数据，**不联网、不下载**；按所属邮件的 `date` 倒序（同一天新的在前）。
-- `pendingOnly: true` 表示「还在等待处理」：只返回**未下载**（`fetchedAt == ""`）、**未 dismiss**（`dismissedAt == ""`）且**所属邮件位于 INBOX** 的附件。发件箱 / 已发送等其它文件夹的附件不会出现在待办里。
+- `pendingOnly: true` 表示「还在等待处理」：只返回**未 dismiss**（`dismissedAt == ""`）且**所属邮件位于 INBOX** 的附件。**下载不影响待办状态**——`attachment.fetch` 完成后该附件仍留在列表里，只有 [`attachment.dismiss`](#attachmentdismiss) 才让它消失。发件箱 / 已发送等其它文件夹的附件不会出现在待办里。
 - 非 `pendingOnly` 时行为不变：按 `messageId` / `accountId` 返回所有附件（含已下载、已 dismiss、非 INBOX 的）。
 - `fetchedAt` 非空表示文件已经下载到本地；`dismissedAt` 非空表示用户已把它标记为处理过（见 [`attachment.dismiss`](#attachmentdismiss)）。
 - `inline` 附件默认不出现，需要时用 `attachment.get` 按 id 查。
@@ -995,4 +995,4 @@ POP3 结果：
 - v8 只**新增** `attachments` 表（`message_id` 外键指向 `messages.id`，`ON DELETE CASCADE`）和 `messages.attachments_synced` 标记列（旧邮件默认 0，表示附件元数据尚未提取），不改旧表结构、不删旧邮件、不在库里存附件内容。旧邮件用 `attachment.backfill` 补；新同步邮件在同一事务内写入附件行。老库（v1~v7）启动时先自动备份再升级；附件文件只落在 `<data-dir>/attachments/`。
 - v9 只**新增**：`messages.todo_state` / `messages.todo_updated_at` 两列、`accounts.todo_baseline_done` 标记列、`summaries` 表及其三个索引（另加 `messages(todo_state, date)` 列表索引）。旧数据 `todo_state` 为空串（不会被当成待办），`todo_baseline_done=0`（下一轮普通 INBOX 同步成为基线）；`summaries.message_id` 外键指向 `messages.id`，邮件删除时总结级联删除。老库（v1~v8）启动时先自动备份再升级；迁移幂等。
 - v10 只**新增** `contact_sessions` 表（邮箱地址 ↔ DSH 会话映射）与 `idx_contact_sessions_email` 索引：`(account_id, email)` 唯一，`account_id` 外键 `ON DELETE CASCADE`（删账号连带清映射），`email` 由核心层统一小写；不改旧表、不丢旧数据。老库（v1~v9）启动时先自动备份再升级；迁移幂等。
-- v11 只给 `attachments` **新增** `dismissed_at` 一列（默认空串，表示尚未标记为已处理），不改旧表结构、不丢旧数据、不删附件文件；`attachment.list` 的 `pendingOnly` 语义随之扩展为「未下载 + 未 dismiss + 属于 INBOX」。老库（v1~v10）启动时先自动备份再升级；迁移用列检查保证幂等。
+- v11 只给 `attachments` **新增** `dismissed_at` 一列（默认空串，表示尚未标记为已处理），不改旧表结构、不丢旧数据、不删附件文件；`attachment.list` 的 `pendingOnly` 语义随之变为「未 dismiss + 属于 INBOX」（下载状态不影响待办，下载完仍需用户 dismiss 才消失）。老库（v1~v10）启动时先自动备份再升级；迁移用列检查保证幂等。

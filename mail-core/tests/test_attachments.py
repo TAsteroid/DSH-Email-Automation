@@ -277,6 +277,15 @@ class AttachmentTests(unittest.TestCase):
         self.assertEqual(detail["path"], result["path"])
         self.assertEqual(detail["sha256"], result["sha256"])
         pending = self._list(accountId=account_id, pendingOnly=True)
+        self.assertIn(
+            report["id"],
+            {item["id"] for item in pending},
+            "downloading must leave the attachment in the pending list",
+        )
+
+        # Only an explicit dismiss closes the follow-up item.
+        self.service.dispatch("attachment.dismiss", {"id": report["id"]})
+        pending = self._list(accountId=account_id, pendingOnly=True)
         self.assertNotIn(report["id"], {item["id"] for item in pending})
 
         # A second fetch is a no-op that returns the same file.

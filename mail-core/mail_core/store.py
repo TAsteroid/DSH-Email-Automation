@@ -1377,8 +1377,10 @@ class Store:
         Inline resources (HTML images, calendar parts) are not shown by
         default: they are not "attachments to analyse", even though their
         metadata is stored so ``attachment.get`` can still inspect it.
-        ``pending_only`` means "still waiting for the user": not downloaded
-        and not dismissed.
+        ``pending_only`` means "still waiting for the user": the attachment
+        was not dismissed and its mail is in the INBOX.  Downloading does not
+        remove it — a handled attachment stays pending until the user marks it
+        as done (``dismissed_at``).
         """
         clauses: list[str] = []
         args: list = []
@@ -1390,8 +1392,9 @@ class Store:
             args.append(account_id)
         if pending_only:
             # Pending work only comes from the inbox: attachments of sent mail
-            # (or any other folder) are not follow-up items.
-            clauses.append("a.fetched_at = ''")
+            # (or any other folder) are not follow-up items.  The download
+            # state is deliberately not part of the filter: downloading is
+            # part of doing the work, dismissing is what closes it.
             clauses.append("a.dismissed_at = ''")
             clauses.append("m.folder = 'INBOX'")
         if not include_inline:

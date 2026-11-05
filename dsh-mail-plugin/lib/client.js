@@ -2242,7 +2242,7 @@ window.__ModuleLoader__.load({
                           type: 'button',
                           style: styles.btnSmall,
                           disabled: fetchingId === attachment.id,
-                          onClick: () => onFetchAttachment(attachment),
+                          onClick: () => onFetchAttachment(attachment, item),
                         },
                         t('attachmentAnalyze'),
                       ),
@@ -2550,14 +2550,15 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** 下载这封邮件下面某个附件（用户点了才取）。 */
-      const fetchAttachment = async (attachment) => {
+      /** 下载这封邮件下面的某个附件；下载完直接进入总结流程。 */
+      const fetchAttachment = async (attachment, item) => {
         if (!attachment || fetchingId) return
         setFetchingId(attachment.id)
         try {
           const value = await call('/attachments/fetch', { id: attachment.id })
           setResults((prev) => ({ ...prev, [attachment.id]: value || {} }))
           if (onRefresh) onRefresh()
+          if (item && item.messageId) await openSummarySession(item)
         } catch (error) {
           setResults((prev) => ({ ...prev, [attachment.id]: { error: error.message } }))
         } finally {
