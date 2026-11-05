@@ -170,7 +170,10 @@ window.__ModuleLoader__.load({
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
         deleteMail: '删除',
-        workspaceTitle: '邮件工作区',
+        dataDirTitle: '数据库位置',
+        dataDirPick: '选择目录',
+        dataDirHint: '切换目录时会把数据库、附件和备份复制过去，然后重启 Core。之后新目录独立。',
+        dataDirSaved: '已切换',
         workspacePick: '选择目录',
         workspaceHint: '所有邮件会话都创建在这个工作区；同名发件人复用同一条会话。',
         workspaceSaved: '已保存',
@@ -388,6 +391,10 @@ window.__ModuleLoader__.load({
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
 
         deleteMail: 'Delete',
+        dataDirTitle: 'Database location',
+        dataDirPick: 'Choose folder',
+        dataDirHint: 'Switching copies the database, attachments and backups to the new folder, then restarts the Core. The new folder is independent afterwards.',
+        dataDirSaved: 'Switched',
         workspaceTitle: 'Mail workspace',
         workspacePick: 'Choose folder',
         workspaceHint: 'Every mail conversation lives in this workspace; the same sender reuses one conversation.',
@@ -3869,6 +3876,60 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 数据库位置：展示路径 + 选择目录（切换时复制数据并重启 Core）。 */
+    function DataDirField({ t, onRefresh }) {
+      const [state, setState] = React.useState({ path: '', dbPath: '' })
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      React.useEffect(() => {
+        call('/config/data-dir', {})
+          .then((value) => setState({ path: value.path || '', dbPath: value.dbPath || '' }))
+          .catch(() => {})
+      }, [])
+
+      const pick = async () => {
+        if (busy) return
+        const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
+        if (!uiWorkspace || typeof uiWorkspace.pickDirectory !== 'function') {
+          setNote(t('todoSessionFailed'))
+          return
+        }
+        setBusy(true)
+        setNote(null)
+        try {
+          const dir = await uiWorkspace.pickDirectory()
+          if (!dir) return
+          const value = await call('/config/data-dir/set', { path: dir })
+          setState({ path: value.path || dir, dbPath: value.dbPath || '' })
+          setNote(value.moved ? t('dataDirSaved') : t('dataDirSaved'))
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(
+        'div',
+        null,
+        h(
+          'div',
+          { style: styles.row },
+          h('span', { style: styles.rowKey }, t('dataDirTitle')),
+          h(
+            'span',
+            { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
+            h('span', { style: { ...styles.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, state.path || '—'),
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: pick }, t('dataDirPick')),
+          ),
+        ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('dataDirHint')),
+        note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
+      )
+    }
+
     /** 邮件工作区：展示路径 + 让用户选目录。 */
     function WorkspaceField({ t, onRefresh }) {
       const [state, setState] = React.useState({ path: '', workspaceId: '' })
@@ -3938,6 +3999,7 @@ window.__ModuleLoader__.load({
           h(Row, { label: t('coreDb'), value: core.dbPath || '—' }),
           h(Row, { label: t('coreDataDir'), value: core.dataDir || '—' }),
           h(SyncIntervalField, { t, status, onRefresh }),
+          h(DataDirField, { t, onRefresh }),
           h(WorkspaceField, { t, onRefresh }),
           h(BackupSection, { t }),
           h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),

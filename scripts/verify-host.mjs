@@ -936,6 +936,30 @@ const bindRoute = await invoke('/api/dsh-mail/sessions/bind', {
 })
 check(bindRoute && bindRoute.status === 200, `绑定应 200，实际 ${bindRoute && bindRoute.status}`)
 
+// ---- 数据库位置 -----------------------------------------------------------
+const dataDirRoute = await invoke('/api/dsh-mail/config/data-dir', { method: 'POST', body: '{}' })
+check(dataDirRoute && dataDirRoute.status === 200, `config/data-dir 应 200，实际 ${dataDirRoute && dataDirRoute.status}`)
+if (dataDirRoute && dataDirRoute.body) {
+  const parsed = JSON.parse(dataDirRoute.body)
+  check(String(parsed.value.dbPath).endsWith('mail.db'), '应返回数据库完整路径')
+}
+
+const dataDirRelative = await invoke('/api/dsh-mail/config/data-dir/set', {
+  method: 'POST',
+  body: JSON.stringify({ path: 'relative/dir' }),
+})
+check(dataDirRelative && dataDirRelative.status === 400, `相对路径应 400，实际 ${dataDirRelative && dataDirRelative.status}`)
+
+const dataDirSame = await invoke('/api/dsh-mail/config/data-dir/set', {
+  method: 'POST',
+  body: JSON.stringify({ path: 'C:\\data\\mail' }),
+})
+check(dataDirSame && dataDirSame.status === 200, `切到相同目录应 200，实际 ${dataDirSame && dataDirSame.status}`)
+if (dataDirSame && dataDirSame.body) {
+  const parsed = JSON.parse(dataDirSame.body)
+  check(parsed.value.moved === false, '相同目录不应复制数据')
+}
+
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })
 if (statuses && statuses.body) {
   const parsed = JSON.parse(statuses.body)

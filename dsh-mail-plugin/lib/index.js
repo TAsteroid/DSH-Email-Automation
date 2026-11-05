@@ -10,9 +10,9 @@
  * 密码在 Core 侧用 Windows DPAPI 加密后落库，插件进程不保存。
  */
 
-import { existsSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createCoreClient } from './core-client.js'
 
@@ -1928,6 +1928,48 @@ export function apply(ctx, config) {
     route('/summary/context', async (body) => {
       const messageId = requireText(body.messageId, 'messageId')
       return requireCoreResult(await callCore('summary.context', { messageId }, { timeoutMs: 60_000 }))
+    })
+
+    // ---- 数据目录（数据库位置）--------------------------------------------
+    route('/config/data-dir', async () => ({ path: dataDir, dbPath: join(dataDir, 'mail.db') }))
+
+    route('/config/data-dir/set', async (body) => {
+      const target = requireText(body.path, 'path')
+      if (!isAbsolute(target)) throw Object.assign(new Error('path must be absolute'), { code: 'BAD_REQUEST' })
+      if (target === dataDir) return { path: dataDir, dbPath: join(dataDir, 'mail.db'), moved: false }
+
+      const entry = findConfigEntry()
+      if (!entry) throw new Error('mail plugin config entry not found')
+
+      const targetDb = join(target, 'mail.db')
+      const sourceDb = join(dataDir, 'mail.db')
+      const overwrite = body.overwrite === true
+      if (existsSync(targetDb) && !overwrite) {
+        throw Object.assign(new Error(`database already exists at ${targetDb}`), { code: 'BAD_REQUEST' })
+      }
+
+      mkdirSync(target, { recursive: true })
+      let copied = false
+      if (existsSync(sourceDb)) {
+        // 先停 Core，避免复制到写了一半的 SQLite
+        try {
+          core.stop()
+        } catch {
+          // 已经停了就无所谓
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        copyFileSync(sourceDb, targetDb)
+        for (const extra of ['attachments', 'backups']) {
+          const from = join(dataDir, extra)
+          const to = join(target, extra)
+          if (existsSync(from)) cpSync(from, to, { recursive: true })
+        }
+        copied = true
+      }
+
+      // 改配置会触发插件重载，Core 随之用新目录重启
+      await ctx.configEditor.edit(entry, (current) => ({ ...current, dataDir: target }))
+      return { path: target, dbPath: targetDb, moved: copied }
     })
 
     // ---- 邮件工作区 & 联系人会话 -------------------------------------------

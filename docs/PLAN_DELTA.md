@@ -73,6 +73,8 @@
 | `folder.list` RPC（本地文件夹缓存） | `service.py` |
 | 通讯录（增删改查 + Agent 提示词生成） | schema v4 + UI |
 | 附件元数据与按需下载（schema v8） | `attachments` 表 + `attachment.list/fetch/backfill`；待跟进里以事项列出，用户确认后才下载 |
+| 数据库位置可配置 | 设置页「数据库位置」：选目录后复制 mail.db/attachments/backups 并重启 Core |
+| 邮件专用工作区 + 联系人会话复用（schema v10） | `contact_sessions` 表；点「总结」时才建会话，同发件人复用；工作区可在设置里选 |
 | Agent 上下文工具（`mail_current` / `mail_thread` / `mail_related` / `mail_attachments`） | 让 Agent 知道「用户在看哪封」，并自行检索相关材料与附件 |
 | 邮件模板（本地保存，不同步） | schema v4 + UI |
 | 全文搜索（FTS5 + 中文子串回退） | `store.search_messages` + 顶栏搜索框 |
