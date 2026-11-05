@@ -59,12 +59,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 9}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 10}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结。**它和 `protocol` 无关**：v9 只新增列、表和索引，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射。**它和 `protocol` 无关**：v10 只新增表，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -622,6 +622,60 @@ POP3 结果：
 
 参数：`{"id": "con_xxx"}` → 结果 `{"removed": true}`；`id` 不存在 → `NOT_FOUND`。
 
+### `contactSession.get`
+
+参数：`{"accountId": "acc_xxx", "email": "alice@example.com"}`（`accountId` 可省略）
+
+结果（存在时）：
+
+```json
+{"sessionId": "sess_xxx", "workspaceId": "ws_xxx", "title": "Alice",
+ "updatedAt": "2026-11-04T12:00:00Z"}
+```
+
+不存在时：`{"sessionId": ""}`（**不报错**）。
+
+- `email` 统一 `strip().lower()` 后查询；空串 / 非字符串 → `BAD_REQUEST`。
+- 省略 `accountId` 时按 email 跨账号查询，取 `updatedAt` 最新的那条；显式给 `accountId` 时只查该账号。
+- 这是「邮箱地址 → DSH 会话」的持久化映射，DSH 重启后仍可复用同一会话；映射**只存本地**。
+
+### `contactSession.set`
+
+参数：
+
+```json
+{"accountId": "acc_xxx", "email": "Alice@Example.COM",
+ "sessionId": "sess_xxx", "workspaceId": "ws_xxx", "title": "Alice"}
+```
+
+结果：`{"sessionId": "sess_xxx", "workspaceId": "ws_xxx", "title": "Alice",
+"updatedAt": "2026-11-04T12:00:00Z"}`
+
+- `accountId` / `email` / `sessionId` 必填；`email` 统一 `strip().lower()` 后存；空 email / 空 sessionId → `BAD_REQUEST`；账号不存在 → `NOT_FOUND`。
+- 按 `(accountId, email)` **upsert**：同一组合永远只有一条记录，重复 set 会覆盖 `sessionId` 并刷新 `updatedAt`。
+- `workspaceId` / `title` 可省略：**省略时保留旧值**，显式传空串则清空；类型不是字符串 → `BAD_REQUEST`。
+
+### `contactSession.remove`
+
+参数：`{"accountId": "acc_xxx", "email": "alice@example.com"}` → 结果 `{"removed": true}`
+
+- 映射不存在也返回 `{"removed": true}`（幂等清理，不报错）。
+- 删除账号时该账号的所有映射级联删除。
+
+### `contactSession.list`
+
+参数：`{"accountId": "acc_xxx"}`（可省略 = 所有账户）
+
+结果：
+
+```json
+{"sessions": [{"email": "alice@example.com", "sessionId": "sess_xxx",
+  "workspaceId": "ws_xxx", "title": "Alice",
+  "updatedAt": "2026-11-04T12:00:00Z"}]}
+```
+
+按 `updatedAt` 倒序（同一时间按 email 升序）。只读本地表，不联网。
+
 ### `template.list`
 
 参数：`{}`
@@ -833,3 +887,4 @@ POP3 结果：
 - v7 只给 `messages` **新增** `thread_id`、`in_reply_to`、`refs` 三列（`refs` 是 `References` 头；`references` 是 SQL 关键字，故列名缩短）以及两个线程索引，不改旧表结构、不删旧邮件；迁移后对 `thread_id = ''` 的旧行按线程规则回填一次（幂等，重复迁移不再改动已回填的行）。老库（v1~v6）启动时先自动备份再逐级升级。新增字段都可空串，旧插件忽略 `threadId` 即可继续工作。
 - v8 只**新增** `attachments` 表（`message_id` 外键指向 `messages.id`，`ON DELETE CASCADE`）和 `messages.attachments_synced` 标记列（旧邮件默认 0，表示附件元数据尚未提取），不改旧表结构、不删旧邮件、不在库里存附件内容。旧邮件用 `attachment.backfill` 补；新同步邮件在同一事务内写入附件行。老库（v1~v7）启动时先自动备份再升级；附件文件只落在 `<data-dir>/attachments/`。
 - v9 只**新增**：`messages.todo_state` / `messages.todo_updated_at` 两列、`accounts.todo_baseline_done` 标记列、`summaries` 表及其三个索引（另加 `messages(todo_state, date)` 列表索引）。旧数据 `todo_state` 为空串（不会被当成待办），`todo_baseline_done=0`（下一轮普通 INBOX 同步成为基线）；`summaries.message_id` 外键指向 `messages.id`，邮件删除时总结级联删除。老库（v1~v8）启动时先自动备份再升级；迁移幂等。
+- v10 只**新增** `contact_sessions` 表（邮箱地址 ↔ DSH 会话映射）与 `idx_contact_sessions_email` 索引：`(account_id, email)` 唯一，`account_id` 外键 `ON DELETE CASCADE`（删账号连带清映射），`email` 由核心层统一小写；不改旧表、不丢旧数据。老库（v1~v9）启动时先自动备份再升级；迁移幂等。

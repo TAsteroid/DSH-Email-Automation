@@ -31,6 +31,8 @@ pre-v8 mail can be re-parsed for attachments without refetching it twice.
 Schema v9 adds the follow-up state (``messages.todo_state`` /
 ``messages.todo_updated_at``, ``accounts.todo_baseline_done``) and the
 append-only Agent ``summaries`` table, cascade-deleted with its message.
+Schema v10 adds ``contact_sessions``, the persisted mailbox-address -> DSH
+session mapping used to reuse one conversation per sender across restarts.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -403,6 +405,32 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
     )
 
 
+# Schema v10: mailbox-address -> DSH session mapping.  One row per
+# (account, email) so the same sender keeps reusing their session even after
+# DSH restarts; ``email`` is always stored lowercased by the service layer.
+# The account foreign key cascades so deleting an account drops its mappings.
+def _migrate_to_v10(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS contact_sessions (
+            id           TEXT PRIMARY KEY,
+            account_id   TEXT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+            email        TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            workspace_id TEXT NOT NULL DEFAULT '',
+            title        TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            UNIQUE (account_id, email)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_contact_sessions_email "
+        "ON contact_sessions (email)"
+    )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -413,6 +441,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     7: _migrate_to_v7,
     8: _migrate_to_v8,
     9: _migrate_to_v9,
+    10: _migrate_to_v10,
 }
 
 
@@ -725,6 +754,126 @@ class Store:
                 (1 if done else 0, account_id),
             )
         return cursor.rowcount > 0
+
+    # -- contact sessions (mailbox address -> DSH session) ----------------
+
+    @staticmethod
+    def _contact_session_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "accountId": row["account_id"],
+            "email": row["email"],
+            "sessionId": row["session_id"],
+            "workspaceId": row["workspace_id"],
+            "title": row["title"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def get_contact_session(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        email: str,
+    ) -> Optional[dict]:
+        """Look one mapping up by (account, email), or by email across accounts.
+
+        The email is the caller-normalised (lowercased) value; without an
+        account the most recently updated mapping for that address wins.
+        """
+        if account_id is None:
+            row = self._conn.execute(
+                "SELECT * FROM contact_sessions WHERE email = ? "
+                "ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+                (email,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM contact_sessions WHERE account_id = ? AND email = ?",
+                (account_id, email),
+            ).fetchone()
+        return self._contact_session_to_dict(row) if row is not None else None
+
+    def set_contact_session(
+        self,
+        *,
+        account_id: str,
+        email: str,
+        session_id: str,
+        workspace_id: Optional[str] = None,
+        title: Optional[str] = None,
+        now: Optional[str] = None,
+    ) -> dict:
+        """Upsert one mapping; omitted metadata keeps the stored value.
+
+        The UNIQUE (account_id, email) constraint is what keeps exactly one
+        row per sender per account, and ``updated_at`` moves on every write.
+        """
+        existing = self.get_contact_session(account_id=account_id, email=email) or {}
+        workspace = (
+            workspace_id
+            if workspace_id is not None
+            else str(existing.get("workspaceId") or "")
+        )
+        display_title = (
+            title if title is not None else str(existing.get("title") or "")
+        )
+        timestamp = now or utc_now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO contact_sessions (
+                    id, account_id, email, session_id, workspace_id,
+                    title, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (account_id, email) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    workspace_id = excluded.workspace_id,
+                    title = excluded.title,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    f"csn_{uuid.uuid4().hex}",
+                    account_id,
+                    email,
+                    session_id,
+                    workspace,
+                    display_title,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return self.get_contact_session(account_id=account_id, email=email) or {}
+
+    def remove_contact_session(self, *, account_id: str, email: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM contact_sessions WHERE account_id = ? AND email = ?",
+                (account_id, email),
+            )
+        return cursor.rowcount > 0
+
+    def list_contact_sessions(
+        self, account_id: Optional[str] = None
+    ) -> list[dict]:
+        """Mappings ordered by most recent update, then email."""
+        if account_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM contact_sessions "
+                "ORDER BY updated_at DESC, email ASC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM contact_sessions WHERE account_id = ? "
+                "ORDER BY updated_at DESC, email ASC",
+                (account_id,),
+            ).fetchall()
+        return [self._contact_session_to_dict(row) for row in rows]
+
+    def count_contact_sessions(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM contact_sessions"
+        ).fetchone()
+        return int(row["n"])
 
     # -- folders -----------------------------------------------------------
 

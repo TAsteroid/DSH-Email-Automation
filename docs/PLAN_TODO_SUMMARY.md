@@ -122,17 +122,36 @@ CREATE INDEX idx_summaries_category ON summaries(category);
 
 ### 5.2 「总结」按钮
 
-点一下 → 客户端调用 `ctx.uiWorkspace.startSession()` 开一条会话（方案 A2：每封邮件一条，第二次复用），首条消息是一段固定模板：
+点一下 → 客户端：
+
+1. 从发件人地址查 `contact_sessions` 映射（schema v10）
+2. **映射存在且会话还活着** → 直接 `openSession` 复用
+3. 否则：
+   - 确保「邮件专用工作区」存在（设置里可选目录；首次用 `ctx.workspaces.create` 建，id 写回配置）
+   - `ctx.sessions.create({ workspaceId })` 新建会话
+   - `session.rename(联系人名)`
+   - 发送首条提示词（**必须发消息，否则空白会话不会出现在侧边栏**）
+   - 写入 `contact_sessions` 映射
+   - `openSession` 打开
+
+首条消息模板固定：
 
 ```
 请总结邮件 <messageId>。
 先调用 mail_triage_context 拉取上下文；
 如果返回 hasHistory=true，先把历史结论列出来问我怎么处理，等我回答后再继续；
-总结完成后调用 mail_summary_save（分类只能从给定 8 类里选）；
+总结完成后调用 mail_summary_save（分类只能从 8 类里选）；
 我确认处理完毕后调用 mail_mark_done。
 ```
 
-**会话复用**：`localStorage` 里存 `邮件id → sessionId`；点第二次直接 `openSession` 回去。
+### 5.2.1 新邮件通知
+
+`status.todos.pending` 出现新条目时：
+
+- 单封一条 Windows 通知，**标题=邮件主题，正文=发件人**
+- 首次加载只提示 30 分钟内的，避免历史积压刷屏
+- 已提示过的 id 记在 `localStorage`，不重复弹
+- 点击通知 → 切到邮件面板并跳到「待跟进」页
 
 ### 5.3 邮件详情
 

@@ -174,6 +174,13 @@ def _optional_choice(
     return value
 
 
+def _normalize_email(value: Any) -> str:
+    """Lowercase/strip a mailbox address for the contact-session mapping."""
+    if not isinstance(value, str) or not value.strip():
+        raise bad_request("field email must be a non-empty string")
+    return value.strip().lower()
+
+
 class Service:
     """Owns the data directory, the SQLite store and the method table."""
 
@@ -214,6 +221,10 @@ class Service:
             "contact.add": self._contact_add,
             "contact.update": self._contact_update,
             "contact.remove": self._contact_remove,
+            "contactSession.get": self._contact_session_get,
+            "contactSession.set": self._contact_session_set,
+            "contactSession.remove": self._contact_session_remove,
+            "contactSession.list": self._contact_session_list,
             "template.list": self._template_list,
             "template.add": self._template_add,
             "template.remove": self._template_remove,
@@ -822,6 +833,73 @@ class Service:
         if not self.store.remove_contact(contact_id):
             raise MailCoreError(NOT_FOUND, "contact not found")
         return {"removed": True}
+
+    # -- contact sessions (mailbox address -> DSH session) -----------------
+
+    def _contact_session_get(self, params: dict) -> dict:
+        """Read one persisted mapping; an absent address is not an error."""
+        account_id = _optional_id(params, "accountId")
+        email = _normalize_email(params.get("email"))
+        mapping = self.store.get_contact_session(
+            account_id=account_id, email=email
+        )
+        if mapping is None:
+            return {"sessionId": ""}
+        return {
+            "sessionId": mapping["sessionId"],
+            "workspaceId": mapping["workspaceId"],
+            "title": mapping["title"],
+            "updatedAt": mapping["updatedAt"],
+        }
+
+    def _contact_session_set(self, params: dict) -> dict:
+        """Upsert the mapping for one sender (one row per account + email)."""
+        account_id = _require_str(params, "accountId")
+        email = _normalize_email(params.get("email"))
+        session_id = _require_str(params, "sessionId")
+        workspace_id = params.get("workspaceId")
+        if workspace_id is not None and not isinstance(workspace_id, str):
+            raise bad_request("field workspaceId must be a string")
+        title = params.get("title")
+        if title is not None and not isinstance(title, str):
+            raise bad_request("field title must be a string")
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        mapping = self.store.set_contact_session(
+            account_id=account_id,
+            email=email,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            title=title,
+        )
+        return {
+            "sessionId": mapping["sessionId"],
+            "workspaceId": mapping["workspaceId"],
+            "title": mapping["title"],
+            "updatedAt": mapping["updatedAt"],
+        }
+
+    def _contact_session_remove(self, params: dict) -> dict:
+        """Drop the mapping; removing an absent one is a no-op success."""
+        account_id = _require_str(params, "accountId")
+        email = _normalize_email(params.get("email"))
+        self.store.remove_contact_session(account_id=account_id, email=email)
+        return {"removed": True}
+
+    def _contact_session_list(self, params: dict) -> dict:
+        account_id = _optional_id(params, "accountId")
+        sessions = [
+            {
+                "email": item["email"],
+                "sessionId": item["sessionId"],
+                "workspaceId": item["workspaceId"],
+                "title": item["title"],
+                "updatedAt": item["updatedAt"],
+            }
+            for item in self.store.list_contact_sessions(account_id)
+        ]
+        return {"sessions": sessions}
 
     # -- templates ---------------------------------------------------------
 

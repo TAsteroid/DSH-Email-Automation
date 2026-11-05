@@ -382,6 +382,18 @@ export function apply(ctx, config) {
     })
   }
 
+  /** 邮件专用工作区目录（默认 <dataDir>/workspace）。 */
+  function mailWorkspacePath() {
+    const raw = config?.mailWorkspace
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : join(dataDir, 'workspace')
+  }
+
+  /** 已创建的 DSH 工作区 id（首次创建后写回配置，避免重复建）。 */
+  function mailWorkspaceId() {
+    const raw = config?.mailWorkspaceId
+    return typeof raw === 'string' ? raw.trim() : ''
+  }
+
   /** 找到本插件在 Loader 里的配置行，用于把自动同步间隔写回 profile。 */
   function findConfigEntry() {
     try {
@@ -1916,6 +1928,37 @@ export function apply(ctx, config) {
     route('/summary/context', async (body) => {
       const messageId = requireText(body.messageId, 'messageId')
       return requireCoreResult(await callCore('summary.context', { messageId }, { timeoutMs: 60_000 }))
+    })
+
+    // ---- 邮件工作区 & 联系人会话 -------------------------------------------
+    route('/config/workspace', async () => ({ path: mailWorkspacePath(), workspaceId: mailWorkspaceId() }))
+
+    route('/config/workspace/set', async (body) => {
+      const entry = findConfigEntry()
+      if (!entry) throw new Error('mail plugin config entry not found')
+      const next = {}
+      if (typeof body.path === 'string' && body.path.trim()) next.mailWorkspace = body.path.trim()
+      if (typeof body.workspaceId === 'string') next.mailWorkspaceId = body.workspaceId.trim()
+      if (Object.keys(next).length === 0) throw Object.assign(new Error('nothing to update'), { code: 'BAD_REQUEST' })
+      await ctx.configEditor.edit(entry, (current) => ({ ...current, ...next }))
+      return { path: mailWorkspacePath(), workspaceId: mailWorkspaceId() }
+    })
+
+    route('/sessions/lookup', async (body) => {
+      const email = requireText(body.email, 'email')
+      const params = { email }
+      if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
+      return requireCoreResult(await callCore('contactSession.get', params))
+    })
+
+    route('/sessions/bind', async (body) => {
+      const email = requireText(body.email, 'email')
+      const sessionId = requireText(body.sessionId, 'sessionId')
+      const accountId = requireText(body.accountId, 'accountId')
+      const params = { accountId, email, sessionId }
+      if (typeof body.workspaceId === 'string') params.workspaceId = body.workspaceId
+      if (typeof body.title === 'string') params.title = body.title
+      return requireCoreResult(await callCore('contactSession.set', params))
     })
 
     // ---- 界面上下文（读取用户当前操作位置，不需审批）------------------------

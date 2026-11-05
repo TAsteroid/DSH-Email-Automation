@@ -223,6 +223,19 @@ function handleMethod(method, params) {
       attachments: [{ id: 'att_1', filename: '报价表.xlsx', size: 2048, fetchedAt: '' }],
     }
   }
+  if (method === 'contactSession.get') {
+    return params.email === 'a@b.com'
+      ? { sessionId: 'sess_1', workspaceId: 'ws_1', title: 'A', updatedAt: '2026-11-04T12:00:00Z' }
+      : { sessionId: '', workspaceId: '', title: '', updatedAt: '' }
+  }
+  if (method === 'contactSession.set') {
+    return {
+      sessionId: params.sessionId,
+      workspaceId: params.workspaceId ?? '',
+      title: params.title ?? '',
+      updatedAt: '2026-11-04T12:00:00Z',
+    }
+  }
   if (method === 'message.list') {
     return {
       total: 1,
@@ -887,6 +900,42 @@ if (markDoneTool) {
   check(done.available === true && done.state === 'done', 'mail_mark_done 应把事项标为 done')
 }
 
+// ---- 邮件工作区与联系人会话 -----------------------------------------------
+const workspaceRoute = await invoke('/api/dsh-mail/config/workspace', { method: 'POST', body: '{}' })
+check(workspaceRoute && workspaceRoute.status === 200, `config/workspace 应 200，实际 ${workspaceRoute && workspaceRoute.status}`)
+if (workspaceRoute && workspaceRoute.body) {
+  const parsed = JSON.parse(workspaceRoute.body)
+  check(String(parsed.value.path).includes('workspace'), '默认工作区路径应以 workspace 结尾')
+}
+
+const workspaceSet = await invoke('/api/dsh-mail/config/workspace/set', {
+  method: 'POST',
+  body: JSON.stringify({ workspaceId: 'ws_test' }),
+})
+check(workspaceSet && workspaceSet.status === 200, `设置工作区应 200，实际 ${workspaceSet && workspaceSet.status}`)
+
+const lookupRoute = await invoke('/api/dsh-mail/sessions/lookup', {
+  method: 'POST',
+  body: JSON.stringify({ email: 'a@b.com' }),
+})
+check(lookupRoute && lookupRoute.status === 200, `sessions/lookup 应 200，实际 ${lookupRoute && lookupRoute.status}`)
+if (lookupRoute && lookupRoute.body) {
+  const parsed = JSON.parse(lookupRoute.body)
+  check(parsed.value.sessionId === 'sess_1', '已绑定邮箱应返回会话 id')
+}
+
+const bindNoEmail = await invoke('/api/dsh-mail/sessions/bind', {
+  method: 'POST',
+  body: JSON.stringify({ sessionId: 'sess_1' }),
+})
+check(bindNoEmail && bindNoEmail.status === 400, `绑定缺 email 应 400，实际 ${bindNoEmail && bindNoEmail.status}`)
+
+const bindRoute = await invoke('/api/dsh-mail/sessions/bind', {
+  method: 'POST',
+  body: JSON.stringify({ accountId: 'acc_1', email: 'New@Example.com', sessionId: 'sess_2', workspaceId: 'ws_1', title: 'New' }),
+})
+check(bindRoute && bindRoute.status === 200, `绑定应 200，实际 ${bindRoute && bindRoute.status}`)
+
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })
 if (statuses && statuses.body) {
   const parsed = JSON.parse(statuses.body)
@@ -938,14 +987,14 @@ const setInterval1 = await invoke('/api/dsh-mail/config/sync-interval', {
   body: JSON.stringify({ minutes: 3 }),
 })
 check(setInterval1 && setInterval1.status === 200, `设置间隔应 200，实际 ${setInterval1 && setInterval1.status}`)
-check(configEdits.length === 1 && configEdits[0].next.syncIntervalMs === 180_000, '应把 3 分钟换算成 180000ms 写回配置')
+check(configEdits.some((entry) => entry.next && entry.next.syncIntervalMs === 180_000), '应把 3 分钟换算成 180000ms 写回配置')
 
 const setZero = await invoke('/api/dsh-mail/config/sync-interval', {
   method: 'POST',
   body: JSON.stringify({ minutes: 0 }),
 })
 check(setZero && setZero.status === 200, `0 应允许（关闭自动同步），实际 ${setZero && setZero.status}`)
-check(configEdits.length === 2 && configEdits[1].next.syncIntervalMs === 0, '0 分钟应写回 syncIntervalMs=0')
+check(configEdits.some((entry) => entry.next && entry.next.syncIntervalMs === 0), '0 分钟应写回 syncIntervalMs=0')
 
 const setNegative = await invoke('/api/dsh-mail/config/sync-interval', {
   method: 'POST',

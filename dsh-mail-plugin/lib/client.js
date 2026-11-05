@@ -170,7 +170,10 @@ window.__ModuleLoader__.load({
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
         deleteMail: '删除',
-        todoSummary: '总结',
+        workspaceTitle: '邮件工作区',
+        workspacePick: '选择目录',
+        workspaceHint: '所有邮件会话都创建在这个工作区；同名发件人复用同一条会话。',
+        workspaceSaved: '已保存',
         todoDone: '已处理',
         todoSummarized: '已总结',
         todoSummaryHint: '会把邮件交给 Agent：先拉上下文，有历史总结会先问你如何处理。',
@@ -385,6 +388,10 @@ window.__ModuleLoader__.load({
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
 
         deleteMail: 'Delete',
+        workspaceTitle: 'Mail workspace',
+        workspacePick: 'Choose folder',
+        workspaceHint: 'Every mail conversation lives in this workspace; the same sender reuses one conversation.',
+        workspaceSaved: 'Saved',
         todoSummary: 'Summarize',
         todoDone: 'Mark done',
         todoSummarized: 'Summarized',
@@ -2266,7 +2273,14 @@ window.__ModuleLoader__.load({
       const [todoBusy, setTodoBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
 
-      /** 把邮件交给 Agent：能复用已有关联会话就复用，否则新建并发送提示词。 */
+      /** 从 "Name <a@b.com>" 里取出邮箱地址。 */
+      const extractEmail = (value) => {
+        const text = String(value || '')
+        const match = text.match(/[<\s]([^<>\s]+@[^<>\s]+)[>\s]?$/) || text.match(/([^<>\s]+@[^<>\s]+)/)
+        return match ? match[1].toLowerCase() : ''
+      }
+
+      /** 把邮件交给 Agent：同一发件人复用会话，否则在专用工作区新建并发送提示词。 */
       const openSummarySession = async (item) => {
         const prompt = [
           `请总结这封邮件（messageId: ${item.messageId}，主题：${item.subject || '(无主题)'}，发件人：${item.fromAddr || '未知'}）。`,
@@ -2278,38 +2292,73 @@ window.__ModuleLoader__.load({
           '4. 我确认处理完毕后，调用 mail_mark_done。',
         ].join('\n')
 
+        const email = extractEmail(item.fromAddr)
+        const accountId = item.accountId || (accounts[0] && accounts[0].id) || ''
+
         try {
           const sessions = ctx.get ? ctx.get('sessions') : undefined
           const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
           if (!sessions || !uiWorkspace) throw new Error('session services unavailable')
 
-          const key = 'dsh-mail:sessions'
-          let map = {}
-          try {
-            map = JSON.parse(localStorage.getItem(key) || '{}') || {}
-          } catch {
-            map = {}
-          }
-
-          const known = map[item.messageId]
           const snapshot = sessions.list && sessions.list.getSnapshot ? sessions.list.getSnapshot() : null
-          if (known && (!snapshot || !snapshot.byId || snapshot.byId[known])) {
-            uiWorkspace.openSession(known)
-            return
+          const alive = (id) => id && (!snapshot || !snapshot.byId || Boolean(snapshot.byId[id]))
+
+          // 1) 已绑定的联系人会话：直接复用
+          if (email) {
+            let bound = ''
+            try {
+              bound = (await call('/sessions/lookup', { email, accountId })).sessionId || ''
+            } catch {
+              bound = ''
+            }
+            if (alive(bound)) {
+              uiWorkspace.openSession(bound)
+              return
+            }
           }
 
-          const sessionId = await sessions.create({})
+          // 2) 确保邮件专用工作区存在
+          let workspaceId = ''
+          let workspacePath = ''
+          try {
+            const config = await call('/config/workspace', {})
+            workspaceId = config.workspaceId || ''
+            workspacePath = config.path || ''
+          } catch {
+            workspaceId = ''
+          }
+          if (!workspaceId && ctx.workspaces && workspacePath) {
+            const created = await ctx.workspaces.create({ path: workspacePath })
+            workspaceId = created && created.id ? created.id : ''
+            if (workspaceId) {
+              try {
+                await call('/config/workspace/set', { workspaceId })
+              } catch {
+                // 写不回去也不影响本次使用
+              }
+            }
+          }
+
+          // 3) 新建会话、命名、发送首条提示词（发过消息才会出现在侧边栏）
+          const sessionId = await sessions.create(workspaceId ? { workspaceId } : {})
+          const title = item.contactName || email || item.fromAddr || item.subject || '邮件会话'
           await sessions.using(sessionId, { source: 'controllerOperation' }, async (reference) => {
             const binding = reference.binding || (reference.ready ? await reference.ready : null)
-            if (binding && binding.session) {
-              await binding.session.prompt([{ type: 'text', text: prompt }], 'queue')
+            if (!binding || !binding.session) return
+            try {
+              await binding.session.rename(title)
+            } catch {
+              // 重命名失败不影响使用
             }
+            await binding.session.prompt([{ type: 'text', text: prompt }], 'queue')
           })
-          map[item.messageId] = sessionId
-          try {
-            localStorage.setItem(key, JSON.stringify(map))
-          } catch {
-            // 存不下就每次新建，不影响功能
+
+          if (email) {
+            try {
+              await call('/sessions/bind', { accountId, email, sessionId, workspaceId, title })
+            } catch {
+              // 绑定失败下次会再建，不影响本次
+            }
           }
           uiWorkspace.openSession(sessionId)
         } catch {
@@ -3820,6 +3869,60 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 邮件工作区：展示路径 + 让用户选目录。 */
+    function WorkspaceField({ t, onRefresh }) {
+      const [state, setState] = React.useState({ path: '', workspaceId: '' })
+      const [note, setNote] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      React.useEffect(() => {
+        call('/config/workspace', {})
+          .then((value) => setState({ path: value.path || '', workspaceId: value.workspaceId || '' }))
+          .catch(() => {})
+      }, [])
+
+      const pick = async () => {
+        if (busy) return
+        const uiWorkspace = ctx.get ? ctx.get('uiWorkspace') : undefined
+        if (!uiWorkspace || typeof uiWorkspace.pickDirectory !== 'function') {
+          setNote(t('todoSessionFailed'))
+          return
+        }
+        setBusy(true)
+        try {
+          const dir = await uiWorkspace.pickDirectory()
+          if (!dir) return
+          // 换目录后旧 workspaceId 失效，清空让下次自动重建
+          const next = await call('/config/workspace/set', { path: dir, workspaceId: '' })
+          setState({ path: next.path || dir, workspaceId: next.workspaceId || '' })
+          setNote(t('workspaceSaved'))
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(
+        'div',
+        null,
+        h(
+          'div',
+          { style: styles.row },
+          h('span', { style: styles.rowKey }, t('workspaceTitle')),
+          h(
+            'span',
+            { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
+            h('span', { style: { ...styles.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, state.path || '—'),
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: pick }, t('workspacePick')),
+          ),
+        ),
+        h('p', { style: { ...styles.muted, margin: 0 } }, t('workspaceHint')),
+        note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
+      )
+    }
+
     function SettingsView({ t, status, onRefresh }) {
       const core = (status && status.core) || {}
       const accounts = (status && status.accounts) || []
@@ -3835,6 +3938,7 @@ window.__ModuleLoader__.load({
           h(Row, { label: t('coreDb'), value: core.dbPath || '—' }),
           h(Row, { label: t('coreDataDir'), value: core.dataDir || '—' }),
           h(SyncIntervalField, { t, status, onRefresh }),
+          h(WorkspaceField, { t, onRefresh }),
           h(BackupSection, { t }),
           h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),
           core.error
@@ -3943,6 +4047,73 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         reportUiState({ tab, accountId: accountId || '', messageId: '', folder: '' })
       }, [tab, accountId])
+
+      // 新邮件待办 → Windows 通知（单封一条，标题=主题，正文=发件人）
+      const notifiedOnce = React.useRef(false)
+      React.useEffect(() => {
+        if (!status) return
+        const items = (status.todos && status.todos.pending) || []
+        if (items.length === 0) return
+
+        let seen = {}
+        try {
+          seen = JSON.parse(localStorage.getItem('dsh-mail:notified') || '{}') || {}
+        } catch {
+          seen = {}
+        }
+        const fresh = items.filter((item) => item.messageId && !seen[item.messageId])
+        const firstLoad = !notifiedOnce.current
+        notifiedOnce.current = true
+        if (fresh.length === 0) return
+        for (const item of fresh) seen[item.messageId] = Date.now()
+        try {
+          localStorage.setItem('dsh-mail:notified', JSON.stringify(seen))
+        } catch {
+          // 存不下就每次都会提示，可接受
+        }
+        if (typeof Notification === 'undefined') return
+
+        // 首次加载只提示半小时内的，避免把历史积压一次性弹出来
+        const cutoff = Date.now() - 30 * 60 * 1000
+        const targets = firstLoad
+          ? fresh.filter((item) => {
+              const time = Date.parse(item.date || '')
+              return Number.isFinite(time) && time >= cutoff
+            })
+          : fresh
+        if (targets.length === 0) return
+
+        const fire = () => {
+          for (const item of targets.slice(0, 5)) {
+            try {
+              const notification = new Notification(item.subject || t('noSubject'), {
+                body: item.fromAddr || '',
+                tag: item.messageId,
+              })
+              notification.onclick = () => {
+                try {
+                  ctx.layout.selectPanel(PANEL_ID)
+                  setTab('todo')
+                  window.focus()
+                } catch {
+                  // 面板切换失败也不影响通知本身
+                }
+                notification.close()
+              }
+            } catch {
+              // 单条通知失败不影响其它
+            }
+          }
+        }
+        if (Notification.permission === 'granted') fire()
+        else if (Notification.permission !== 'denied') {
+          Notification.requestPermission()
+            .then((permission) => {
+              if (permission === 'granted') fire()
+            })
+            .catch(() => {})
+        }
+      }, [status])
 
       const [syncingAll, setSyncingAll] = React.useState(false)
       const syncAll = async () => {
