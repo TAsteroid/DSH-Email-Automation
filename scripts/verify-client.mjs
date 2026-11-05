@@ -425,6 +425,16 @@ function runRealReactPass() {
     check(detailMarkup.includes('合同确认'), '[真实渲染] 正文应显示主题')
     check(detailMarkup.includes('正文第一行'), '[真实渲染] 正文应显示内容')
 
+    const detailWithAgent = renderToStaticMarkup(
+      h(views.MessageDetail, {
+        t,
+        message: { id: 'm1', subject: '合同确认', fromAddr: 'a@b.com', date: '2026-11-04T09:12:00Z', text: '正文' },
+        agentChat: true,
+        onAgentSend: () => {},
+      }),
+    )
+    check(detailWithAgent.includes('t:mail.agentChatSend'), '[真实渲染] 邮件详情应有「在会话中讨论」')
+
     const noSelectionMarkup = renderToStaticMarkup(h(views.MessageDetail, { t, message: null }))
     check(noSelectionMarkup.includes('t:mail.selectMessage'), '[真实渲染] 未选中时应显示占位')
 
@@ -748,7 +758,7 @@ function runRealReactPass() {
     check(searchMarkup.includes('t:mail.searchEmpty'), '[真实渲染] 无结果时应有空态')
 
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
-    for (const key of ['kbContacts', 'kbCompanies', 'kbProjects', 'kbFiles']) {
+    for (const key of ['kbSummaries', 'kbFiles', 'kbContacts', 'kbCompanies']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)
     }
 

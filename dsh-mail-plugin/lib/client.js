@@ -221,6 +221,7 @@ window.__ModuleLoader__.load({
         approvalExpired: '已过期',
         agentChatTitle: '与 Agent 对话处理这封邮件',
         agentChatPlaceholder: '例如：帮我起草一封回复，确认周五 9:30 的会议…',
+        agentChatSend: '在会话中讨论',
         agentChatCopy: '复制提示词',
         agentChatResize: '拖动调整高度，双击复位',
         todo: '待跟进',
@@ -260,6 +261,8 @@ window.__ModuleLoader__.load({
         back: '返回',
         approvalDetailTitle: '审批详情',
         approvalDetailHint: '操作类型、目标账户、收件人、正文、附件、影响范围与有效期显示在这里。',
+        kbSummaries: '总结',
+        kbNoText: '没有可显示的内容',
         kbContacts: '联系人',
         kbCompanies: '公司',
         kbProjects: '项目',
@@ -470,6 +473,7 @@ window.__ModuleLoader__.load({
         approvalExpired: 'expired',
         agentChatTitle: 'Ask the Agent about this mail',
         agentChatPlaceholder: 'e.g. Draft a reply confirming the meeting on Friday 9:30…',
+        agentChatSend: 'Discuss in a session',
         agentChatCopy: 'Copy prompt',
         agentChatResize: 'Drag to resize, double-click to reset',
         todo: 'Follow-ups',
@@ -509,6 +513,8 @@ window.__ModuleLoader__.load({
         back: 'Back',
         approvalDetailTitle: 'Approval detail',
         approvalDetailHint: 'Action type, target account, recipients, body, attachments, impact and expiry appear here.',
+        kbSummaries: 'Summaries',
+        kbNoText: 'Nothing to show',
         kbContacts: 'Contacts',
         kbCompanies: 'Companies',
         kbProjects: 'Projects',
@@ -904,6 +910,18 @@ window.__ModuleLoader__.load({
         display: 'flex',
         padding: '16px 20px',
         overflow: 'hidden',
+      },
+      textBlock: {
+        margin: 0,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background: 'var(--dsw-alias-bg-l2)',
+        color: 'var(--dsw-alias-label-secondary)',
+        fontSize: 12,
+        lineHeight: 1.6,
+        whiteSpace: 'pre-wrap',
+        overflow: 'auto',
+        maxHeight: 360,
       },
       aiCard: {
         width: CARD_WIDTH,
@@ -1652,7 +1670,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 详情页底部的 Agent 区：常驻阅读区底部，高度可上下拖动，正文单独滚动。 */
-    function AgentMailComposer({ t, message }) {
+    function AgentMailComposer({ t, message, onSend, sending }) {
       const [text, setText] = React.useState('')
       const [copied, setCopied] = React.useState(false)
       const DOCK_SPEC = { initial: 120, min: 76, max: 420 }
@@ -1749,6 +1767,11 @@ window.__ModuleLoader__.load({
             h('span', { style: { ...styles.sectionTitle, margin: 0 } }, t('agentChatTitle')),
             h('span', { style: styles.spacer }),
             copied ? h('span', { style: { ...styles.muted, margin: 0 } }, t('composeCopied')) : null,
+            h(
+              'button',
+              { type: 'button', style: styles.btn, disabled: sending === true, onClick: () => onSend && onSend(text.trim()) },
+              t('agentChatSend'),
+            ),
             h('button', { type: 'button', style: styles.btnSmall, onClick: copy }, t('agentChatCopy')),
           ),
           h('textarea', {
@@ -1901,7 +1924,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 右栏：选中邮件的正文。 */
-    function MessageDetail({ t, message, accountAddress, actions, agentChat }) {
+    function MessageDetail({ t, message, accountAddress, actions, agentChat, onAgentSend, agentBusy }) {
       if (!message) {
         return h(
           'div',
@@ -1934,7 +1957,7 @@ window.__ModuleLoader__.load({
           h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
           h(ThreadBubbles, { t, message, accountAddress }),
         ),
-        agentChat ? h(AgentMailComposer, { t, message }) : null,
+        agentChat ? h(AgentMailComposer, { t, message, onSend: onAgentSend, sending: agentBusy }) : null,
       )
     }
     function InboxView({ t, status, onRefresh, accountId, onSelectAccount }) {
@@ -1953,7 +1976,34 @@ window.__ModuleLoader__.load({
       const [syncing, setSyncing] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
 
-      const openCompose = (mode) => {        if (detail) setCompose(buildCompose(mode, detail, t))
+      const openCompose = (mode) => {
+        if (detail) setCompose(buildCompose(mode, detail, t))
+      }
+
+      const [agentBusy, setAgentBusy] = React.useState(false)
+
+      /** 把当前邮件交给 Agent：自定义提问可选，默认按「分析这封邮件」处理。 */
+      const startAgent = async (custom) => {
+        if (!detail || agentBusy) return
+        setAgentBusy(true)
+        try {
+          const base = [
+            `请基于这封邮件帮我处理（messageId: ${detail.id}，主题：${detail.subject || '(无主题)'}，发件人：${detail.fromAddr || '未知'}）。`,
+            '',
+            '先调用 mail_triage_context 拉取上下文（同线程、相关邮件、历史总结、附件），再按下面的要求处理。',
+          ].join('\n')
+          const prompt = custom ? `${base}\n\n我的要求：${custom}` : base
+          const email = extractEmail(detail.fromAddr)
+          const accountId = accountId || (accounts[0] && accounts[0].id) || ''
+          const title = email || detail.fromAddr || detail.subject || '邮件会话'
+          const result = await openAgentSession({ prompt, email, title, messageId: detail.id, accountId })
+          if (!result.ok) {
+            const fallback = await fallbackToDraft(prompt, result.error)
+            setNote(`${fallback.opened ? t('todoSessionDraftOpened') : t('todoSessionFailed')}${fallback.message}`)
+          }
+        } finally {
+          setAgentBusy(false)
+        }
       }
 
       const loadMessages = React.useCallback(async () => {
@@ -2184,6 +2234,8 @@ window.__ModuleLoader__.load({
               ]
             : [],
           agentChat: true,
+          onAgentSend: startAgent,
+          agentBusy,
         }),
         compose
           ? h(ComposeModal, {
@@ -2212,6 +2264,147 @@ window.__ModuleLoader__.load({
     }
 
     // ---- 待跟进 / 草稿箱 / 审批中心 / 知识库 --------------------------------
+    /**
+     * 在 DSH 里打开（或复用）一条会话，并把提示词发过去；有 messageId 时顺带把
+     * 已下载的附件作为文件一起上传。收件箱、待跟进、通讯录共用这一条路径。
+     */
+    async function openAgentSession({ prompt, email = '', title = '', messageId = '', accountId = '' }) {
+      const sessions = hostCtx && hostCtx.get ? hostCtx.get('sessions') : undefined
+      const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
+      if (!sessions || !uiWorkspace) return { ok: false, error: 'session services unavailable' }
+      const workspaces = hostCtx.get ? hostCtx.get('workspaces') : undefined
+
+      const snapshot = sessions.list && sessions.list.getSnapshot ? sessions.list.getSnapshot() : null
+      const alive = (id) => Boolean(id) && (!snapshot || !snapshot.byId || Boolean(snapshot.byId[id]))
+
+      // 1) 同一联系人已绑定的会话 → 直接复用
+      if (email) {
+        try {
+          const bound = (await call('/sessions/lookup', { email, accountId })).sessionId || ''
+          if (alive(bound)) {
+            uiWorkspace.openSession(bound)
+            return { ok: true }
+          }
+        } catch {
+          // 查不到就继续新建
+        }
+      }
+
+      // 2) 确保邮件专用工作区存在
+      let workspaceId = ''
+      let workspacePath = ''
+      try {
+        const config = await call('/config/workspace', {})
+        workspaceId = config.workspaceId || ''
+        workspacePath = config.path || ''
+      } catch {
+        workspaceId = ''
+      }
+      if (!workspaceId && workspaces && workspacePath) {
+        try {
+          const created = await workspaces.create({ path: workspacePath })
+          workspaceId = created ? created.workspaceId || created.id || '' : ''
+          if (workspaceId) {
+            try {
+              await call('/config/workspace/set', { workspaceId })
+            } catch {
+              // 写不回去不影响本次使用
+            }
+          }
+        } catch {
+          // 工作区建不了就退回默认会话
+        }
+      }
+
+      // 3) 建会话、命名、发送（附件作为文件随消息一起发）
+      const sessionId = await sessions.create(workspaceId ? { workspaceId } : {})
+      await sessions.using(sessionId, { source: 'controllerOperation' }, async (reference) => {
+        const binding = reference.binding || (reference.ready ? await reference.ready : null)
+        if (!binding || !binding.session) return
+        if (title) {
+          try {
+            await binding.session.rename(title)
+          } catch {
+            // 重命名失败不影响使用
+          }
+        }
+        const parts = [{ type: 'text', text: prompt }]
+        if (messageId) {
+          try {
+            const all = (await call('/attachments', { messageId })).attachments || []
+            const downloaded = all.filter((attachment) => attachment.fetchedAt && attachment.id).slice(0, 5)
+            for (const attachment of downloaded) {
+              try {
+                const bytes = await fetch(`${API}/attachments/raw?id=${encodeURIComponent(attachment.id)}`)
+                if (!bytes.ok) continue
+                const blob = await bytes.blob()
+                if (!blob.size || blob.size > 25 * 1024 * 1024) continue
+                const uploadUrl = `/api/session/uploadFileBinary?sessionId=${encodeURIComponent(
+                  sessionId,
+                )}&name=${encodeURIComponent(attachment.filename || 'attachment')}`
+                const uploaded = await fetch(uploadUrl, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/octet-stream' },
+                  body: blob,
+                })
+                const json = await uploaded.json().catch(() => null)
+                const receiptId = json && json.ok && json.value ? json.value.receiptId : ''
+                if (receiptId) parts.push({ type: 'file', receiptId })
+              } catch {
+                // 单个附件失败不影响其余
+              }
+            }
+          } catch {
+            // 取附件列表失败就只发文字
+          }
+        }
+        await binding.session.prompt(parts, 'queue')
+      })
+
+      if (email && accountId) {
+        try {
+          await call('/sessions/bind', { accountId, email, sessionId, workspaceId, title })
+        } catch {
+          // 绑定失败下次会再建，不影响本次
+        }
+      }
+      uiWorkspace.openSession(sessionId)
+      return { ok: true }
+    }
+
+    /** 从 "Name <a@b.com>" 里取出邮箱地址。 */
+    function extractEmail(value) {
+      const text = String(value || '')
+      const match = text.match(/[<\s]([^<>\s]+@[^<>\s]+)[>\s]?$/) || text.match(/([^<>\s]+@[^<>\s]+)/)
+      return match ? match[1].toLowerCase() : ''
+    }
+
+    /** 开会话失败时的兜底：新开一个带提示词草稿的会话；再不行就复制到剪贴板。 */
+    async function fallbackToDraft(prompt, error) {
+      let opened = false
+      try {
+        const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
+        if (uiWorkspace && typeof uiWorkspace.startSession === 'function') {
+          uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })
+          opened = true
+        }
+      } catch {
+        opened = false
+      }
+      try {
+        if (!opened && typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(prompt)
+      } catch {
+        // 剪贴板也不可用时只能靠调用方的提示
+      }
+      try {
+        // eslint-disable-next-line no-console
+        console.warn('[dsh-mail] 打开会话失败:', error)
+      } catch {
+        // ignore
+      }
+      return { opened, message: error && error.message ? `: ${error.message}` : '' }
+    }
+
     /** 附件事项卡片：显示来源与大小，确认后才下载；也可以直接标为已处理。 */
     function AttachmentCard({ t, item, fetching, result, onFetch, onDone, busy }) {
       return h(
@@ -2400,14 +2593,7 @@ window.__ModuleLoader__.load({
       const [todoBusy, setTodoBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
 
-      /** 从 "Name <a@b.com>" 里取出邮箱地址。 */
-      const extractEmail = (value) => {
-        const text = String(value || '')
-        const match = text.match(/[<\s]([^<>\s]+@[^<>\s]+)[>\s]?$/) || text.match(/([^<>\s]+@[^<>\s]+)/)
-        return match ? match[1].toLowerCase() : ''
-      }
-
-      /** 把邮件交给 Agent：同一发件人复用会话，否则在专用工作区新建并发送提示词。 */
+      /** 把邮件交给 Agent：先按发件人复用会话，否则在专用工作区新建。 */
       const openSummarySession = async (item) => {
         const prompt = [
           `请总结这封邮件（messageId: ${item.messageId}，主题：${item.subject || '(无主题)'}，发件人：${item.fromAddr || '未知'}）。`,
@@ -2421,132 +2607,11 @@ window.__ModuleLoader__.load({
 
         const email = extractEmail(item.fromAddr)
         const accountId = item.accountId || (accounts[0] && accounts[0].id) || ''
-
-        try {
-          const sessions = hostCtx && hostCtx.get ? hostCtx.get('sessions') : undefined
-          const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
-          if (!sessions || !uiWorkspace) throw new Error('session services unavailable')
-
-          const snapshot = sessions.list && sessions.list.getSnapshot ? sessions.list.getSnapshot() : null
-          const alive = (id) => id && (!snapshot || !snapshot.byId || Boolean(snapshot.byId[id]))
-
-          // 1) 已绑定的联系人会话：直接复用
-          if (email) {
-            let bound = ''
-            try {
-              bound = (await call('/sessions/lookup', { email, accountId })).sessionId || ''
-            } catch {
-              bound = ''
-            }
-            if (alive(bound)) {
-              uiWorkspace.openSession(bound)
-              return
-            }
-          }
-
-          // 2) 确保邮件专用工作区存在
-          let workspaceId = ''
-          let workspacePath = ''
-          try {
-            const config = await call('/config/workspace', {})
-            workspaceId = config.workspaceId || ''
-            workspacePath = config.path || ''
-          } catch {
-            workspaceId = ''
-          }
-          const workspaces = hostCtx && hostCtx.get ? hostCtx.get('workspaces') : hostCtx && hostCtx.workspaces
-          if (!workspaceId && workspaces && workspacePath) {
-            const created = await workspaces.create({ path: workspacePath })
-            // WorkspaceView 的字段是 workspaceId（不是 id）
-            workspaceId = created ? created.workspaceId || created.id || '' : ''
-            if (workspaceId) {
-              try {
-                await call('/config/workspace/set', { workspaceId })
-              } catch {
-                // 写不回去也不影响本次使用
-              }
-            }
-          }
-
-          // 3) 新建会话、命名、发送首条提示词（发过消息才会出现在侧边栏）
-          const sessionId = await sessions.create(workspaceId ? { workspaceId } : {})
-          const title = item.contactName || email || item.fromAddr || item.subject || '邮件会话'
-          await sessions.using(sessionId, { source: 'controllerOperation' }, async (reference) => {
-            const binding = reference.binding || (reference.ready ? await reference.ready : null)
-            if (!binding || !binding.session) return
-            try {
-              await binding.session.rename(title)
-            } catch {
-              // 重命名失败不影响使用
-            }
-
-            // 已下载的附件直接上传给会话，Agent 可以原生读文件（扫描件 PDF 也能看）
-            const parts = [{ type: 'text', text: prompt }]
-            try {
-              const all = (await call('/attachments', { messageId: item.messageId })).attachments || []
-              const downloaded = all.filter((attachment) => attachment.fetchedAt && attachment.id)
-              for (const attachment of downloaded.slice(0, 5)) {
-                try {
-                  const bytes = await fetch(`${API}/attachments/raw?id=${encodeURIComponent(attachment.id)}`)
-                  if (!bytes.ok) continue
-                  const blob = await bytes.blob()
-                  if (!blob.size || blob.size > 25 * 1024 * 1024) continue
-                  const uploadUrl = `/api/session/uploadFileBinary?sessionId=${encodeURIComponent(
-                    sessionId,
-                  )}&name=${encodeURIComponent(attachment.filename || 'attachment')}`
-                  const uploaded = await fetch(uploadUrl, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/octet-stream' },
-                    body: blob,
-                  })
-                  const json = await uploaded.json().catch(() => null)
-                  const receiptId = json && json.ok && json.value ? json.value.receiptId : ''
-                  if (receiptId) parts.push({ type: 'file', receiptId })
-                } catch {
-                  // 单个附件失败不影响其余
-                }
-              }
-            } catch {
-              // 取附件列表失败就只发文字
-            }
-
-            await binding.session.prompt(parts, 'queue')
-          })
-
-          if (email) {
-            try {
-              await call('/sessions/bind', { accountId, email, sessionId, workspaceId, title })
-            } catch {
-              // 绑定失败下次会再建，不影响本次
-            }
-          }
-          uiWorkspace.openSession(sessionId)
-        } catch (error) {
-          // 失败不要把原因吞掉：先尝试用草稿方式打开新会话，再把原因显示出来
-          let opened = false
-          try {
-            const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
-            if (uiWorkspace && typeof uiWorkspace.startSession === 'function') {
-              uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })
-              opened = true
-            }
-          } catch {
-            opened = false
-          }
-          try {
-            if (!opened && typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(prompt)
-          } catch {
-            // 剪贴板也不可用时只能靠下面的提示
-          }
-          try {
-            // eslint-disable-next-line no-console
-            console.warn('[dsh-mail] 打开会话失败:', error)
-          } catch {
-            // ignore
-          }
-          const detail = error && error.message ? `: ${error.message}` : ''
-          setNote(`${opened ? t('todoSessionDraftOpened') : t('todoSessionFailed')}${detail}`)
-        }
+        const title = item.contactName || email || item.fromAddr || item.subject || '邮件会话'
+        const result = await openAgentSession({ prompt, email, title, messageId: item.messageId, accountId })
+        if (result.ok) return
+        const fallback = await fallbackToDraft(prompt, result.error)
+        setNote(`${fallback.opened ? t('todoSessionDraftOpened') : t('todoSessionFailed')}${fallback.message}`)
       }
 
       /** 当前待处理列表（按显示顺序），用于处理完一条后跳下一条。 */
@@ -3306,6 +3371,26 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const [agentBusy, setAgentBusy] = React.useState(false)
+
+      /** 把联系人交给 Agent：按联系人邮箱复用会话（同一人后续讨论都在同一条里）。 */
+      const discussWithAgent = async () => {
+        if (agentBusy) return
+        setAgentBusy(true)
+        try {
+          const prompt = composePrompt()
+          const email = extractEmail(draft.email)
+          const title = draft.name || draft.email || '联系人'
+          const result = await openAgentSession({ prompt, email, title })
+          if (!result.ok) {
+            const fallback = await fallbackToDraft(prompt, result.error)
+            setNote(`${fallback.opened ? t('todoSessionDraftOpened') : t('todoSessionFailed')}${fallback.message}`)
+          }
+        } finally {
+          setAgentBusy(false)
+        }
+      }
+
       const groups = [
         {
           id: 'contacts',
@@ -3384,7 +3469,8 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { style: styles.formActions },
-              h('button', { type: 'button', style: styles.btn, onClick: copyPrompt }, t('contactChatCopy')),
+              h('button', { type: 'button', style: styles.btn, disabled: agentBusy, onClick: discussWithAgent }, t('agentChatSend')),
+              h('button', { type: 'button', style: styles.btnSmall, onClick: copyPrompt }, t('contactChatCopy')),
               copied ? h('span', { style: styles.muted }, t('contactChatCopied')) : null,
             ),
             h('p', { style: styles.muted }, t('contactChatHint')),
@@ -3718,22 +3804,168 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 知识库：总结归档、已下载附件、联系人及其公司；右侧显示选中项详情。 */
     function KnowledgeView({ t, status, accountId, onSelectAccount }) {
       const accounts = (status && status.accounts) || []
-      const [selected, setSelected] = React.useState('contacts')
+      const [summaries, setSummaries] = React.useState([])
+      const [attachments, setAttachments] = React.useState([])
+      const [contacts, setContacts] = React.useState([])
+      const [selected, setSelected] = React.useState('')
+      const [preview, setPreview] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+
+      const load = React.useCallback(async () => {
+        const params = accountId ? { accountId } : {}
+        try {
+          const value = await call('/summary', { ...params, limit: 100 })
+          setSummaries((value && value.summaries) || [])
+        } catch {
+          setSummaries([])
+        }
+        try {
+          const value = await call('/attachments', params)
+          setAttachments(((value && value.attachments) || []).filter((item) => item.fetchedAt))
+        } catch {
+          setAttachments([])
+        }
+        try {
+          const value = await call('/contacts', {})
+          setContacts((value && value.contacts) || [])
+        } catch {
+          setContacts([])
+        }
+      }, [accountId])
+
+      React.useEffect(() => {
+        void load()
+      }, [load])
+
+      const companies = [...new Set(contacts.map((item) => item.company).filter(Boolean))]
+
       const groups = [
-        { id: 'contacts', title: t('kbContacts'), items: [] },
-        { id: 'companies', title: t('kbCompanies'), items: [] },
-        { id: 'projects', title: t('kbProjects'), items: [] },
-        { id: 'files', title: t('kbFiles'), items: [] },
+        {
+          id: 'summaries',
+          title: `${t('kbSummaries')} · ${summaries.length}`,
+          items: summaries.map((item) => ({
+            id: `sum:${item.id}`,
+            title: item.subject || t('noSubject'),
+            meta: [item.category, item.createdAt].filter(Boolean).join(' · '),
+          })),
+        },
+        {
+          id: 'attachments',
+          title: `${t('kbFiles')} · ${attachments.length}`,
+          items: attachments.map((item) => ({
+            id: `att:${item.id}`,
+            title: item.filename,
+            meta: `${formatBytes(item.size)} · ${item.fetchedAt}`,
+          })),
+        },
+        {
+          id: 'contacts',
+          title: `${t('kbContacts')} · ${contacts.length}`,
+          items: contacts.map((item) => ({
+            id: `con:${item.id}`,
+            title: item.name || item.email || '(未命名)',
+            meta: [item.company, item.email].filter(Boolean).join(' · '),
+          })),
+        },
+        {
+          id: 'companies',
+          title: `${t('kbCompanies')} · ${companies.length}`,
+          items: companies.map((name) => ({ id: `cmp:${name}`, title: name, meta: '' })),
+        },
       ]
+
+      const selectedSummary = selected.startsWith('sum:') ? summaries.find((item) => `sum:${item.id}` === selected) : null
+      const selectedAttachment = selected.startsWith('att:')
+        ? attachments.find((item) => `att:${item.id}` === selected)
+        : null
+      const selectedContact = selected.startsWith('con:')
+        ? contacts.find((item) => `con:${item.id}` === selected)
+        : null
+      const selectedCompany = selected.startsWith('cmp:') ? selected.slice(4) : ''
+
+      const selectItem = async (id) => {
+        setSelected(id)
+        setPreview(null)
+        if (id.startsWith('att:')) {
+          const attachment = attachments.find((item) => `att:${item.id}` === id)
+          if (!attachment) return
+          setBusy(true)
+          try {
+            const value = await call('/attachments/text', { id: attachment.id, maxChars: 4000 })
+            setPreview(value && value.text ? value.text : '')
+          } catch (error) {
+            setPreview(`${t('kbNoText')}: ${error.message}`)
+          } finally {
+            setBusy(false)
+          }
+        }
+      }
+
+      const detail = (() => {
+        if (selectedSummary) {
+          return h(
+            'div',
+            { style: styles.detail },
+            h('h2', { style: styles.msgSubject }, selectedSummary.subject || t('noSubject')),
+            h('p', { style: styles.muted }, `${selectedSummary.category || ''} · ${selectedSummary.createdAt || ''}`),
+            h('p', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.7 } }, selectedSummary.summary || ''),
+          )
+        }
+        if (selectedAttachment) {
+          return h(
+            'div',
+            { style: styles.detail },
+            h('h2', { style: styles.msgSubject }, selectedAttachment.filename),
+            h('p', { style: styles.muted }, `${formatBytes(selectedAttachment.size)} · ${selectedAttachment.fetchedAt}`),
+            h(
+              'p',
+              { style: styles.muted },
+              `${t('attachmentFrom')}: ${selectedAttachment.subject || ''} · ${selectedAttachment.fromAddr || ''}`,
+            ),
+            busy ? h('p', { style: styles.muted }, t('loading')) : null,
+            preview ? h('pre', { style: styles.textBlock }, preview) : h('p', { style: styles.muted }, t('kbNoText')),
+          )
+        }
+        if (selectedContact) {
+          return h(
+            'div',
+            { style: styles.detail },
+            h('h2', { style: styles.msgSubject }, selectedContact.name || selectedContact.email),
+            h('p', { style: styles.muted }, [selectedContact.company, selectedContact.title].filter(Boolean).join(' · ')),
+            h('p', { style: styles.muted }, selectedContact.email || ''),
+            selectedContact.phone ? h('p', { style: styles.muted }, selectedContact.phone) : null,
+            selectedContact.notes ? h('p', { style: styles.muted }, selectedContact.notes) : null,
+          )
+        }
+        if (selectedCompany) {
+          return h(
+            'div',
+            { style: styles.detail },
+            h('h2', { style: styles.msgSubject }, selectedCompany),
+            h(
+              'p',
+              { style: styles.muted },
+              contacts
+                .filter((item) => item.company === selectedCompany)
+                .map((item) => item.name || item.email)
+                .join(' · '),
+            ),
+          )
+        }
+        return h(DetailPane, { t, titleKey: 'kbDetailTitle', hintKey: 'kbDetailHint' })
+      })()
+
       const content = h(SplitPane, {
         storageKey: 'knowledge',
         spec: PANE_SPEC,
         label: t('resize'),
-        left: h(GroupList, { t, groups, selectedId: selected, onSelect: setSelected }),
-        right: h(DetailPane, { t, titleKey: 'kbDetailTitle', hintKey: 'kbDetailHint' }),
+        left: h(GroupList, { t, groups, selectedId: selected, onSelect: selectItem }),
+        right: detail,
       })
+
       return h(
         'div',
         { style: { display: 'flex', flex: 1, minHeight: 0 } },
