@@ -185,6 +185,7 @@ window.__ModuleLoader__.load({
         todoSummarized: '已总结',
         todoSummaryHint: '会把邮件交给 Agent：先拉上下文，有历史总结会先问你如何处理。',
         todoSessionFailed: '无法打开会话，已把提示词复制到剪贴板',
+        todoSessionDraftOpened: '已新建会话并把提示词放进输入框，按发送即可',
         attachmentTitle: '附件待处理',
         attachmentAnalyze: '下载并准备分析',
         attachmentFetched: '已下载',
@@ -417,6 +418,7 @@ window.__ModuleLoader__.load({
         todoSummarized: 'Summarized',
         todoSummaryHint: 'Hands the mail to the agent: it loads context first and asks how to handle any existing summary.',
         todoSessionFailed: 'Could not open a session; the prompt was copied to the clipboard',
+        todoSessionDraftOpened: 'Opened a new session with the prompt in the composer — press send',
         attachmentHint: 'The agent can only read an attachment after it is downloaded; before that we store only the filename and size.',
         attachmentTitle: 'Attachments to review',
         attachmentAnalyze: 'Download for analysis',
@@ -2424,9 +2426,11 @@ window.__ModuleLoader__.load({
           } catch {
             workspaceId = ''
           }
-          if (!workspaceId && hostCtx && hostCtx.workspaces && workspacePath) {
-            const created = await hostCtx.workspaces.create({ path: workspacePath })
-            workspaceId = created && created.id ? created.id : ''
+          const workspaces = hostCtx && hostCtx.get ? hostCtx.get('workspaces') : hostCtx && hostCtx.workspaces
+          if (!workspaceId && workspaces && workspacePath) {
+            const created = await workspaces.create({ path: workspacePath })
+            // WorkspaceView 的字段是 workspaceId（不是 id）
+            workspaceId = created ? created.workspaceId || created.id || '' : ''
             if (workspaceId) {
               try {
                 await call('/config/workspace/set', { workspaceId })
@@ -2489,13 +2493,31 @@ window.__ModuleLoader__.load({
             }
           }
           uiWorkspace.openSession(sessionId)
-        } catch {
+        } catch (error) {
+          // 失败不要把原因吞掉：先尝试用草稿方式打开新会话，再把原因显示出来
+          let opened = false
           try {
-            if (typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(prompt)
+            const uiWorkspace = hostCtx && hostCtx.get ? hostCtx.get('uiWorkspace') : undefined
+            if (uiWorkspace && typeof uiWorkspace.startSession === 'function') {
+              uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })
+              opened = true
+            }
           } catch {
-            // 剪贴板也不可用时只能让用户看到失败提示
+            opened = false
           }
-          setNote(t('todoSessionFailed'))
+          try {
+            if (!opened && typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(prompt)
+          } catch {
+            // 剪贴板也不可用时只能靠下面的提示
+          }
+          try {
+            // eslint-disable-next-line no-console
+            console.warn('[dsh-mail] 打开会话失败:', error)
+          } catch {
+            // ignore
+          }
+          const detail = error && error.message ? `: ${error.message}` : ''
+          setNote(`${opened ? t('todoSessionDraftOpened') : t('todoSessionFailed')}${detail}`)
         }
       }
 
