@@ -452,6 +452,16 @@ POP3 结果：
 - `category` 非法值 → `BAD_REQUEST`。
 - 只读本地 `summaries` 表，不同步到服务器。
 
+### `summary.delete`
+
+参数：`{"id": "sum_xxx"}`
+
+结果：`{"deleted": true, "id": "sum_xxx"}`
+
+- 只删除这一条总结记录；**不删邮件、不改待办状态、不删附件**。
+- `id` 不存在（含重复删除）→ `NOT_FOUND`。
+- 删除后 `summary.list` / `summary.context` 不再包含它；邮件本身仍可重新总结。
+
 ### `summary.context`
 
 参数：`{"messageId": "msg_xxx"}`

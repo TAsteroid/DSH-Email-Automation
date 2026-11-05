@@ -215,6 +215,7 @@ function handleMethod(method, params) {
   }
   if (method === 'todo.set') return { messageId: params.messageId, state: params.state }
   if (method === 'summary.save') return { id: 'sum_1', createdAt: '2026-11-04T12:00:00Z' }
+  if (method === 'summary.delete') return { deleted: true, id: params.id }
   if (method === 'summary.list') return { summaries: [{ id: 'sum_1', messageId: 'msg_1', category: '合同协议', summary: '旧总结', createdAt: '2026-11-03T00:00:00Z' }] }
   if (method === 'summary.context') {
     return {
@@ -889,6 +890,11 @@ check(todoSetNoId && todoSetNoId.status === 400, `todo/set 缺 id 应 400，实�
 
 const contextNoId = await invoke('/api/dsh-mail/summary/context', { method: 'POST', body: '{}' })
 check(contextNoId && contextNoId.status === 400, `summary/context 缺 id 应 400，实际 ${contextNoId && contextNoId.status}`)
+
+const summaryDeleteNoId = await invoke('/api/dsh-mail/summary/delete', { method: 'POST', body: '{}' })
+check(summaryDeleteNoId && summaryDeleteNoId.status === 400, `总结删除缺 id 应 400，实际 ${summaryDeleteNoId && summaryDeleteNoId.status}`)
+const summaryDeleteRoute = await invoke('/api/dsh-mail/summary/delete', { method: 'POST', body: JSON.stringify({ id: 'sum_1' }) })
+check(summaryDeleteRoute && summaryDeleteRoute.status === 200, `总结删除应 200，实际 ${summaryDeleteRoute && summaryDeleteRoute.status}`)
 
 const summaryRoute = await invoke('/api/dsh-mail/summary', { method: 'POST', body: JSON.stringify({ messageId: 'msg_1' }) })
 check(summaryRoute && summaryRoute.status === 200, `summary 应 200，实际 ${summaryRoute && summaryRoute.status}`)

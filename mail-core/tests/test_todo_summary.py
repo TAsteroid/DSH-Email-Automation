@@ -602,6 +602,33 @@ class SummaryApiTests(unittest.TestCase):
         self.assertTrue(self.service.store.delete_message(message_id))
         self.assertEqual(self.service.store.count_summaries(), 0)
 
+    def test_delete_removes_one_summary_and_unknown_id_is_not_found(self):
+        message_id = self._insert(subject="删除总结")
+        saved = self._save(message_id)
+        self.assertIn(
+            saved["id"],
+            {
+                item["id"]
+                for item in self.service.dispatch("summary.list", {})["summaries"]
+            },
+        )
+
+        result = self.service.dispatch("summary.delete", {"id": saved["id"]})
+        self.assertEqual(result, {"deleted": True, "id": saved["id"]})
+        self.assertNotIn(
+            saved["id"],
+            {
+                item["id"]
+                for item in self.service.dispatch("summary.list", {})["summaries"]
+            },
+        )
+        # The message itself is untouched.
+        self.assertIsNotNone(self.service.store.get_message(message_id))
+
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch("summary.delete", {"id": saved["id"]})
+        self.assertEqual(context.exception.code, "NOT_FOUND")
+
 
 class SummaryContextTests(unittest.TestCase):
     def setUp(self):

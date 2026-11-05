@@ -220,6 +220,7 @@ class Service:
             "todo.set": self._todo_set,
             "summary.save": self._summary_save,
             "summary.list": self._summary_list,
+            "summary.delete": self._summary_delete,
             "summary.context": self._summary_context,
             "thread.list": self._thread_list,
             "thread.get": self._thread_get,
@@ -786,6 +787,13 @@ class Service:
                 limit=limit,
             )
         }
+
+    def _summary_delete(self, params: dict) -> dict:
+        """Delete one stored summary; the mail, todo state and attachments stay."""
+        summary_id = _require_str(params, "id")
+        if not self.store.remove_summary(summary_id):
+            raise MailCoreError(NOT_FOUND, "summary not found")
+        return {"deleted": True, "id": summary_id}
 
     def _summary_context(self, params: dict) -> dict:
         """Everything an Agent needs before summarising one message."""

@@ -117,8 +117,10 @@ window.__ModuleLoader__.load({
         searchPlaceholder: '搜索联系人 / 主题 / 邮件内容',
         searchFilesPlaceholder: '搜索文件名 / 来源邮件',
         kbDeleteFile: '删除文件',
-        kbDeleteConfirmTitle: '删除这个本地文件？',
-        kbDeleteConfirmBody: '只删本地副本，附件元数据保留，之后可以重新下载。',
+        kbDeleteConfirmTitle: '删除这条记录？',
+        kbDeleteSummary: '删除总结',
+        kbSummaryDeleted: '总结已删除',
+        kbDeleteConfirmBody: '总结会从知识库移除；文件只删本地副本，元数据保留可重新下载。',
         kbDeleted: '本地文件已删除',
         searchResults: '搜索结果',
         searchEmpty: '没有匹配的邮件',
@@ -370,8 +372,10 @@ window.__ModuleLoader__.load({
         searchPlaceholder: 'Search contacts, subjects, mail bodies',
         searchFilesPlaceholder: 'Search file names and source mails',
         kbDeleteFile: 'Delete file',
-        kbDeleteConfirmTitle: 'Delete this local file?',
-        kbDeleteConfirmBody: 'Only the local copy is removed; metadata stays so it can be downloaded again.',
+        kbDeleteConfirmTitle: 'Delete this item?',
+        kbDeleteSummary: 'Delete summary',
+        kbSummaryDeleted: 'Summary deleted',
+        kbDeleteConfirmBody: 'Summaries are removed from the knowledge base; files only lose the local copy and can be downloaded again.',
         kbDeleted: 'Local file deleted',
         searchResults: 'Search results',
         searchEmpty: 'No matching mail',
@@ -3877,6 +3881,8 @@ window.__ModuleLoader__.load({
             id: `sum:${item.id}`,
             title: item.subject || t('noSubject'),
             meta: [item.category, item.createdAt].filter(Boolean).join(' · '),
+            deletable: true,
+            kind: 'summary',
           })),
         },
         {
@@ -3887,6 +3893,7 @@ window.__ModuleLoader__.load({
             title: item.filename,
             meta: `${formatBytes(item.size)} · ${item.fetchedAt}`,
             deletable: true,
+            kind: 'attachment',
           })),
         },
         {
@@ -3987,15 +3994,17 @@ window.__ModuleLoader__.load({
       })()
 
       /** 删除本地文件副本（元数据保留，可重新下载）。 */
-      const deleteAttachment = async () => {
+      /** 删除本地文件副本或一条总结（元数据/邮件保留）。 */
+      const deleteEntry = async () => {
         if (!pendingDelete) return
         setBusy(true)
         try {
-          await call('/attachments/delete', { id: pendingDelete.id })
+          const endpoint = pendingDelete.kind === 'summary' ? '/summary/delete' : '/attachments/delete'
+          await call(endpoint, { id: pendingDelete.id })
           setPendingDelete(null)
           setSelected('')
           setPreview(null)
-          setNote(t('kbDeleted'))
+          setNote(pendingDelete.kind === 'summary' ? t('kbSummaryDeleted') : t('kbDeleted'))
           await load()
         } catch (error) {
           setNote(error.message)
@@ -4037,7 +4046,7 @@ window.__ModuleLoader__.load({
                 : group.items.map((item) =>
                     h(
                       'div',
-                      { key: item.id, style: { display: 'flex', alignItems: 'stretch' } },
+                      { key: item.id, style: { display: 'flex', alignItems: 'center' } },
                       h(
                         'button',
                         {
@@ -4057,10 +4066,24 @@ window.__ModuleLoader__.load({
                             'button',
                             {
                               type: 'button',
-                              style: { ...styles.btnSmall, margin: '6px 8px', flex: 'none' },
-                              onClick: () => setPendingDelete({ id: item.id.slice(4), filename: item.title }),
+                              title: item.kind === 'summary' ? t('kbDeleteSummary') : t('kbDeleteFile'),
+                              style: {
+                                ...styles.btnSmall,
+                                alignSelf: 'center',
+                                flex: 'none',
+                                padding: '2px 8px',
+                                margin: '0 8px 0 4px',
+                                fontSize: 11,
+                                lineHeight: '18px',
+                              },
+                              onClick: () =>
+                                setPendingDelete({
+                                  id: item.id.slice(item.id.indexOf(':') + 1),
+                                  kind: item.kind,
+                                  title: item.title,
+                                }),
                             },
-                            t('kbDeleteFile'),
+                            '删除',
                           )
                         : null,
                     ),
@@ -4092,11 +4115,11 @@ window.__ModuleLoader__.load({
           ? h(ConfirmDialog, {
               t,
               title: t('kbDeleteConfirmTitle'),
-              body: `${pendingDelete.filename || ''} · ${t('kbDeleteConfirmBody')}`,
-              confirmLabel: t('kbDeleteFile'),
+              body: `${pendingDelete.title || ''} · ${t('kbDeleteConfirmBody')}`,
+              confirmLabel: t('deleteMail'),
               busy,
               onCancel: () => setPendingDelete(null),
-              onConfirm: deleteAttachment,
+              onConfirm: deleteEntry,
             })
           : null,
       )

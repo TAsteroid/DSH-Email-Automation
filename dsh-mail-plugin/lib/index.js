@@ -2156,6 +2156,11 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('summary.list', params))
     })
 
+    route('/summary/delete', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('summary.delete', { id }))
+    })
+
     route('/summary/context', async (body) => {
       const messageId = requireText(body.messageId, 'messageId')
       return requireCoreResult(await callCore('summary.context', { messageId }, { timeoutMs: 60_000 }))

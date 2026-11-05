@@ -2084,6 +2084,14 @@ class Store:
         row = self._conn.execute("SELECT COUNT(*) AS n FROM summaries").fetchone()
         return int(row["n"])
 
+    def remove_summary(self, summary_id: str) -> bool:
+        """Delete one summary row; the message/todo/attachments stay untouched."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM summaries WHERE id = ?", (summary_id,)
+            )
+        return cursor.rowcount > 0
+
     # -- contacts ----------------------------------------------------------
 
     @staticmethod
