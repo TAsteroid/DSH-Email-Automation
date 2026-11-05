@@ -166,6 +166,10 @@ window.__ModuleLoader__.load({
         loadOlder: '加载更早邮件',
         backupTitle: '数据库备份',
         backupNow: '立即备份',
+        backupRestore: '恢复',
+        backupRestoreTitle: '从备份恢复数据库？',
+        backupRestoreBody: '当前库会先另存为 pre-restore-*.db，然后用这份备份替换并重启 Core。',
+        backupRestored: '已恢复',
         backupDone: '备份完成',
         backupEmpty: '还没有备份',
         backupsRecent: '最近备份',
@@ -407,6 +411,10 @@ window.__ModuleLoader__.load({
         backupTitle: 'Database backup',
         loadOlder: 'Load older mail',
         backupNow: 'Back up now',
+        backupRestore: 'Restore',
+        backupRestoreTitle: 'Restore database from backup?',
+        backupRestoreBody: 'The current database is saved as pre-restore-*.db first, then this backup replaces it and the Core restarts.',
+        backupRestored: 'Restored',
         backupDone: 'Backup created',
         backupEmpty: 'No backups yet',
         backupsRecent: 'Recent backups',
@@ -4112,6 +4120,23 @@ window.__ModuleLoader__.load({
       const [backups, setBackups] = React.useState([])
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
+      const [confirmPath, setConfirmPath] = React.useState(null)
+
+      const restore = async () => {
+        if (!confirmPath || busy) return
+        setBusy(true)
+        setNote(null)
+        try {
+          const value = await call('/backups/restore', { path: confirmPath })
+          setNote(`${t('backupRestored')}: ${String((value && value.restored) || '').split(/[\\/]/).pop()}`)
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+          setConfirmPath(null)
+        }
+      }
 
       const load = React.useCallback(async () => {
         try {
@@ -4159,14 +4184,30 @@ window.__ModuleLoader__.load({
               backups.slice(0, 5).map((item) =>
                 h(
                   'div',
-                  { key: item.path, style: { ...styles.muted, display: 'flex', gap: 8 } },
+                  { key: item.path, style: { ...styles.muted, display: 'flex', gap: 8, alignItems: 'center' } },
                   h('span', null, String(item.path).split(/[\\/]/).pop()),
                   h('span', null, formatBytes(item.size)),
+                  h(
+                    'button',
+                    { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => setConfirmPath(item.path) },
+                    t('backupRestore'),
+                  ),
                 ),
               ),
             )
           : h('p', { style: styles.muted }, t('backupEmpty')),
         note ? h('p', { style: { ...styles.muted, margin: '4px 0 0' } }, note) : null,
+        confirmPath
+          ? h(ConfirmDialog, {
+              t,
+              title: t('backupRestoreTitle'),
+              body: `${String(confirmPath).split(/[\\/]/).pop()} · ${t('backupRestoreBody')}`,
+              confirmLabel: t('backupRestore'),
+              busy,
+              onCancel: () => setConfirmPath(null),
+              onConfirm: restore,
+            })
+          : null,
       )
     }
 

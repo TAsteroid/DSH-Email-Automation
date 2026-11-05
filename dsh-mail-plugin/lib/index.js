@@ -12,7 +12,7 @@
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createCoreClient } from './core-client.js'
 
@@ -2303,6 +2303,43 @@ export function apply(ctx, config) {
     route('/backup', async () => requireCoreResult(await callCore('admin.backup', {}, { timeoutMs: 120_000 })))
 
     route('/backups', async () => requireCoreResult(await callCore('admin.backups', {})))
+
+    // 从备份恢复：只允许 backups 目录内的文件；先把当前库另存，再替换并重启 Core
+    route('/backups/restore', async (body) => {
+      const source = requireText(body.path, 'path')
+      const backupsDir = join(dataDir, 'backups')
+      const resolved = resolve(source)
+      const root = resolve(backupsDir)
+      if (!resolved.startsWith(`${root}${sep}`)) {
+        throw Object.assign(new Error('backup must live inside the backups directory'), { code: 'BAD_REQUEST' })
+      }
+      if (!existsSync(resolved)) throw Object.assign(new Error('backup file not found'), { code: 'NOT_FOUND' })
+
+      try {
+        core.stop()
+      } catch {
+        // 已经停了也无所谓
+      }
+      ready = false
+      await new Promise((done) => setTimeout(done, 400))
+
+      mkdirSync(backupsDir, { recursive: true })
+      const currentDb = join(dataDir, 'mail.db')
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      let saved = ''
+      if (existsSync(currentDb)) {
+        saved = join(backupsDir, `pre-restore-${stamp}.db`)
+        copyFileSync(currentDb, saved)
+      }
+      copyFileSync(resolved, currentDb)
+      for (const suffix of ['-wal', '-shm']) {
+        const stale = `${currentDb}${suffix}`
+        if (existsSync(stale)) unlinkSync(stale)
+      }
+
+      await ensureCore()
+      return { restored: resolved, savedCurrent: saved }
+    })
 
     route('/sync/reset', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')

@@ -984,6 +984,9 @@ if (cleanupDry && cleanupDry.body) {
   check(parsed.value.dryRun === true && parsed.value.candidates === 3, 'cleanup dryRun 应只统计')
 }
 
+const restoreOutside = await invoke('/api/dsh-mail/backups/restore', { method: 'POST', body: JSON.stringify({ path: 'C:\\Windows\\notepad.exe' }) })
+check(restoreOutside && restoreOutside.status === 400, `备份恢复只允许 backups 目录，实际 ${restoreOutside && restoreOutside.status}`)
+
 const statuses = await invoke('/api/dsh-mail/status', { method: 'POST', body: '{}' })
 if (statuses && statuses.body) {
   const parsed = JSON.parse(statuses.body)
