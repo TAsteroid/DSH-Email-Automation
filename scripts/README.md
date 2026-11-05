@@ -188,3 +188,24 @@ Copy-Item .\cordis.patch.yml.bak-20261105223706 .\cordis.patch.yml -Force
 - 三个脚本只修改目标 profile 目录内的 `package.json`、`cordis.patch.yml`、`node_modules` 链接，
   以及显式/默认的数据目录；不修改仓库源码。
 - 不要同时运行多个安装/升级脚本；写文件前请确保没有其它进程正在编辑同一 profile。
+---
+
+## 打包成可安装的 tgz（推荐给「换机器安装」）
+
+```powershell
+node scripts/build-package.mjs          # 产出 dist\dsh-mail-plugin-<version>.tgz
+```
+
+脚本会把 `mail-core/` 一起打进包（排除 tests / __pycache__ / *.pyc / 数据库），
+把 `package.json` 的 `files` 更新为包含 `mail-core`，再去掉 `private`。
+
+安装（与 npm 包用法一致，DSH 会自动登记成 bundle）：
+
+```powershell
+dsh plugin --profile desktop add file:F:/DSH/EmailAutomation/dist/dsh-mail-plugin-0.1.0.tgz
+```
+
+说明：
+- `dsh` 是 DSH 自带 CLI（`resources\runtime\cli\bin\dsh.cmd`），本质是在 profile 目录里跑 pnpm
+- 装载后 profile 的 `package.json` 会出现 `dependencies` 与 `dsh.profile.bundles` 两处登记
+- 打包安装时 Python Core 从包内 `mail-core/` 启动；数据目录默认在 `%USERPROFILE%\.dsh\dsh-mail\data`（可在设置里改）

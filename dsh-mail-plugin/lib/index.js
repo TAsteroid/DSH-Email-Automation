@@ -51,8 +51,19 @@ const PORT_DEFAULTS = {
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = dirname(here)
 const workspaceRoot = dirname(packageRoot)
-const DEFAULT_CORE_DIR = join(workspaceRoot, 'mail-core')
-const DEFAULT_DATA_DIR = join(workspaceRoot, 'data', 'mail')
+
+/**
+ * 打包安装时 Python Core 在包内（`<包>/mail-core`）；开发布局时在仓库同级目录。
+ * 两种情况都要能自动找到，否则从 npm/tgz 装进来的插件起不来。
+ */
+const DEFAULT_CORE_DIR = existsSync(join(packageRoot, 'mail-core', 'mail_core', '__main__.py'))
+  ? join(packageRoot, 'mail-core')
+  : join(workspaceRoot, 'mail-core')
+
+/** 数据目录：开发布局沿用仓库的 data/mail；打包安装放到 DSH 家目录下。 */
+const DEFAULT_DATA_DIR = existsSync(join(workspaceRoot, 'data', 'mail'))
+  ? join(workspaceRoot, 'data', 'mail')
+  : join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-mail', 'data')
 
 // ---------------------------------------------------------------------------
 // 路径与解释器

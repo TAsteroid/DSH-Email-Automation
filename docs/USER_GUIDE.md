@@ -70,6 +70,28 @@ pwsh -File scripts/install.ps1 -Profile desktop
 
 左侧栏出现「邮箱」图标；打开后顶栏显示 `Mail Core ready` 即为正常。
 
+### 3.4 用打包好的 tgz 安装（换机器时推荐）
+
+在仓库里先打包：
+
+```powershell
+node scripts/build-package.mjs     # 产出 dist\dsh-mail-plugin-<version>.tgz
+```
+
+把 tgz 拷到目标机器，然后：
+
+```powershell
+dsh plugin --profile desktop add file:./dist/dsh-mail-plugin-0.1.0.tgz
+```
+
+`dsh` 是 DSH 自带命令行（`resources\runtime\cli\bin\dsh.cmd`），它会：
+
+1. 把包装进 profile 的 `node_modules`
+2. 在 `package.json` 的 `dependencies` 与 `dsh.profile.bundles` 登记
+3. 下次启动 DSH 时自动挂载
+
+这种装法下 **Python Core 从包内 `mail-core/` 启动**，数据目录默认在 `%USERPROFILE%\.dsh\dsh-mail\data`（可在设置里改）。
+
 ---
 
 ## 4. 首次配置：添加邮箱
