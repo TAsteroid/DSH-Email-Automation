@@ -60,7 +60,7 @@ pwsh -File scripts/install.ps1 -Profile desktop
   name: dsh-mail-plugin
   config:
     syncIntervalMs: 300000
-    dataDir: <repo>\data\mail
+    dataDir: <仓库路径>\data\mail
   disabled: false
 ```
 

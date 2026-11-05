@@ -27,6 +27,8 @@ node scripts/build-package.mjs     # 产出 dist\dsh-mail-plugin-<version>.tgz
 dsh plugin --profile desktop add file:./dist/dsh-mail-plugin-0.1.0.tgz
 ```
 
+> 换机器时把 `.tgz` 拷到目标机器，把上面的 `./dist/...` 换成它的实际路径即可。
+
 `dsh` 是 DSH 自带 CLI，会自动把包装进 profile 并在 `dependencies` 与 `dsh.profile.bundles` 登记。
 
 ### 从源码目录安装

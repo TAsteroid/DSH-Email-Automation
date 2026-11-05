@@ -13,13 +13,15 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import struct
 import sys
 from pathlib import Path
 
 ASAR = Path(
-    r"C:\Users\<you>\AppData\Local\Programs\DeepSeek Harness\resources\app.asar"
+    os.environ.get("DSH_ASAR")
+    or (Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Programs" / "DeepSeek Harness" / "resources" / "app.asar")
 )
 
 _HEADER: dict | None = None

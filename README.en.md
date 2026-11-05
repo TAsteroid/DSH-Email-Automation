@@ -27,6 +27,8 @@ node scripts/build-package.mjs     # produces dist\dsh-mail-plugin-<version>.tgz
 dsh plugin --profile desktop add file:./dist/dsh-mail-plugin-0.1.0.tgz
 ```
 
+> On another machine, copy the `.tgz` over and replace `./dist/...` with its real path.
+
 `dsh` is the CLI shipped with DSH; it installs the package into the profile and registers it in both `dependencies` and `dsh.profile.bundles`.
 
 ### From the source checkout
