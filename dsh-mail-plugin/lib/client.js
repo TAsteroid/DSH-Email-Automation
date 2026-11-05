@@ -3540,6 +3540,40 @@ window.__ModuleLoader__.load({
               note ? h('p', { style: styles.railEmpty }, note) : null,
             )
 
+      // 收起 = 整栏收成一条窄边，只留展开按钮与待审批数
+      if (collapsed) {
+        return h(
+          'div',
+          { style: { display: 'flex', flex: 'none', alignItems: 'stretch' } },
+          h(
+            'div',
+            {
+              style: {
+                ...styles.railPanel,
+                width: 40,
+                alignItems: 'center',
+                gap: 8,
+                padding: '10px 0',
+              },
+              'aria-label': t('approvalHistory'),
+            },
+            h(
+              'button',
+              {
+                type: 'button',
+                style: styles.iconBtn,
+                title: t('expandHistory'),
+                'aria-label': t('expandHistory'),
+                'aria-expanded': 'false',
+                onClick: () => setCollapsed(false),
+              },
+              '▸',
+            ),
+            count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
+          ),
+        )
+      }
+
       return h(
         'div',
         { style: { display: 'flex', flex: 'none', alignItems: 'stretch' } },
@@ -3578,15 +3612,15 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 style: styles.iconBtn,
-                title: collapsed ? t('expandHistory') : t('collapseHistory'),
-                'aria-label': collapsed ? t('expandHistory') : t('collapseHistory'),
-                'aria-expanded': collapsed ? 'false' : 'true',
-                onClick: () => setCollapsed((prev) => !prev),
+                title: t('collapseHistory'),
+                'aria-label': t('collapseHistory'),
+                'aria-expanded': 'true',
+                onClick: () => setCollapsed(true),
               },
-              collapsed ? '▸' : '▾',
+              '▾',
             ),
           ),
-          collapsed ? null : h('div', { style: styles.railBody }, body),
+          h('div', { style: styles.railBody }, body),
         ),
       )
     }
