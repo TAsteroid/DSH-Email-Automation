@@ -2439,7 +2439,38 @@ window.__ModuleLoader__.load({
             } catch {
               // 重命名失败不影响使用
             }
-            await binding.session.prompt([{ type: 'text', text: prompt }], 'queue')
+
+            // 已下载的附件直接上传给会话，Agent 可以原生读文件（扫描件 PDF 也能看）
+            const parts = [{ type: 'text', text: prompt }]
+            try {
+              const all = (await call('/attachments', { messageId: item.messageId })).attachments || []
+              const downloaded = all.filter((attachment) => attachment.fetchedAt && attachment.id)
+              for (const attachment of downloaded.slice(0, 5)) {
+                try {
+                  const bytes = await fetch(`${API}/attachments/raw?id=${encodeURIComponent(attachment.id)}`)
+                  if (!bytes.ok) continue
+                  const blob = await bytes.blob()
+                  if (!blob.size || blob.size > 25 * 1024 * 1024) continue
+                  const uploadUrl = `/api/session/uploadFileBinary?sessionId=${encodeURIComponent(
+                    sessionId,
+                  )}&name=${encodeURIComponent(attachment.filename || 'attachment')}`
+                  const uploaded = await fetch(uploadUrl, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/octet-stream' },
+                    body: blob,
+                  })
+                  const json = await uploaded.json().catch(() => null)
+                  const receiptId = json && json.ok && json.value ? json.value.receiptId : ''
+                  if (receiptId) parts.push({ type: 'file', receiptId })
+                } catch {
+                  // 单个附件失败不影响其余
+                }
+              }
+            } catch {
+              // 取附件列表失败就只发文字
+            }
+
+            await binding.session.prompt(parts, 'queue')
           })
 
           if (email) {

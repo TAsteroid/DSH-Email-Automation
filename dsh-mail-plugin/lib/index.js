@@ -10,7 +10,7 @@
  * 密码在 Core 侧用 Windows DPAPI 加密后落库，插件进程不保存。
  */
 
-import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1780,6 +1780,35 @@ export function apply(ctx, config) {
         }),
       )
     }
+
+    // ---- 附件原始字节（供界面转交给 DSH 会话）------------------------------
+    disposers.push(
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API_PREFIX}/attachments/raw`,
+        handler: async (req, res) => {
+          const denied = rejectReason(req)
+          if (denied) return writeJson(res, 403, { ok: false, code: 'FORBIDDEN', message: denied })
+          const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+          const id = url.searchParams.get('id') ?? ''
+          if (!id) return writeJson(res, 400, { ok: false, code: 'BAD_REQUEST', message: 'id is required' })
+          const result = await callCore('attachment.get', { id })
+          if (!result.available) return writeJson(res, 404, { ok: false, code: 'NOT_FOUND', message: result.reason.message })
+          const path = result.value?.path ?? ''
+          if (!path || !existsSync(path)) {
+            return writeJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'attachment file is missing locally' })
+          }
+          const data = readFileSync(path)
+          res.writeHead(200, {
+            'content-type': result.value?.contentType || 'application/octet-stream',
+            'content-length': data.length,
+            'cache-control': 'no-store',
+          })
+          res.end(data)
+          return undefined
+        },
+      }),
+    )
 
     // ---- 实时事件（SSE）----------------------------------------------------
     // 已验证 webServer 支持长连接流式响应：新邮件等事件直接推给界面。
