@@ -184,6 +184,20 @@ export function apply(ctx, config) {
   /** Core 主动推送的事件（当前只有 IDLE 收到新邮件）。 */
   let lastCoreEvent = null
   let lastCoreEventAt = ''
+  /** 已连接的前端 SSE 客户端。 */
+  const sseClients = new Set()
+
+  /** 向所有已连接界面广播一条 SSE 事件；写失败的连接直接摘掉。 */
+  function broadcastSse(event, payload) {
+    const frame = `event: ${event}\ndata: ${JSON.stringify(payload ?? {})}\n\n`
+    for (const res of [...sseClients]) {
+      try {
+        res.write(frame)
+      } catch {
+        sseClients.delete(res)
+      }
+    }
+  }
 
   const coreOptions = () => ({
     spawn: spawnCore,
@@ -196,6 +210,7 @@ export function apply(ctx, config) {
       lastCoreEventAt = new Date().toISOString()
       if (event.event === 'mail.new') {
         log(`idle: new mail on ${event.accountId} (stored=${event.stored ?? 0})`)
+        broadcastSse('mail', event)
       }
     },
   })
@@ -1702,6 +1717,40 @@ export function apply(ctx, config) {
       )
     }
 
+    // ---- 实时事件（SSE）----------------------------------------------------
+    // 已验证 webServer 支持长连接流式响应：新邮件等事件直接推给界面。
+    disposers.push(
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API_PREFIX}/events`,
+        handler: async (req, res) => {
+          const denied = rejectReason(req)
+          if (denied) return writeJson(res, 403, { ok: false, code: 'FORBIDDEN', message: denied })
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          })
+          try {
+            res.write(': connected\n\n')
+          } catch {
+            return undefined
+          }
+          sseClients.add(res)
+          const drop = () => {
+            sseClients.delete(res)
+          }
+          res.on?.('close', drop)
+          res.on?.('error', drop)
+          return new Promise((resolve) => {
+            res.on?.('close', resolve)
+            res.on?.('error', resolve)
+          })
+        },
+      }),
+    )
+
     // Core 明明活着、只是这个调用失败时，保留它自己的错误码（别一律说成 CORE_DOWN）
     const requireCoreResult = (result) => {
       if (result.available) return result.value
@@ -2101,6 +2150,20 @@ export function apply(ctx, config) {
       for (const dispose of disposers) dispose()
     }
   }, 'mail: http bridge')
+
+  // SSE 心跳：定期发注释行，保持连接并探测断线
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      for (const res of [...sseClients]) {
+        try {
+          res.write(': ping\n\n')
+        } catch {
+          sseClients.delete(res)
+        }
+      }
+    }, 25_000)
+    return () => clearInterval(timer)
+  }, 'mail: sse heartbeat')
 
   // 4) 心跳：刷新 Core 状态 + 自动同步兜底（IDLE 尚未实现，先按间隔拉）
   ctx.effect(() => {

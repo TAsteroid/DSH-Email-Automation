@@ -4348,6 +4348,29 @@ window.__ModuleLoader__.load({
         }
       }, [status])
 
+      // 实时事件：Core 的 IDLE 收到新邮件时立即刷新界面
+      React.useEffect(() => {
+        if (typeof EventSource === 'undefined') return undefined
+        let source = null
+        try {
+          source = new EventSource(`${API}/events`)
+        } catch {
+          return undefined
+        }
+        const onMail = () => {
+          void load(new AbortController().signal)
+        }
+        source.addEventListener('mail', onMail)
+        return () => {
+          try {
+            source.removeEventListener('mail', onMail)
+          } catch {
+            // ignore
+          }
+          source.close()
+        }
+      }, [load])
+
       const [syncingAll, setSyncingAll] = React.useState(false)
       const syncAll = async () => {
         if (syncingAll) return
