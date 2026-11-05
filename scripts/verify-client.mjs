@@ -356,11 +356,14 @@ function runRealReactPass() {
       check(splitters === expectedSplitters, `[真实渲染] ${label} 应有 ${expectedSplitters} 条分隔条，实际 ${splitters}`)
     }
 
-    // 审批栏：全局常驻，默认只看待审批，历史模式带返回
+    // 审批栏：直接显示审批历史，按钮用于收起/展开
     const railPending = renderToStaticMarkup(h(views.ApprovalsRail, { t, status: statusPayload }))
-    check(railPending.includes('t:mail.approvals'), '[真实渲染] 审批栏应显示标题')
-    check(railPending.includes('t:mail.emptyApprovals'), '[真实渲染] 待审批空态缺失')
-    check(/aria-label="t:mail.approvalHistory"/.test(railPending), '[真实渲染] 待审批模式应有历史按钮')
+    check(railPending.includes('t:mail.approvalHistory'), '[真实渲染] 审批栏应显示「审批历史」')
+    check(railPending.includes('t:mail.approvalHistoryEmpty'), '[真实渲染] 审批历史空态缺失')
+    check(
+      railPending.includes('aria-label="t:mail.collapseHistory"') && railPending.includes('aria-expanded="true"'),
+      '[真实渲染] 展开状态应有收起按钮',
+    )
     check(
       railPending.includes('role="separator"') && railPending.includes('aria-orientation="vertical"'),
       '[真实渲染] 审批栏应可拖动改宽度',
@@ -374,10 +377,22 @@ function runRealReactPass() {
     )
     check(railBusy.includes('>4<'), '[真实渲染] 有待审批时应显示数量')
 
-    const railHistory = renderToStaticMarkup(h(views.ApprovalsRail, { t, status: statusPayload, initialMode: 'history' }))
-    check(railHistory.includes('t:mail.approvalHistoryEmpty'), '[真实渲染] 审批历史空态缺失')
-    check(/aria-label="t:mail.back"/.test(railHistory), '[真实渲染] 历史模式应有返回按钮')
-    check(!railHistory.includes('t:mail.emptyApprovals'), '[真实渲染] 历史模式不应显示待审批空态')
+    const railHistory = renderToStaticMarkup(
+      h(views.ApprovalsRail, {
+        t,
+        status: {
+          ...statusPayload,
+          approvals: {
+            pending: [],
+            history: [
+              { id: 'apr_h1', subject: '报价回复', to: 'x@b.com', status: 'approved', decidedVia: 'prompt', decidedBy: 'user' },
+            ],
+          },
+        },
+      }),
+    )
+    check(railHistory.includes('t:mail.decidedByUser'), '[真实渲染] 历史应显示批准方式')
+    check(!railHistory.includes('t:mail.back'), '[真实渲染] 不再有返回按钮')
 
     const pageMarkup = renderToStaticMarkup(h(views.MailPanel, { t }))
     check(pageMarkup.includes('dsh-mail-select'), '[真实渲染] 加密方式下拉框应带 dsh-mail-select 类（暗色靠它）')
@@ -476,7 +491,7 @@ function runRealReactPass() {
     const railWithPending = renderToStaticMarkup(h(views.ApprovalsRail, { t, status: pendingStatus }))
     check(railWithPending.includes('报价回复'), '[真实渲染] 待审批应显示草稿主题')
     check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应有「复制发送指令」')
-    check(railWithPending.includes('t:mail.approvalSendHint'), '[真实渲染] 应说明发送需经 Agent 审批')
+    check(railWithPending.includes('t:mail.approvalPendingLabel'), '[真实渲染] 待审批项应标注状态')
 
     // 审批历史要显示批准方式
     const historyStatus = {

@@ -236,6 +236,9 @@ window.__ModuleLoader__.load({
         approvalPending: '待审批',
         approvalHistory: '审批历史',
         approvalHistoryEmpty: '暂无审批历史',
+        collapseHistory: '收起审批历史',
+        expandHistory: '展开审批历史',
+        approvalPendingLabel: '待审批',
         approvalHistoryHint: '已批准或已拒绝的操作会留在这里。',
         back: '返回',
         approvalDetailTitle: '审批详情',
@@ -463,6 +466,9 @@ window.__ModuleLoader__.load({
         approvalPending: 'Awaiting approval',
         approvalHistory: 'Approval history',
         approvalHistoryEmpty: 'No approval history',
+        collapseHistory: 'Collapse approval history',
+        expandHistory: 'Expand approval history',
+        approvalPendingLabel: 'pending',
         approvalHistoryHint: 'Approved and rejected actions stay here.',
         back: 'Back',
         approvalDetailTitle: 'Approval detail',
@@ -3374,24 +3380,38 @@ window.__ModuleLoader__.load({
      * 全部页签共用的最右侧审批栏：
      * 默认只列待审批；点历史图标切到审批历史；历史里有返回按钮。
      */
-    function ApprovalsRail({ t, status, initialMode = 'pending', onRefresh }) {
+    function ApprovalsRail({ t, status, onRefresh }) {
       const RAIL_SPEC_APPROVALS = { initial: 280, min: 200, max: 520 }
       const [width, setWidth] = React.useState(() => storedWidth('approvalsRail', RAIL_SPEC_APPROVALS))
       const [dragging, setDragging] = React.useState(false)
       const [hovered, setHovered] = React.useState(false)
       const dragRef = React.useRef(null)
-      const [mode, setMode] = React.useState(initialMode)
+      const [collapsed, setCollapsed] = React.useState(() => {
+        try {
+          return localStorage.getItem('dsh-mail:approvalsCollapsed') === '1'
+        } catch {
+          return false
+        }
+      })
       const [busy, setBusy] = React.useState(null)
       const [note, setNote] = React.useState(null)
       const pending = (status && status.approvals && status.approvals.pending) || []
       const history = (status && status.approvals && status.approvals.history) || []
       const count = (status && status.counters && status.counters.pendingApprovals) || pending.length
-      const showingHistory = mode === 'history'
-      const items = showingHistory ? history : pending
+      // 审批历史：待审批的排在最前，其后是已处理记录
+      const items = [...pending.map((item) => ({ ...item, _pending: true })), ...history]
 
       React.useEffect(() => {
         storeWidth('approvalsRail', width)
       }, [width])
+
+      React.useEffect(() => {
+        try {
+          localStorage.setItem('dsh-mail:approvalsCollapsed', collapsed ? '1' : '0')
+        } catch {
+          // 存不下也不影响折叠
+        }
+      }, [collapsed])
 
       const handleDown = (event) => {
         if (typeof event.button === 'number' && event.button !== 0) return
@@ -3460,19 +3480,16 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               null,
-              h('p', { style: styles.railEmpty }, showingHistory ? t('approvalHistoryEmpty') : t('emptyApprovals')),
-              h(
-                'p',
-                { style: { ...styles.railEmpty, paddingTop: 0 } },
-                showingHistory ? t('approvalHistoryHint') : t('emptyApprovalsHint'),
-              ),
+              h('p', { style: styles.railEmpty }, t('approvalHistoryEmpty')),
+              h('p', { style: { ...styles.railEmpty, paddingTop: 0 } }, t('approvalHistoryHint')),
               note ? h('p', { style: styles.railEmpty }, note) : null,
             )
           : h(
               'div',
               null,
-              items.map((item) =>
-                h(
+              items.map((item) => {
+                const pendingItem = item._pending === true
+                return h(
                   'div',
                   { key: item.id, style: { ...styles.listItem, cursor: 'default' } },
                   h('span', null, item.subject || item.draftId || item.id),
@@ -3480,6 +3497,7 @@ window.__ModuleLoader__.load({
                     'span',
                     { style: styles.listItemMeta },
                     (() => {
+                      if (pendingItem) return `${t('approvalPendingLabel')} · ${item.to || ''}`
                       const via =
                         item.decidedVia === 'prompt'
                           ? t('decidedByUser')
@@ -3488,14 +3506,11 @@ window.__ModuleLoader__.load({
                             : item.decidedVia === 'api'
                               ? t('decidedByAgent')
                               : ''
-                      return showingHistory
-                        ? [item.status || '', via, item.to || ''].filter(Boolean).join(' · ')
-                        : `${item.to || ''} · ${item.expiresAt || ''}`
+                      return [item.status || '', via, item.to || ''].filter(Boolean).join(' · ')
                     })(),
                   ),
-                  showingHistory
-                    ? null
-                    : h(
+                  pendingItem
+                    ? h(
                         'div',
                         { style: { display: 'flex', gap: 6, marginTop: 6 } },
                         h(
@@ -3518,10 +3533,10 @@ window.__ModuleLoader__.load({
                           },
                           t('rejectApproval'),
                         ),
-                      ),
-                ),
-              ),
-              showingHistory ? null : h('p', { style: styles.railEmpty }, t('approvalSendHint')),
+                      )
+                    : null,
+                )
+              }),
               note ? h('p', { style: styles.railEmpty }, note) : null,
             )
 
@@ -3550,33 +3565,28 @@ window.__ModuleLoader__.load({
           'aside',
           {
             style: { ...styles.railPanel, width },
-            'aria-label': showingHistory ? t('approvalHistory') : t('approvals'),
+            'aria-label': t('approvalHistory'),
           },
           h(
             'div',
             { style: styles.railHeader },
-            h('span', { style: styles.railHeaderTitle }, showingHistory ? t('approvalHistory') : t('approvals')),
-            !showingHistory && count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
+            h('span', { style: styles.railHeaderTitle }, t('approvalHistory')),
+            count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
             h('span', { style: styles.spacer }),
-          showingHistory
-            ? h(
-                'button',
-                { type: 'button', style: styles.iconBtn, title: t('back'), 'aria-label': t('back'), onClick: () => setMode('pending') },
-                h(BackIcon, {}),
-              )
-            : h(
-                'button',
-                {
-                  type: 'button',
-                  style: styles.iconBtn,
-                  title: t('approvalHistory'),
-                  'aria-label': t('approvalHistory'),
-                  onClick: () => setMode('history'),
-                },
-                h(ClockIcon, {}),
-              ),
-        ),
-          h('div', { style: styles.railBody }, body),
+            h(
+              'button',
+              {
+                type: 'button',
+                style: styles.iconBtn,
+                title: collapsed ? t('expandHistory') : t('collapseHistory'),
+                'aria-label': collapsed ? t('expandHistory') : t('collapseHistory'),
+                'aria-expanded': collapsed ? 'false' : 'true',
+                onClick: () => setCollapsed((prev) => !prev),
+              },
+              collapsed ? '▸' : '▾',
+            ),
+          ),
+          collapsed ? null : h('div', { style: styles.railBody }, body),
         ),
       )
     }
