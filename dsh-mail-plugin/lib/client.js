@@ -178,7 +178,10 @@ window.__ModuleLoader__.load({
         backupRestoreBody: '当前库会先另存为 pre-restore-*.db，然后用这份备份替换并重启 Core。',
         backupRestored: '已恢复',
         backupDone: '备份完成',
-        backupEmpty: '还没有备份',
+        backupEmpty: '还没有备份，点右上角「立即备份」生成一份',
+        backupDirLabel: '备份目录',
+        backupRestoreManual: '从文件恢复',
+        backupRestoreManualHint: '填入备份文件的完整路径（必须在备份目录内）',
         backupsRecent: '最近备份',
         settingsBackupHint: '备份写入数据目录下的 backups/，迁移前 Core 会自动备份一次。',
 
@@ -237,6 +240,10 @@ window.__ModuleLoader__.load({
         approvals: '审批中心',
         knowledge: '知识库',
         settings: '设置',
+        settingsStatus: '运行状态',
+        settingsSync: '收信与同步',
+        settingsStorage: '数据位置',
+        settingsBackup: '数据库备份',
         accounts: '账户',
         allAccounts: '全部账户',
         resize: '调整宽度',
@@ -269,6 +276,9 @@ window.__ModuleLoader__.load({
         approvalDetailTitle: '审批详情',
         approvalDetailHint: '操作类型、目标账户、收件人、正文、附件、影响范围与有效期显示在这里。',
         kbSummaries: '总结',
+        kbDocs: '文档',
+        kbSheets: '表格',
+        kbImages: '图片',
         kbNoText: '没有可显示的内容',
         kbContacts: '联系人',
         kbCompanies: '公司',
@@ -323,6 +333,7 @@ window.__ModuleLoader__.load({
         accountSaved: '账户已保存',
         accountFailed: '保存失败',
         accountPassword: '改密码',
+        accountPasswordField: '密码',
         accountPasswordPlaceholder: '输入邮箱当前密码 / 授权码',
         accountPasswordSaved: '密码已更新，正在重启连接',
         saving: '保存中…',
@@ -433,7 +444,10 @@ window.__ModuleLoader__.load({
         backupRestoreBody: 'The current database is saved as pre-restore-*.db first, then this backup replaces it and the Core restarts.',
         backupRestored: 'Restored',
         backupDone: 'Backup created',
-        backupEmpty: 'No backups yet',
+        backupEmpty: 'No backups yet — use the backup button first',
+        backupDirLabel: 'Backup folder',
+        backupRestoreManual: 'Restore from file',
+        backupRestoreManualHint: 'Full path of a backup file inside the backup folder',
         backupsRecent: 'Recent backups',
         settingsBackupHint: 'Backups go to backups/ under the data directory; the Core also backs up automatically before a migration.',
 
@@ -496,6 +510,10 @@ window.__ModuleLoader__.load({
         approvals: 'Approvals',
         knowledge: 'Knowledge',
         settings: 'Settings',
+        settingsStatus: 'Status',
+        settingsSync: 'Receiving & sync',
+        settingsStorage: 'Data location',
+        settingsBackup: 'Database backup',
         accounts: 'Accounts',
         allAccounts: 'All accounts',
         resize: 'Resize',
@@ -528,6 +546,9 @@ window.__ModuleLoader__.load({
         approvalDetailTitle: 'Approval detail',
         approvalDetailHint: 'Action type, target account, recipients, body, attachments, impact and expiry appear here.',
         kbSummaries: 'Summaries',
+        kbDocs: 'Documents',
+        kbSheets: 'Spreadsheets',
+        kbImages: 'Images',
         kbNoText: 'Nothing to show',
         kbContacts: 'Contacts',
         kbCompanies: 'Companies',
@@ -1114,7 +1135,43 @@ window.__ModuleLoader__.load({
       },
       railBody: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 0' },
       railEmpty: { padding: '16px 14px', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 },
-      accountRow: {
+      backupRow: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 0',
+        borderTop: '1px solid var(--dsw-alias-border-l1)',
+      },
+      backupManualRow: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 },
+      accountCard: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        padding: '12px 0',
+        borderTop: '1px solid var(--dsw-alias-border-l1)',
+      },
+      accountHead: { display: 'flex', alignItems: 'flex-start', gap: 12 },
+      accountIdentity: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 },
+      accountName: { fontSize: 13, color: 'var(--dsw-alias-label-primary)' },
+      accountEndpoint: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+      accountActions: { display: 'flex', gap: 6, flex: 'none' },
+      accountPasswordRow: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        paddingTop: 8,
+        borderTop: '1px dashed var(--dsw-alias-border-l2)',
+      },
+      accountNote: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+      sectionHead: {
+        margin: '18px 0 8px',
+        paddingTop: 14,
+        borderTop: '1px solid var(--dsw-alias-border-l1)',
+        fontSize: 13,
+        fontWeight: 600,
+        color: 'var(--dsw-alias-label-primary)',
+      },
+      formHint: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary))' },      accountRow: {
         display: 'flex',
         alignItems: 'center',
         gap: 8,
@@ -3818,12 +3875,26 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 知识库：总结归档、已下载附件、联系人及其公司；右侧显示选中项详情。 */
+    /** 附件按扩展名归类：文档 / 表格 / 图片（其余先归到文档）。 */
+    const FILE_KINDS = {
+      docs: ['pdf', 'doc', 'docx', 'txt', 'md', 'markdown', 'rtf', 'odt', 'html', 'htm', 'pages', 'epub'],
+      sheets: ['xls', 'xlsx', 'csv', 'tsv', 'ods', 'numbers'],
+      images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'tif', 'tiff'],
+    }
+
+    function fileKind(filename) {
+      const extension = String(filename || '').split('.').pop().toLowerCase()
+      for (const [kind, list] of Object.entries(FILE_KINDS)) {
+        if (extension && list.includes(extension)) return kind
+      }
+      return 'docs'
+    }
+
+    /** 知识库：总结归档 + 已下载的文档/表格/图片；分类可折叠，右侧显示详情。 */
     function KnowledgeView({ t, status, accountId, onSelectAccount, query }) {
       const accounts = (status && status.accounts) || []
       const [summaries, setSummaries] = React.useState([])
       const [attachments, setAttachments] = React.useState([])
-      const [contacts, setContacts] = React.useState([])
       const [selected, setSelected] = React.useState('')
       const [preview, setPreview] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
@@ -3845,33 +3916,31 @@ window.__ModuleLoader__.load({
         } catch {
           setAttachments([])
         }
-        try {
-          const value = await call('/contacts', {})
-          setContacts((value && value.contacts) || [])
-        } catch {
-          setContacts([])
-        }
       }, [accountId])
 
       React.useEffect(() => {
         void load()
       }, [load])
 
-      const companies = [...new Set(contacts.map((item) => item.company).filter(Boolean))]
-
-      // 顶栏搜索在知识库页只过滤文件/总结/联系人
+      // 顶栏搜索在知识库页只过滤这里的条目
       const needle = String(query || '').trim().toLowerCase()
       const hit = (...values) => values.some((value) => String(value || '').toLowerCase().includes(needle))
       const filteredSummaries = needle
         ? summaries.filter((item) => hit(item.subject, item.summary, item.category))
         : summaries
-      const filteredAttachments = needle
+      const filteredFiles = needle
         ? attachments.filter((item) => hit(item.filename, item.subject, item.fromAddr))
         : attachments
-      const filteredContacts = needle
-        ? contacts.filter((item) => hit(item.name, item.email, item.company))
-        : contacts
-      const filteredCompanies = needle ? companies.filter((name) => hit(name)) : companies
+      const byKind = (kind) => filteredFiles.filter((item) => fileKind(item.filename) === kind)
+
+      const fileItems = (items) =>
+        items.map((item) => ({
+          id: `att:${item.id}`,
+          title: item.filename,
+          meta: `${formatBytes(item.size)} · ${item.fetchedAt}`,
+          deletable: true,
+          kind: 'attachment',
+        }))
 
       const groups = [
         {
@@ -3885,41 +3954,15 @@ window.__ModuleLoader__.load({
             kind: 'summary',
           })),
         },
-        {
-          id: 'attachments',
-          title: `${t('kbFiles')} · ${filteredAttachments.length}`,
-          items: filteredAttachments.map((item) => ({
-            id: `att:${item.id}`,
-            title: item.filename,
-            meta: `${formatBytes(item.size)} · ${item.fetchedAt}`,
-            deletable: true,
-            kind: 'attachment',
-          })),
-        },
-        {
-          id: 'contacts',
-          title: `${t('kbContacts')} · ${filteredContacts.length}`,
-          items: filteredContacts.map((item) => ({
-            id: `con:${item.id}`,
-            title: item.name || item.email || '(未命名)',
-            meta: [item.company, item.email].filter(Boolean).join(' · '),
-          })),
-        },
-        {
-          id: 'companies',
-          title: `${t('kbCompanies')} · ${filteredCompanies.length}`,
-          items: filteredCompanies.map((name) => ({ id: `cmp:${name}`, title: name, meta: '' })),
-        },
+        { id: 'docs', title: `${t('kbDocs')} · ${byKind('docs').length}`, items: fileItems(byKind('docs')) },
+        { id: 'sheets', title: `${t('kbSheets')} · ${byKind('sheets').length}`, items: fileItems(byKind('sheets')) },
+        { id: 'images', title: `${t('kbImages')} · ${byKind('images').length}`, items: fileItems(byKind('images')) },
       ]
 
       const selectedSummary = selected.startsWith('sum:') ? summaries.find((item) => `sum:${item.id}` === selected) : null
       const selectedAttachment = selected.startsWith('att:')
         ? attachments.find((item) => `att:${item.id}` === selected)
         : null
-      const selectedContact = selected.startsWith('con:')
-        ? contacts.find((item) => `con:${item.id}` === selected)
-        : null
-      const selectedCompany = selected.startsWith('cmp:') ? selected.slice(4) : ''
 
       const selectItem = async (id) => {
         setSelected(id)
@@ -3964,36 +4007,9 @@ window.__ModuleLoader__.load({
             preview ? h('pre', { style: styles.textBlock }, preview) : h('p', { style: styles.muted }, t('kbNoText')),
           )
         }
-        if (selectedContact) {
-          return h(
-            'div',
-            { style: styles.detail },
-            h('h2', { style: styles.msgSubject }, selectedContact.name || selectedContact.email),
-            h('p', { style: styles.muted }, [selectedContact.company, selectedContact.title].filter(Boolean).join(' · ')),
-            h('p', { style: styles.muted }, selectedContact.email || ''),
-            selectedContact.phone ? h('p', { style: styles.muted }, selectedContact.phone) : null,
-            selectedContact.notes ? h('p', { style: styles.muted }, selectedContact.notes) : null,
-          )
-        }
-        if (selectedCompany) {
-          return h(
-            'div',
-            { style: styles.detail },
-            h('h2', { style: styles.msgSubject }, selectedCompany),
-            h(
-              'p',
-              { style: styles.muted },
-              contacts
-                .filter((item) => item.company === selectedCompany)
-                .map((item) => item.name || item.email)
-                .join(' · '),
-            ),
-          )
-        }
         return h(DetailPane, { t, titleKey: 'kbDetailTitle', hintKey: 'kbDetailHint' })
       })()
 
-      /** 删除本地文件副本（元数据保留，可重新下载）。 */
       /** 删除本地文件副本或一条总结（元数据/邮件保留）。 */
       const deleteEntry = async () => {
         if (!pendingDelete) return
@@ -4013,7 +4029,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 左列：分类可折叠；文件条目右侧带删除按钮
+      // 左列：分类可折叠；条目右侧带删除按钮
       const listColumn = h(
         'div',
         { style: styles.listColumn },
@@ -4221,53 +4237,70 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { style: styles.accountRow },
+        { style: styles.accountCard },
         h(
           'div',
-          { style: { flex: 1, minWidth: 0 } },
-          h('div', { style: { fontSize: 13 } }, account.displayName ? `${account.displayName} · ${account.address}` : account.address),
+          { style: styles.accountHead },
           h(
             'div',
-            { style: { ...styles.muted, margin: 0 } },
-            `${account.imapHost}:${account.imapPort} ${account.imapSecurity}${
-              account.hasCredential ? '' : ` · ${t('accountNoCredential')}`
-            }`,
+            { style: styles.accountIdentity },
+            h('div', { style: styles.accountName }, account.displayName || account.address),
+            account.displayName ? h('div', { style: styles.muted }, account.address) : null,
+            h(
+              'div',
+              { style: styles.accountEndpoint },
+              `${account.imapHost}:${account.imapPort} · ${String(account.imapSecurity || '').toUpperCase()}`,
+              account.hasCredential ? '' : ` · ${t('accountNoCredential')}`,
+            ),
           ),
-          note ? h('div', { style: { ...styles.muted, margin: 0 } }, note) : null,
-        ),
-        h(
-          'button',
-          { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: test },
-          busy === 'test' ? t('accountTesting') : t('accountTest'),
-        ),
-        h(
-          'button',
-          { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: () => setEditing((prev) => !prev) },
-          t('accountPassword'),
-        ),
-        h(
-          'button',
-          { type: 'button', style: styles.dangerBtn, disabled: busy !== null, onClick: remove },
-          t('accountRemove'),
+          h(
+            'div',
+            { style: styles.accountActions },
+            h(
+              'button',
+              { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: test },
+              busy === 'test' ? t('accountTesting') : t('accountTest'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                style: styles.btnSmall,
+                disabled: busy !== null,
+                onClick: () => {
+                  setEditing((prev) => !prev)
+                  setPassword('')
+                },
+              },
+              t('accountPassword'),
+            ),
+            h(
+              'button',
+              { type: 'button', style: styles.dangerBtn, disabled: busy !== null, onClick: remove },
+              t('accountRemove'),
+            ),
+          ),
         ),
         editing
           ? h(
               'div',
-              { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, width: '100%' } },
+              { style: styles.accountPasswordRow },
               h('input', {
                 type: 'password',
                 value: password,
                 placeholder: t('accountPasswordPlaceholder'),
                 onChange: (event) => setPassword(event.target.value),
-                style: { ...styles.textInput, flex: 1, minWidth: 0, padding: '4px 8px' },
+                style: { ...styles.textInput, flex: 1, minWidth: 0 },
               }),
               h(
                 'button',
-                { type: 'button', style: styles.btnSmall, disabled: busy !== null, onClick: savePassword },
+                { type: 'button', style: styles.btn, disabled: busy !== null || !password.trim(), onClick: savePassword },
                 busy === 'password' ? t('saving') : t('save'),
               ),
+              h('button', { type: 'button', style: styles.btnSmall, onClick: () => setEditing(false) }, t('cancel')),
             )
           : null,
+        note ? h('div', { style: styles.accountNote }, note) : null,
       )
     }
 
@@ -4385,7 +4418,7 @@ window.__ModuleLoader__.load({
 
       return h(
         'form',
-        { style: { marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }, onSubmit: submit },
+        { style: { marginTop: 4, display: 'flex', flexDirection: 'column', gap: 12 }, onSubmit: submit },
         h('p', { style: { ...styles.sectionTitle, margin: 0 } }, t('accountAdd')),
         h(
           'div',
@@ -4403,7 +4436,7 @@ window.__ModuleLoader__.load({
           field('accountImapPort', 'imapPort', { type: 'number', min: 1, max: 65535 }),
           selectField('accountSecurity', 'imapSecurity', SECURITY_OPTIONS),
           field('accountUsername', 'username', { autoComplete: 'off', placeholder: 'me@example.com' }),
-          field('accountPassword', 'password', { type: 'password', required: true, autoComplete: 'new-password' }),
+          field('accountPasswordField', 'password', { type: 'password', required: true, autoComplete: 'new-password' }),
         ),
         h('p', { style: { ...styles.muted, margin: 0 } }, t('usernameHint')),
         h('p', { style: { ...styles.muted, margin: 0 } }, t('passwordHint')),
@@ -4415,7 +4448,7 @@ window.__ModuleLoader__.load({
           field('smtpPort', 'smtpPort', { type: 'number', min: 1, max: 65535 }),
           selectField('smtpSecurity', 'smtpSecurity', SECURITY_OPTIONS),
         ),
-        h('p', { style: { ...styles.muted, margin: 0 } }, t('smtpOptionalHint')),
+        h('p', { style: styles.formHint }, t('smtpOptionalHint')),
         error !== null ? h('p', { style: styles.error }, `${t('accountFailed')}: ${error}`) : null,
         saved ? h('p', { style: { ...styles.muted, margin: 0 } }, t('accountSaved')) : null,
         h(
@@ -4494,27 +4527,14 @@ window.__ModuleLoader__.load({
       return `${(bytes / 1024 / 1024).toFixed(1)} MB`
     }
 
-    function BackupSection({ t }) {
+    function BackupSection({ t, status }) {
       const [backups, setBackups] = React.useState([])
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [confirmPath, setConfirmPath] = React.useState(null)
-
-      const restore = async () => {
-        if (!confirmPath || busy) return
-        setBusy(true)
-        setNote(null)
-        try {
-          const value = await call('/backups/restore', { path: confirmPath })
-          setNote(`${t('backupRestored')}: ${String((value && value.restored) || '').split(/[\\/]/).pop()}`)
-          await load()
-        } catch (error) {
-          setNote(error.message)
-        } finally {
-          setBusy(false)
-          setConfirmPath(null)
-        }
-      }
+      const [manualPath, setManualPath] = React.useState('')
+      const dataDir = status && status.core && status.core.dataDir ? status.core.dataDir : ''
+      const backupDir = dataDir ? `${dataDir}\\backups` : ''
 
       const load = React.useCallback(async () => {
         try {
@@ -4544,6 +4564,40 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const restore = async () => {
+        if (!confirmPath || busy) return
+        setBusy(true)
+        setNote(null)
+        try {
+          const value = await call('/backups/restore', { path: confirmPath })
+          setNote(`${t('backupRestored')}: ${String((value && value.restored) || '').split(/[\\/]/).pop()}`)
+          setManualPath('')
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+          setConfirmPath(null)
+        }
+      }
+
+      const row = (item) =>
+        h(
+          'div',
+          { key: item.path, style: styles.backupRow },
+          h(
+            'div',
+            { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 } },
+            h('span', { style: { fontSize: 13 } }, String(item.path).split(/[\\/]/).pop()),
+            h('span', { style: styles.muted }, `${formatBytes(item.size)} · ${item.createdAt || ''}`),
+          ),
+          h(
+            'button',
+            { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => setConfirmPath(item.path) },
+            t('backupRestore'),
+          ),
+        )
+
       return h(
         'div',
         null,
@@ -4553,28 +4607,34 @@ window.__ModuleLoader__.load({
           h('span', { style: styles.rowKey }, t('backupTitle')),
           h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: run }, t('backupNow')),
         ),
-        h('p', { style: { ...styles.muted, margin: '0 0 6px' } }, t('settingsBackupHint')),
+        h('p', { style: styles.formHint }, t('settingsBackupHint')),
+        backupDir
+          ? h('p', { style: { ...styles.formHint, marginBottom: 6 } }, `${t('backupDirLabel')}: ${backupDir}`)
+          : null,
         backups.length > 0
-          ? h(
-              'div',
-              null,
-              h('p', { style: { ...styles.muted, margin: '0 0 4px' } }, t('backupsRecent')),
-              backups.slice(0, 5).map((item) =>
-                h(
-                  'div',
-                  { key: item.path, style: { ...styles.muted, display: 'flex', gap: 8, alignItems: 'center' } },
-                  h('span', null, String(item.path).split(/[\\/]/).pop()),
-                  h('span', null, formatBytes(item.size)),
-                  h(
-                    'button',
-                    { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => setConfirmPath(item.path) },
-                    t('backupRestore'),
-                  ),
-                ),
-              ),
-            )
-          : h('p', { style: styles.muted }, t('backupEmpty')),
-        note ? h('p', { style: { ...styles.muted, margin: '4px 0 0' } }, note) : null,
+          ? h('div', null, backups.slice(0, 5).map(row))
+          : h('p', { style: { ...styles.muted, margin: '0 0 6px' } }, t('backupEmpty')),
+        h(
+          'div',
+          { style: styles.backupManualRow },
+          h('input', {
+            style: { ...styles.textInput, flex: 1, minWidth: 0 },
+            value: manualPath,
+            placeholder: t('backupRestoreManualHint'),
+            onChange: (event) => setManualPath(event.target.value),
+          }),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: styles.btnSmall,
+              disabled: busy || !manualPath.trim(),
+              onClick: () => setConfirmPath(manualPath.trim()),
+            },
+            t('backupRestoreManual'),
+          ),
+        ),
+        note ? h('p', { style: { ...styles.muted, margin: '6px 0 0' } }, note) : null,
         confirmPath
           ? h(ConfirmDialog, {
               t,
@@ -4759,7 +4819,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { ...styles.card, ...styles.settingsBox } },
-          h('p', { style: styles.sectionTitle }, t('settings')),
+          h('p', { style: styles.sectionTitle }, t('settingsStatus')),
           h(Row, { label: t('coreState'), value: core.state || '—' }),
           h(Row, { label: t('coreVersion'), value: core.version || '—' }),
           h(Row, { label: t('coreDb'), value: core.dbPath || '—' }),
@@ -4768,15 +4828,27 @@ window.__ModuleLoader__.load({
             label: t('idleState'),
             value: (status && status.idle && status.idle.lastEventAt) || t('idleWaiting'),
           }),
-          h(SyncIntervalField, { t, status, onRefresh }),
-          h(DataDirField, { t, onRefresh }),
-          h(WorkspaceField, { t, onRefresh }),
-          h(BackupSection, { t }),
-          h(CleanupSection, { t }),
           h(Row, { label: t('settingsCreds'), value: t('settingsCredsValue') }),
           core.error
             ? h('p', { style: { ...styles.error, marginTop: 8 } }, `${t('coreError')}: ${core.error.code} · ${core.error.message}`)
             : null,
+        ),
+        h(
+          'div',
+          { style: { ...styles.card, ...styles.settingsBox } },
+          h('p', { style: styles.sectionTitle }, t('settingsSync')),
+          h(SyncIntervalField, { t, status, onRefresh }),
+          h(
+            'p',
+            { style: styles.sectionHead },
+            t('settingsStorage'),
+          ),
+          h(DataDirField, { t, onRefresh }),
+          h(WorkspaceField, { t, onRefresh }),
+          h('p', { style: styles.sectionHead }, t('settingsBackup')),
+          h(BackupSection, { t, status }),
+          h('p', { style: styles.sectionHead }, t('cleanupTitle')),
+          h(CleanupSection, { t }),
         ),
         h(
           'div',

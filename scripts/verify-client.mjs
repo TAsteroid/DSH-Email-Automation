@@ -347,7 +347,7 @@ function runRealReactPass() {
     const viewCases = [
       ['待跟进', views.TodoView, 't:mail.aiEmptyTitle', 2],
       ['草稿箱', views.DraftsView, 't:mail.draftDetailTitle', 1],
-      ['知识库', views.KnowledgeView, 't:mail.kbContacts', 2],
+      ['知识库', views.KnowledgeView, 't:mail.kbDocs', 2],
     ]
     for (const [label, View, needle, expectedSplitters] of viewCases) {
       const markup = renderToStaticMarkup(h(View, { t, status: statusPayload }))
@@ -758,10 +758,14 @@ function runRealReactPass() {
     check(searchMarkup.includes('t:mail.searchEmpty'), '[真实渲染] 无结果时应有空态')
 
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
+    const formMarkup = renderToStaticMarkup(h(views.AccountForm, { t }))
+    check(formMarkup.includes('t:mail.accountPasswordField'), '[真实渲染] 新增账户的密码字段应标为「密码」')
+    check(!formMarkup.includes('t:mail.accountPassword\b'), '[真实渲染] 新增账户不应显示「改密码」')
+
     check(kbMarkup.includes('▾'), '[真实渲染] 知识库分类应可折叠（有折叠箭头）')
     check(kbMarkup.includes('aria-expanded="true"'), '[真实渲染] 知识库分类默认展开')
 
-    for (const key of ['kbSummaries', 'kbFiles', 'kbContacts', 'kbCompanies']) {
+    for (const key of ['kbSummaries', 'kbDocs', 'kbSheets', 'kbImages']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)
     }
 
