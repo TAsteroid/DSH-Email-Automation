@@ -2000,9 +2000,10 @@ window.__ModuleLoader__.load({
         { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         h(
           'div',
-          { style: styles.listHead },
+          { style: { ...styles.listHead, gap: 6, flexWrap: 'wrap' } },
           t('messages'),
           h('span', { style: styles.spacer }),
+          selection ? selectionControls({ t, selection, allIds: messages.map((item) => item.id), actions }) : null,
           h('span', { style: styles.listCount }, String(messages.length)),
           onSync
             ? h(

@@ -763,10 +763,11 @@ function runRealReactPass() {
         messages: [{ id: 'm1', subject: 'A', fromAddr: 'a@b.com', date: '2026-11-06', seen: true }],
         selectedId: null,
         selection: { selected: [], has: () => false, toggle: () => {}, toggleAll: () => {}, clear: () => {}, count: 0 },
-        actions: [],
+        actions: [h('button', { key: 'probe', type: 'button' }, 'BULK_ACTION')],
       }),
     )
     check(selectMarkup.includes('t:mail.selectAll'), '[真实渲染] 多选工具条应有「全选」')
+    check(selectMarkup.includes('BULK_ACTION'), '[真实渲染] 批量动作按钮应显示在列表标题行')
     check(selectMarkup.includes('type="checkbox"'), '[真实渲染] 多选应渲染复选框')
 
     const unreadMarkup = renderToStaticMarkup(
