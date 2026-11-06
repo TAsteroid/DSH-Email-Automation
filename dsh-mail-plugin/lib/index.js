@@ -1946,6 +1946,24 @@ export function apply(ctx, config) {
     })
 
     // 更新密码（不删账号，保数据）；成功后重启 IDLE
+    // 签名内嵌图片：上传 / 列表 / 删除 / 读取
+    route('/accounts/signature/image', async (body) => {
+      const accountId = requireText(body.accountId, 'accountId')
+      const filename = typeof body.filename === 'string' && body.filename.trim() ? body.filename.trim() : 'signature.png'
+      const contentBase64 = requireText(body.contentBase64, 'contentBase64')
+      return requireCoreResult(await callCore('account.addSignatureImage', { accountId, filename, contentBase64 }, { timeoutMs: 60_000 }))
+    })
+
+    route('/accounts/signature/images', async (body) => {
+      const accountId = requireText(body.accountId, 'accountId')
+      return requireCoreResult(await callCore('account.listSignatureImages', { accountId }))
+    })
+
+    route('/accounts/signature/image/remove', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('account.deleteSignatureImage', { id }))
+    })
+
     // 账户签名（HTML）：保存前由 Core 清理脚本/事件属性
     route('/accounts/signature', async (body) => {
       const accountId = requireText(body.accountId, 'accountId')
@@ -2292,6 +2310,31 @@ export function apply(ctx, config) {
       return requireCoreResult(await callCore('admin.cleanup', params, { timeoutMs: 300_000 }))
     })
 
+    // ---- 签名图片字节（设置页预览用）--------------------------------------
+    disposers.push(
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${API_PREFIX}/accounts/signature/image/raw`,
+        handler: async (req, res) => {
+          const denied = rejectReason(req)
+          if (denied) return writeJson(res, 403, { ok: false, code: 'FORBIDDEN', message: denied })
+          const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+          const id = url.searchParams.get('id') ?? ''
+          if (!id) return writeJson(res, 400, { ok: false, code: 'BAD_REQUEST', message: 'id is required' })
+          const result = await callCore('account.getSignatureImage', { id })
+          if (!result.available) return writeJson(res, 404, { ok: false, code: 'NOT_FOUND', message: result.reason.message })
+          const data = Buffer.from(result.value?.contentBase64 || '', 'base64')
+          if (data.length === 0) return writeJson(res, 404, { ok: false, code: 'NOT_FOUND', message: 'image is missing' })
+          res.writeHead(200, {
+            'content-type': result.value?.mime || 'image/png',
+            'content-length': data.length,
+            'cache-control': 'no-store',
+          })
+          res.end(data)
+          return undefined
+        },
+      }),
+    )
     // ---- 界面上下文（读取用户当前操作位置，不需审批）------------------------
     route('/ui/state', async (body) => {
       uiState = {

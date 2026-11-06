@@ -94,6 +94,38 @@ def _trailing_signature(body: str, signature: str) -> tuple[str, str]:
     return body, signature
 
 
+_CID_SRC = re.compile(
+    r"""src\s*=\s*["']\s*cid:([^"']+?)\s*["']""", re.IGNORECASE
+)
+
+
+def _related_images(
+    signature: str, signature_images: Iterable[dict]
+) -> list[tuple[str, dict]]:
+    """Images referenced by ``src="cid:..."`` in the signature HTML.
+
+    Matching is case-insensitive and only images actually referenced are
+    attached; unknown cids are ignored (the HTML reference is left untouched).
+    """
+    if not str(signature or "").strip() or not signature_images:
+        return []
+    by_cid: dict[str, tuple[str, dict]] = {}
+    for image in signature_images:
+        cid = str(image.get("cid") or "").strip()
+        if cid and image.get("data"):
+            by_cid.setdefault(cid.lower(), (cid, image))
+
+    wanted: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for match in _CID_SRC.finditer(signature):
+        key = match.group(1).strip().lower()
+        if key in seen or key not in by_cid:
+            continue
+        seen.add(key)
+        wanted.append(by_cid[key])
+    return wanted
+
+
 def build_message(
     *,
     from_addr: str,
@@ -102,12 +134,16 @@ def build_message(
     subject: str = "",
     body: str = "",
     signature_html: str = "",
+    signature_images: Optional[Iterable[dict]] = None,
     message_id: Optional[str] = None,
 ) -> tuple[EmailMessage, str]:
     """Build the outgoing message; returns ``(message, message_id)``.
 
     An empty signature yields the previous single-part ``text/plain`` message;
-    a non-empty one adds a ``text/html`` alternative with the signature.
+    a non-empty one adds a ``text/html`` alternative.  When the signature
+    references ``cid:`` images that exist for the account, the result becomes
+    ``multipart/related`` whose first part is the ``multipart/alternative``
+    (text + HTML), followed by the image parts.
     """
     message_id = message_id or new_message_id(from_addr)
     text_body, signature_to_append = _trailing_signature(
@@ -122,13 +158,44 @@ def build_message(
     message["Date"] = formatdate(localtime=True)
     message["Message-ID"] = message_id
     message.set_content(text_body)
-    if signature_to_append:
-        html_body = _html_from_text(text_body)
-        if html_body:
-            html_body += "<br><br>"
-        html_body += signature_to_append
+    if not signature_to_append:
+        return message, message_id
+
+    html_body = _html_from_text(text_body)
+    if html_body:
+        html_body += "<br><br>"
+    html_body += signature_to_append
+    related = _related_images(signature_to_append, signature_images or ())
+    if not related:
         message.add_alternative(html_body, subtype="html")
-    return message, message_id
+        return message, message_id
+
+    alternative = EmailMessage(policy=message.policy)
+    alternative.set_content(text_body)
+    alternative.add_alternative(html_body, subtype="html")
+
+    root = EmailMessage(policy=message.policy)
+    for key, value in message.items():
+        if not key.lower().startswith("content-"):
+            root[key] = value
+    root.set_type("multipart/related")
+    root.attach(alternative)
+    for cid, image in related:
+        mime = str(image.get("mime") or "")
+        if "/" not in mime:
+            continue
+        maintype, subtype = mime.split("/", 1)
+        part = EmailMessage(policy=message.policy)
+        part.set_content(
+            image["data"],
+            maintype=maintype,
+            subtype=subtype,
+            cid=f"<{cid}>",
+            disposition="inline",
+            filename=str(image.get("filename") or "") or None,
+        )
+        root.attach(part)
+    return root, message_id
 
 
 def _close(client) -> None:
@@ -193,6 +260,7 @@ def send_draft(
     draft: dict,
     *,
     timeout: float = DEFAULT_TIMEOUT,
+    signature_images: Optional[Iterable[dict]] = None,
 ) -> str:
     """Send one draft with the account's SMTP settings; returns its Message-ID."""
     from_addr = str(account.get("address") or "").strip()
@@ -205,6 +273,7 @@ def send_draft(
         subject=str(draft.get("subject") or ""),
         body=str(draft.get("body") or ""),
         signature_html=str(account.get("signatureHtml") or ""),
+        signature_images=signature_images,
     )
     send_message(
         str(account.get("smtpHost") or ""),

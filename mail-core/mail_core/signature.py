@@ -11,8 +11,19 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+from typing import Optional
 
 MAX_SIGNATURE_CHARS = 20000
+MAX_IMAGE_BYTES = 512 * 1024
+
+# Magic bytes -> (mime, extension).  The extension only names the local file;
+# the stored MIME type always comes from the bytes, never from the filename.
+_IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
+    (b"\xff\xd8\xff", "image/jpeg", "jpg"),
+    (b"GIF87a", "image/gif", "gif"),
+    (b"GIF89a", "image/gif", "gif"),
+)
 
 _BLOCKED_BLOCK = re.compile(
     r"<\s*(script|iframe|object|embed)\b[^>]*>.*?<\s*/\s*\1\s*>",
@@ -53,3 +64,18 @@ def plain_fragment(value: str, length: int = 40) -> str:
     """First ``length`` characters of the de-tagged, single-spaced signature."""
     text = re.sub(r"\s+", " ", plain_text(value)).strip()
     return text[:length]
+
+
+def detect_image_mime(data: bytes) -> Optional[tuple[str, str]]:
+    """Return ``(mime, extension)`` from magic bytes, or ``None`` if unknown."""
+    payload = bytes(data or b"")
+    for magic, mime, extension in _IMAGE_SIGNATURES:
+        if payload.startswith(magic):
+            return mime, extension
+    if (
+        len(payload) >= 12
+        and payload[:4] == b"RIFF"
+        and payload[8:12] == b"WEBP"
+    ):
+        return "image/webp", "webp"
+    return None

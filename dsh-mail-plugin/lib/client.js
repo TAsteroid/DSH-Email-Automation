@@ -350,7 +350,13 @@ window.__ModuleLoader__.load({
         accountPasswordField: '密码',
         accountSignature: '签名',
         accountSignatureSaved: '签名已保存',
-        accountSignatureHint: '支持 HTML，保存后会在新邮件 / 回复 / 转发时自动附在正文底部。',
+        accountSignatureHint: '支持 HTML 与内嵌图片，保存后会在新邮件 / 回复 / 转发时自动附在正文底部。',
+        accountSignatureImage: '插入图片',
+        accountSignatureTemplate: '名片模板',
+        accountSignaturePreview: '预览',
+        accountSignatureHidePreview: '隐藏预览',
+        accountSignatureImageAdded: '图片已插入',
+        accountSignatureImageFailed: '图片上传失败',
         accountSignaturePlaceholder: '<p>唐明珺<br>China Bridge Energy</p>',
         accountPasswordPlaceholder: '输入邮箱当前密码 / 授权码',
         accountPasswordSaved: '密码已更新，正在重启连接',
@@ -641,7 +647,13 @@ window.__ModuleLoader__.load({
         accountPasswordField: 'Password',
         accountSignature: 'Signature',
         accountSignatureSaved: 'Signature saved',
-        accountSignatureHint: 'HTML supported; appended to the bottom of new / reply / forward mail.',
+        accountSignatureHint: 'HTML and inline images supported; appended to the bottom of new / reply / forward mail.',
+        accountSignatureImage: 'Insert image',
+        accountSignatureTemplate: 'Card template',
+        accountSignaturePreview: 'Preview',
+        accountSignatureHidePreview: 'Hide preview',
+        accountSignatureImageAdded: 'Image inserted',
+        accountSignatureImageFailed: 'Image upload failed',
         accountSignaturePlaceholder: '<p>Your Name<br>Company</p>',
         accountPasswordPlaceholder: 'Current mailbox password / app password',
         accountPasswordSaved: 'Password updated, restarting connection',
@@ -1257,6 +1269,13 @@ window.__ModuleLoader__.load({
         borderTop: '1px dashed var(--dsw-alias-border-l2)',
       },
       accountNote: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+      signaturePreview: {
+        width: '100%',
+        height: 170,
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 8,
+        background: '#fff',
+      },
       accountSignatureBox: {
         display: 'flex',
         flexDirection: 'column',
@@ -2839,6 +2858,34 @@ window.__ModuleLoader__.load({
       const text = String(value || '')
       const match = text.match(/[<\s]([^<>\s]+@[^<>\s]+)[>\s]?$/) || text.match(/([^<>\s]+@[^<>\s]+)/)
       return match ? match[1].toLowerCase() : ''
+    }
+
+    /** 和截图一致的名片模板：左侧 logo、橙色竖线、姓名/职位/联系方式。 */
+    function signatureCardTemplate(cid) {
+      const src = cid ? `cid:${cid}` : 'cid:REPLACE_WITH_UPLOADED_IMAGE'
+      return [
+        '<table cellpadding="0" cellspacing="0" style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#333;line-height:1.55">',
+        '<tr>',
+        `<td style="padding-right:14px;vertical-align:middle"><img src="${src}" width="120" alt="logo" style="display:block;border:0"></td>`,
+        '<td style="border-left:3px solid #f2a33c;padding-left:14px;vertical-align:middle">',
+        '<div style="font-size:15px;font-weight:bold">唐明珺 | Aster Tang</div>',
+        '<div style="color:#f2a33c">Senior Project Manager</div>',
+        '<div>China Bridge Energy Limited</div>',
+        '<div style="margin-top:6px">Tel: +86 10 6526 7260<br>Fax: +86 10 6526 7280<br>Mob: +86 152 0132 5427</div>',
+        '<div style="margin-top:4px">Web: <a href="https://www.ChinaBridgeEnergy.com" style="color:#1a73c8;text-decoration:none">www.ChinaBridgeEnergy.com</a></div>',
+        '</td>',
+        '</tr>',
+        '</table>',
+      ].join('')
+    }
+
+    /** 把签名 HTML 里的 cid: 换成可访问的图片地址，用于设置页预览。 */
+    function signaturePreviewDoc(html) {
+      const body = String(html || '').replace(/cid:([A-Za-z0-9_\-]+)/g, (match, cid) => {
+        const id = cid.replace(/^sig_/, '')
+        return `${API}/accounts/signature/image/raw?id=${encodeURIComponent(id)}`
+      })
+      return `<html><head><meta charset="utf-8"></head><body style="margin:0;padding:8px;background:transparent">${body}</body></html>`
     }
 
     /** 把简单的 HTML 签名转成纯文本，用于在纯文本编辑器里展示。 */
@@ -4939,6 +4986,9 @@ window.__ModuleLoader__.load({
       const [password, setPassword] = React.useState('')
       const [signing, setSigning] = React.useState(false)
       const [signature, setSignature] = React.useState(account.signatureHtml || '')
+      const [preview, setPreview] = React.useState(false)
+      const [imageCid, setImageCid] = React.useState('')
+      const fileRef = React.useRef(null)
 
       const savePassword = async () => {
         if (!password.trim() || busy !== null) return
@@ -4950,6 +5000,34 @@ window.__ModuleLoader__.load({
           setEditing(false)
           setNote(t('accountPasswordSaved'))
           if (onChanged) onChanged()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(null)
+        }
+      }
+
+      /** 选本地图片 → 上传到 Core → 往签名里插 <img src="cid:..."> */
+      const uploadImage = async (event) => {
+        const file = event.target.files && event.target.files[0]
+        event.target.value = ''
+        if (!file || busy !== null) return
+        setBusy('image')
+        setNote(null)
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer())
+          let binary = ''
+          for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index])
+          const value = await call('/accounts/signature/image', {
+            accountId: account.id,
+            filename: file.name || 'logo.png',
+            contentBase64: btoa(binary),
+          })
+          const cid = value && value.cid
+          if (!cid) throw new Error(t('accountSignatureImageFailed'))
+          setImageCid(cid)
+          setSignature((prev) => `${prev}${prev.trim() ? '\n' : ''}<img src="cid:${cid}" width="120" alt="logo">`)
+          setNote(t('accountSignatureImageAdded'))
         } catch (error) {
           setNote(error.message)
         } finally {
@@ -5089,6 +5167,50 @@ window.__ModuleLoader__.load({
                 placeholder: t('accountSignaturePlaceholder'),
                 onChange: (event) => setSignature(event.target.value),
               }),
+              h('input', {
+                ref: fileRef,
+                type: 'file',
+                accept: 'image/png,image/jpeg,image/gif,image/webp',
+                style: { display: 'none' },
+                onChange: uploadImage,
+              }),
+              h(
+                'div',
+                { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: styles.btnSmall,
+                    disabled: busy !== null,
+                    onClick: () => fileRef.current && fileRef.current.click(),
+                  },
+                  busy === 'image' ? t('saving') : t('accountSignatureImage'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: styles.btnSmall,
+                    onClick: () =>
+                      setSignature((prev) => `${prev}${prev.trim() ? '\n' : ''}${signatureCardTemplate(imageCid)}`),
+                  },
+                  t('accountSignatureTemplate'),
+                ),
+                h(
+                  'button',
+                  { type: 'button', style: styles.btnSmall, onClick: () => setPreview((prev) => !prev) },
+                  preview ? t('accountSignatureHidePreview') : t('accountSignaturePreview'),
+                ),
+              ),
+              preview
+                ? h('iframe', {
+                    title: 'signature preview',
+                    sandbox: '',
+                    srcDoc: signaturePreviewDoc(signature),
+                    style: styles.signaturePreview,
+                  })
+                : null,
               h(
                 'div',
                 { style: { display: 'flex', gap: 8 } },

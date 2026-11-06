@@ -39,6 +39,8 @@ Schema v12 adds ``messages.body_purged_at``: ``admin.cleanup`` clears the local
 body of old, already-summarised mail and records when it did so.
 Schema v13 adds ``accounts.signature_html``, the per-account HTML signature
 that outgoing mail appends (empty keeps plain-text-only sending).
+Schema v14 adds ``signature_images``, the local files referenced by ``cid:``
+from a signature (files live under ``<data-dir>/signature-images``).
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -471,6 +473,32 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
         )
 
 
+# Schema v14: signature images embedded in outgoing mail as ``cid:`` parts.
+# One row per stored file; ``path`` is absolute under
+# ``<data-dir>/signature-images``.  ``(account_id, sha256)`` is unique so the
+# same upload is reused instead of written twice.
+def _migrate_to_v14(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signature_images (
+            id         TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+            filename   TEXT NOT NULL DEFAULT '',
+            mime       TEXT NOT NULL DEFAULT '',
+            size       INTEGER NOT NULL DEFAULT 0,
+            sha256     TEXT NOT NULL DEFAULT '',
+            path       TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE (account_id, sha256)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_signature_images_account "
+        "ON signature_images (account_id)"
+    )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -485,6 +513,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     11: _migrate_to_v11,
     12: _migrate_to_v12,
     13: _migrate_to_v13,
+    14: _migrate_to_v14,
 }
 
 
@@ -825,6 +854,89 @@ class Store:
                 (1 if done else 0, account_id),
             )
         return cursor.rowcount > 0
+
+    # -- signature images (cid: parts) -------------------------------------
+
+    @staticmethod
+    def _signature_image_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "accountId": row["account_id"],
+            "filename": row["filename"],
+            "mime": row["mime"],
+            "size": int(row["size"]),
+            "sha256": row["sha256"],
+            "path": row["path"],
+            "createdAt": row["created_at"],
+        }
+
+    def get_signature_image(self, image_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM signature_images WHERE id = ?", (image_id,)
+        ).fetchone()
+        return self._signature_image_to_dict(row) if row is not None else None
+
+    def get_signature_image_by_sha(
+        self, account_id: str, sha256: str
+    ) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM signature_images WHERE account_id = ? AND sha256 = ?",
+            (account_id, sha256),
+        ).fetchone()
+        return self._signature_image_to_dict(row) if row is not None else None
+
+    def list_signature_images(self, account_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM signature_images WHERE account_id = ? "
+            "ORDER BY created_at ASC, id ASC",
+            (account_id,),
+        ).fetchall()
+        return [self._signature_image_to_dict(row) for row in rows]
+
+    def add_signature_image(
+        self,
+        *,
+        account_id: str,
+        filename: str,
+        mime: str,
+        size: int,
+        sha256: str,
+        path: str,
+        image_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> dict:
+        image_id = image_id or uuid.uuid4().hex
+        timestamp = created_at or utc_now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO signature_images (
+                    id, account_id, filename, mime, size, sha256, path, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    image_id,
+                    account_id,
+                    filename,
+                    mime,
+                    int(size),
+                    sha256,
+                    path,
+                    timestamp,
+                ),
+            )
+        return self.get_signature_image(image_id) or {}
+
+    def delete_signature_image(self, image_id: str) -> Optional[dict]:
+        """Delete one image row; returns the removed row (for its file path)."""
+        image = self.get_signature_image(image_id)
+        if image is None:
+            return None
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM signature_images WHERE id = ?", (image_id,)
+            )
+        return image
 
     # -- contact sessions (mailbox address -> DSH session) ----------------
 

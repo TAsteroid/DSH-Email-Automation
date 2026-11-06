@@ -8,6 +8,9 @@ stack trace nor request data can reach stdout).
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import sqlite3
 import sys
@@ -225,6 +228,10 @@ class Service:
             "account.test": self._account_test,
             "account.updateCredential": self._account_update_credential,
             "account.setSignature": self._account_set_signature,
+            "account.addSignatureImage": self._account_add_signature_image,
+            "account.listSignatureImages": self._account_list_signature_images,
+            "account.getSignatureImage": self._account_get_signature_image,
+            "account.deleteSignatureImage": self._account_delete_signature_image,
             "folder.list": self._folder_list,
             "sync.status": self._sync_status,
             "sync.run": self._sync_run,
@@ -493,6 +500,147 @@ class Service:
         if not self.store.set_account_signature(account_id, cleaned):
             raise MailCoreError(NOT_FOUND, "account not found")
         return {"accountId": account_id, "signatureHtml": cleaned}
+
+    # -- signature images --------------------------------------------------
+
+    @staticmethod
+    def _signature_image_item(image: dict) -> dict:
+        return {
+            "id": image["id"],
+            "cid": f"sig_{image['id']}",
+            "filename": image["filename"],
+            "mime": image["mime"],
+            "size": int(image["size"]),
+        }
+
+    def _signature_images_dir(self) -> Path:
+        return self.data_dir / "signature-images"
+
+    def _account_add_signature_image(self, params: dict) -> dict:
+        """Store one signature image; same account + sha reuses the record."""
+        account_id = _require_str(params, "accountId")
+        filename = _require_str(params, "filename")
+        encoded = params.get("contentBase64")
+        if not isinstance(encoded, str) or not encoded.strip():
+            raise bad_request("field contentBase64 must be a non-empty string")
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise bad_request("field contentBase64 must be valid base64") from None
+        if len(data) > signature.MAX_IMAGE_BYTES:
+            raise bad_request(
+                f"image must be at most {signature.MAX_IMAGE_BYTES // 1024} KB"
+            )
+        detected = signature.detect_image_mime(data)
+        if detected is None:
+            raise bad_request(
+                "unsupported image type (only png/jpeg/gif/webp are accepted)"
+            )
+        mime, extension = detected
+        digest = hashlib.sha256(data).hexdigest()
+
+        existing = self.store.get_signature_image_by_sha(account_id, digest)
+        if existing is not None:
+            path = Path(existing["path"])
+            if not path.is_file():
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                except OSError:
+                    pass
+            return self._signature_image_item(existing)
+
+        image_id = uuid.uuid4().hex
+        directory = self._signature_images_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{image_id}.{extension}"
+        try:
+            path.write_bytes(data)
+        except OSError as exc:
+            raise bad_request(
+                f"could not store the signature image: {type(exc).__name__}"
+            ) from None
+        image = self.store.add_signature_image(
+            account_id=account_id,
+            filename=filename,
+            mime=mime,
+            size=len(data),
+            sha256=digest,
+            path=str(path),
+            image_id=image_id,
+        )
+        return self._signature_image_item(image)
+
+    def _account_list_signature_images(self, params: dict) -> dict:
+        account_id = _require_str(params, "accountId")
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+        return {
+            "images": [
+                self._signature_image_item(image)
+                for image in self.store.list_signature_images(account_id)
+            ]
+        }
+
+    def _account_get_signature_image(self, params: dict) -> dict:
+        image_id = _require_str(params, "id")
+        image = self.store.get_signature_image(image_id)
+        if image is None:
+            raise MailCoreError(NOT_FOUND, "signature image not found")
+        try:
+            data = Path(image["path"]).read_bytes()
+        except OSError:
+            raise MailCoreError(
+                NOT_FOUND, "signature image file is missing"
+            ) from None
+        return {
+            "id": image["id"],
+            "filename": image["filename"],
+            "mime": image["mime"],
+            "contentBase64": base64.b64encode(data).decode("ascii"),
+        }
+
+    def _account_delete_signature_image(self, params: dict) -> dict:
+        image_id = _require_str(params, "id")
+        image = self.store.delete_signature_image(image_id)
+        if image is None:
+            raise MailCoreError(NOT_FOUND, "signature image not found")
+        root = self._signature_images_dir().resolve()
+        try:
+            target = Path(image["path"]).resolve()
+            target.relative_to(root)
+        except (OSError, ValueError):
+            target = None
+        if target is not None and target.is_file():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        return {"deleted": True, "id": image_id}
+
+    def _signature_images_for_send(self, account_id: str) -> list[dict]:
+        """Load the bytes of every stored image for the sender (missing skipped)."""
+        images: list[dict] = []
+        for image in self.store.list_signature_images(account_id):
+            path = Path(image["path"])
+            if not path.is_file():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            images.append(
+                {
+                    "cid": f"sig_{image['id']}",
+                    "mime": image["mime"],
+                    "filename": image["filename"],
+                    "data": data,
+                }
+            )
+        return images
 
     # -- folders -----------------------------------------------------------
 
@@ -1469,7 +1617,12 @@ class Service:
             if account is None:
                 raise sender.SendError("account not found for this draft")
             password = self._send_password(account)
-            message_id = sender.send_draft(account, password, draft)
+            message_id = sender.send_draft(
+                account,
+                password,
+                draft,
+                signature_images=self._signature_images_for_send(account["id"]),
+            )
         except Exception as exc:
             error = sender.describe_error(exc, secrets=(password,))
             self._record_action(

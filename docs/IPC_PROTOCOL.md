@@ -72,12 +72,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 13}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 14}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记 / v13 账户 HTML 签名。**它和 `protocol` 无关**：v13 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记 / v13 账户 HTML 签名 / v14 签名内嵌图片。**它和 `protocol` 无关**：v14 只新增表和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -166,6 +166,55 @@ POP3 结果：
 - **上限 20000 字符**（按传入的原始 `html` 长度），超过 → `BAD_REQUEST`；`accountId` 不存在 → `NOT_FOUND`。
 - 保存前做保守清理：移除 `<script>` / `<iframe>` / `<object>` / `<embed>`（含其内容/标签）、`on*=` 事件属性、`javascript:` 链接；其它标签与样式原样保留。返回值是**清理后**实际保存的内容，`account.list` 里的 `signatureHtml` 与之一致。
 - 发送时由核心层自动追加到 HTML 部分（见 [`action.execute`](#actionexecute) 的「发送与结果」）。
+
+### `account.addSignatureImage`
+
+参数：`{"accountId": "acc_xxx", "filename": "logo.png", "contentBase64": "iVBORw0…"}`
+
+结果：`{"id": "3f2c…", "cid": "sig_3f2c…", "filename": "logo.png", "mime": "image/png", "size": 4812}`
+
+- 图片只允许 **png / jpeg / gif / webp**，按**文件魔数**判断真实类型（不信任扩展名），不符 → `BAD_REQUEST`。
+- 解码后大小上限 **512 KB**，超过 → `BAD_REQUEST`；base64 非法 → `BAD_REQUEST`；`accountId` 不存在 → `NOT_FOUND`。
+- 文件存到 `<data-dir>/signature-images/<id>.<ext>`，记录写入 `signature_images`。
+- 返回的 `cid` 就是签名 HTML 里 `<img src="cid:sig_xxx">` 要用的值。
+- **幂等去重**：同一账户上传相同内容（sha256 相同）时复用已有记录，不重复写文件；返回原记录的 id/cid/filename/mime/size。
+
+### `account.listSignatureImages`
+
+参数：`{"accountId": "acc_xxx"}`
+
+结果：
+
+```json
+{"images": [{"id": "3f2c…", "cid": "sig_3f2c…", "filename": "logo.png",
+            "mime": "image/png", "size": 4812}]}
+```
+
+- 按创建时间升序；账号不存在 → `NOT_FOUND`。
+- 只返回元数据，不含图片内容（预览用 [`account.getSignatureImage`](#accountgetsignatureimage)）。
+
+### `account.getSignatureImage`
+
+参数：`{"id": "3f2c…"}`
+
+结果：
+
+```json
+{"id": "3f2c…", "filename": "logo.png", "mime": "image/png",
+ "contentBase64": "iVBORw0…"}
+```
+
+- 返回图片原始内容（base64）与 MIME，供设置页预览；插件可转成 HTTP 图片地址。
+- 记录不存在或本地文件已丢失 → `NOT_FOUND`。
+
+### `account.deleteSignatureImage`
+
+参数：`{"id": "3f2c…"}`
+
+结果：`{"deleted": true, "id": "3f2c…"}`
+
+- 删除记录与本地文件；不检查签名 HTML 是否仍引用该 cid。
+- 未知 id（含重复删除）→ `NOT_FOUND`；文件删除失败不阻断记录删除。
 
 ### `folder.list`
 
@@ -1021,6 +1070,7 @@ POP3 结果：
   - 账户 `signatureHtml` 为空 → 与以前完全一致：单个 `text/plain`。正文原样。
   - 账户有签名 → `multipart/alternative`：`text/plain` + `text/html`。HTML 部分 = 纯文本正文按行转义、换行变 `<br>`，再接 `<br><br>` + 签名 HTML。
   - **纯文本部分**：客户端 composer 会在正文末尾显示签名的纯文本版。若正文末尾确实含有该文本（去标签后的签名文本匹配，忽略首尾空白/多余空行），先把这段从纯文本正文中去掉再发送；若正文里没有，纯文本保持原样。这样签名只以格式化 HTML 出现一次，不会既重复又丢格式。
+  - **内嵌图片**：解析签名 HTML 里所有 `src="cid:XXX"`（大小写不敏感、单双引号均可），在本账户 `signature_images` 中按 cid 查图片。找到的图片作为内嵌 part（`Content-ID: <cid>`、`Content-Disposition: inline`）附加，MIME 结构变为根 `multipart/related`、**第一个子 part 是 `multipart/alternative`**（text + html），其后是各图片 part；HTML 里的 `cid:` 引用原样保留。找不到的 cid 忽略、不报错；无图片时仍按上面的 alternative / 纯文本结构发送。
 - 成功：草稿 `status = sent`、审批保持 `approved`、写一条 `mail_actions(result = sent)`，返回上面三个字段。
 - 失败（未配置 `smtpHost`、没有可用密码、DPAPI 解密失败、连接 / 认证 / 发信出错）：写一条 `mail_actions(result = failed, error = 原因)`，**草稿状态不变**，返回 `SMTP_ERROR`。`error` 和响应 message **绝不包含密码**。
 - **幂等**：`idempotency_key` 在 `mail_actions` 里是 UNIQUE。首次执行记录写入后（无论 `sent` 还是 `failed`），同一个键再次 `execute` 一律返回 `ALREADY_EXECUTED`，绝不重发。发送失败后要重试，调用方需要提供**新的** `idempotencyKey`，并在界面上明确这是另一次发送尝试。
@@ -1114,3 +1164,4 @@ POP3 结果：
 - v11 只给 `attachments` **新增** `dismissed_at` 一列（默认空串，表示尚未标记为已处理），不改旧表结构、不丢旧数据、不删附件文件；`attachment.list` 的 `pendingOnly` 语义随之变为「未 dismiss + 属于 INBOX」（下载状态不影响待办，下载完仍需用户 dismiss 才消失）。老库（v1~v10）启动时先自动备份再升级；迁移用列检查保证幂等。
 - v12 只给 `messages` **新增** `body_purged_at` 一列（默认空串），记录 `admin.cleanup` 清理本地正文的时间；不改旧表结构、不删旧数据、不动附件行。老库（v1~v11）启动时先自动备份再升级；迁移用列检查保证幂等。
 - v13 只给 `accounts` **新增** `signature_html` 一列（默认空串，表示没有签名），不改旧表结构、不丢旧数据；空串时发送保持原来的纯文本行为。老库（v1~v12）启动时先自动备份再升级；迁移用列检查保证幂等。
+- v14 **新增** `signature_images` 表（签名内嵌图片的本地元数据；`account_id` 外键 `ON DELETE CASCADE`，`(account_id, sha256)` 唯一用于去重）与账号索引；图片文件只落在 `<data-dir>/signature-images/`，库里不存二进制。不改旧表结构、不丢旧数据。老库（v1~v13）启动时先自动备份再升级；建表用 `IF NOT EXISTS`，迁移幂等。
