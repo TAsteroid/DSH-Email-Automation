@@ -3312,6 +3312,8 @@ window.__ModuleLoader__.load({
                           onDismissAttachment: dismissAttachment,
                           fetchingId,
                           results,
+                          onAgentSend: startAgent,
+                          agentBusy,
                         })
                       : h(AiCard, { t, item: selected, onAct: act, fluid: true }),
                 ),
