@@ -2844,7 +2844,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 邮件事项卡片：邮件本身 + 它的附件，一起作为一个待处理事项。 */
-    function MailTodoCard({ t, item, onSummary, onDone, busy, onFetchAttachment, onDismissAttachment, fetchingId, results }) {
+    function MailTodoCard({ t, item, onSummary, onDone, busy, onFetchAttachment, onDismissAttachment, fetchingId, results, onAgentSend, agentBusy }) {
       const attachments = item.attachments || []
       const body = String(item.bodyExcerpt || item.snippet || '').trim()
       const [expanded, setExpanded] = React.useState(false)
@@ -2917,6 +2917,19 @@ window.__ModuleLoader__.load({
             )
           : null,
         h('p', { style: styles.muted }, t('todoSummaryHint')),
+        onAgentSend
+          ? h(AgentMailComposer, {
+              t,
+              message: {
+                subject: item.subject || '',
+                fromAddr: item.fromAddr || '',
+                date: item.date || '',
+                text: item.bodyExcerpt || item.snippet || '',
+              },
+              onSend: onAgentSend,
+              sending: agentBusy,
+            })
+          : null,
       )
     }
 
@@ -2974,6 +2987,8 @@ window.__ModuleLoader__.load({
         fromAddr: item.fromAddr || '',
         date: item.date || '',
         hasSummary: Boolean(item.hasSummary),
+        snippet: item.snippet || '',
+        bodyExcerpt: item.bodyExcerpt || '',
         attachments: attachmentsByMessage.get(item.messageId) || [],
         title: item.subject || t('noSubject'),
         meta: `${item.fromAddr || ''} · ${item.date || ''}`,
@@ -3100,6 +3115,32 @@ window.__ModuleLoader__.load({
           setNote(error.message)
         } finally {
           setBulkBusy(false)
+        }
+      }
+
+      const [agentBusy, setAgentBusy] = React.useState(false)
+
+      /** 待跟进卡片里的 Agent 对话框：自定义提问，留空按「处理这封邮件」。 */
+      const startAgent = async (custom) => {
+        if (!selected || agentBusy) return
+        setAgentBusy(true)
+        try {
+          const base = [
+            `请基于这封邮件帮我处理（messageId: ${selected.messageId}，主题：${selected.subject || '(无主题)'}，发件人：${selected.fromAddr || '未知'}）。`,
+            '',
+            '先调用 mail_triage_context 拉取上下文（同线程、相关邮件、历史总结、附件），再按下面的要求处理。',
+          ].join('\n')
+          const prompt = custom ? `${base}\n\n我的要求：${custom}` : base
+          const email = extractEmail(selected.fromAddr)
+          const accountId = selected.accountId || (accounts[0] && accounts[0].id) || ''
+          const title = email || selected.fromAddr || selected.subject || '邮件会话'
+          const result = await openAgentSession({ prompt, email, title, messageId: selected.messageId, accountId })
+          if (!result.ok) {
+            const fallback = await fallbackToDraft(prompt, result.error)
+            setNote(`${fallback.opened ? t('todoSessionDraftOpened') : t('todoSessionFailed')}${fallback.message}`)
+          }
+        } finally {
+          setAgentBusy(false)
         }
       }
 

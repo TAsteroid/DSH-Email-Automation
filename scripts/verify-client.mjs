@@ -788,9 +788,11 @@ function runRealReactPass() {
         item: { messageId: 'msg_1', subject: '主题', fromAddr: 'a@b.com', date: '2026-11-06', bodyExcerpt: '这是邮件正文内容', attachments: [] },
         onSummary: () => {},
         onDone: () => {},
+        onAgentSend: () => {},
       }),
     )
     check(todoMarkup.includes('这是邮件正文内容'), '[真实渲染] 待办卡片应显示邮件正文')
+    check(todoMarkup.includes('t:mail.agentChatSend'), '[真实渲染] 待办卡片应有 Agent 对话框')
 
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
     const formMarkup = renderToStaticMarkup(h(views.AccountForm, { t }))
