@@ -855,6 +855,7 @@ window.__ModuleLoader__.load({
         flex: 'none',
       },
       selectionAll: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' },
+      selectionCount: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', minWidth: 14, textAlign: 'center' },
       selectCell: { display: 'flex', alignItems: 'center', paddingLeft: 8, flex: 'none' },
       unreadDot: {
         color: 'var(--dsw-alias-state-info-primary, #4c8dff)',
@@ -1511,17 +1512,22 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: styles.listColumn },
-        selection ? h(SelectionBar, { t, selection, allIds, actions: toolbar }) : null,
         groups.map((group, index) =>
           h(
             'div',
             { key: group.id },
             h(
               'div',
-              { style: index > 0 ? { ...styles.listHead, borderTop: '1px solid var(--dsw-alias-border-l2)' } : styles.listHead },
+              {
+                style:
+                  index > 0
+                    ? { ...styles.listHead, borderTop: '1px solid var(--dsw-alias-border-l2)' }
+                    : { ...styles.listHead, gap: 6, flexWrap: 'wrap' },
+              },
               group.title,
               h('span', { style: styles.listCount }, group.items.length),
-              index === 0 && headerActions ? h('span', { style: styles.spacer }) : null,
+              index === 0 && (selection || headerActions) ? h('span', { style: styles.spacer }) : null,
+              index === 0 && selection ? selectionControls({ t, selection, allIds, actions: toolbar }) : null,
               index === 0 ? headerActions : null,
             ),
             group.items.length === 0
@@ -2013,9 +2019,6 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
-        selection
-          ? h(SelectionBar, { t, selection, allIds: messages.map((message) => message.id), actions })
-          : null,
         messages.length === 0
           ? h(Empty, { title: t('noMessages'), hint: t('noMessagesHint') })
           : h(
@@ -2093,14 +2096,16 @@ window.__ModuleLoader__.load({
     }
 
     /** 多选工具条：全选 + 已选数量 + 各视图自己的批量动作 + 取消。 */
-    function SelectionBar({ t, selection, allIds, actions }) {
+    /**
+     * 多选控件（不单独占一行）：全选 + 已选数量 + 各视图批量动作 + 取消。
+     * 直接塞进列表标题行，避免多出一条工具条把列表往下挤。
+     */
+    function selectionControls({ t, selection, allIds, actions }) {
       const allSelected = allIds.length > 0 && selection.count === allIds.length
-      return h(
-        'div',
-        { style: styles.selectionBar },
+      return [
         h(
           'label',
-          { style: styles.selectionAll },
+          { key: 'all', style: styles.selectionAll },
           h('input', {
             type: 'checkbox',
             checked: allSelected,
@@ -2109,12 +2114,12 @@ window.__ModuleLoader__.load({
           }),
           h('span', null, t('selectAll')),
         ),
-        h('span', { style: styles.muted }, `${t('selectedCount')} ${selection.count}`),
-        h('span', { style: styles.spacer }),
+        h('span', { key: 'count', style: styles.selectionCount }, String(selection.count)),
         ...(actions || []),
         h(
           'button',
           {
+            key: 'cancel',
             type: 'button',
             style: styles.btnSmall,
             disabled: selection.count === 0,
@@ -2122,7 +2127,7 @@ window.__ModuleLoader__.load({
           },
           t('cancel'),
         ),
-      )
+      ]
     }
 
     /** 移动目标文件夹选择框（列表来自 /folders）。 */
