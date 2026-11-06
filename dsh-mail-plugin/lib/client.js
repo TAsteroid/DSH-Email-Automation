@@ -827,6 +827,14 @@ window.__ModuleLoader__.load({
         cursor: 'pointer',
         fontSize: 13,
       },
+      todoScroll: {
+        flex: 1,
+        minHeight: 0,
+        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      },
       todoBody: {
         marginTop: 10,
         padding: '10px 12px',
@@ -1155,10 +1163,11 @@ window.__ModuleLoader__.load({
       readingScroll: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' },
       agentWrap: { flex: 'none', display: 'flex', flexDirection: 'column' },
       rowHandle: {
-        height: 7,
+        height: 9,
         flex: 'none',
         cursor: 'row-resize',
         touchAction: 'none',
+        userSelect: 'none',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -1843,7 +1852,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 详情页底部的 Agent 区：常驻阅读区底部，高度可上下拖动，正文单独滚动。 */
-    function AgentMailComposer({ t, message, onSend, sending }) {
+    function AgentMailComposer({ t, message, onSend, sending, storageKey = 'agentDock', dockSpec }) {
       const [text, setText] = React.useState('')
       const [copied, setCopied] = React.useState(false)
       const DOCK_SPEC = { initial: 120, min: 76, max: 420 }
@@ -2852,71 +2861,74 @@ window.__ModuleLoader__.load({
       const shown = expanded || !long ? body : `${body.slice(0, 600)}…`
       return h(
         'article',
-        { style: { ...styles.aiCard, width: '100%', height: '100%' }, 'aria-label': item.subject || item.messageId },
-        h('p', { style: styles.sectionTitle }, t('aiQueue')),
-        h('h3', { style: styles.msgSubject }, item.subject || t('noSubject')),
-        h('p', { style: styles.muted }, `${item.fromAddr || ''} · ${item.date || ''}`),
-        item.hasSummary ? h('p', { style: styles.muted }, t('todoSummarized')) : null,
-        body
-          ? h(
-              'div',
-              { style: styles.todoBody },
-              h('pre', { style: styles.todoBodyText }, shown),
-              long
-                ? h(
-                    'button',
-                    { type: 'button', style: styles.btnSmall, onClick: () => setExpanded((prev) => !prev) },
-                    expanded ? t('todoShowLess') : t('todoShowMore'),
-                  )
-                : null,
-            )
-          : null,
+        {
+          style: { ...styles.aiCard, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 },
+          'aria-label': item.subject || item.messageId,
+        },
+        // 内容区可滚动，底部 Agent 对话框固定住，不会被正文挤走
         h(
           'div',
-          { style: styles.formActions },
-          h('button', { type: 'button', style: styles.btn, disabled: busy, onClick: onSummary }, t('todoSummary')),
-          h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: onDone }, t('todoDone')),
-        ),
-        attachments.length > 0
-          ? h(
-              'div',
-              { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
-              h('p', { style: { ...styles.sectionTitle, margin: 0 } }, t('attachmentTitle')),
-              attachments.map((attachment) =>
-                h(
-                  'div',
-                  { key: attachment.id, style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-                  h('span', { style: { fontSize: 13 } }, `${attachment.filename} · ${formatBytes(attachment.size)}`),
-                  attachment.fetchedAt
-                    ? h('span', { style: styles.muted }, t('attachmentFetched'))
-                    : h(
-                        'button',
-                        {
-                          type: 'button',
-                          style: styles.btnSmall,
-                          disabled: fetchingId === attachment.id,
-                          onClick: () => onFetchAttachment(attachment, item),
-                        },
-                        t('attachmentAnalyze'),
-                      ),
+          { style: styles.todoScroll },
+          h('p', { style: styles.sectionTitle }, t('aiQueue')),
+          h('h3', { style: styles.msgSubject }, item.subject || t('noSubject')),
+          h('p', { style: styles.muted }, `${item.fromAddr || ''} · ${item.date || ''}`),
+          item.hasSummary ? h('p', { style: styles.muted }, t('todoSummarized')) : null,
+          body
+            ? h(
+                'div',
+                { style: styles.todoBody },
+                h('pre', { style: styles.todoBodyText }, shown),
+                long
+                  ? h(
+                      'button',
+                      { type: 'button', style: styles.btnSmall, onClick: () => setExpanded((prev) => !prev) },
+                      expanded ? t('todoShowLess') : t('todoShowMore'),
+                    )
+                  : null,
+              )
+            : null,
+          h(
+            'div',
+            { style: styles.formActions },
+            h('button', { type: 'button', style: styles.btn, disabled: busy, onClick: onSummary }, t('todoSummary')),
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: onDone }, t('todoDone')),
+          ),
+          attachments.length > 0
+            ? h(
+                'div',
+                { style: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 } },
+                h('p', { style: { ...styles.sectionTitle, margin: 0 } }, t('attachmentTitle')),
+                attachments.map((attachment) =>
                   h(
-                    'button',
-                    {
-                      type: 'button',
-                      style: styles.btnSmall,
-                      disabled: busy,
-                      onClick: () => onDismissAttachment(attachment),
-                    },
-                    t('todoDone'),
+                    'div',
+                    { key: attachment.id, style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                    h('span', { style: { fontSize: 13 } }, `${attachment.filename} · ${formatBytes(attachment.size)}`),
+                    attachment.fetchedAt
+                      ? h('span', { style: styles.muted }, t('attachmentFetched'))
+                      : h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: styles.btnSmall,
+                            disabled: fetchingId === attachment.id,
+                            onClick: () => onFetchAttachment(attachment, item),
+                          },
+                          t('attachmentAnalyze'),
+                        ),
+                    h(
+                      'button',
+                      { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => onDismissAttachment(attachment) },
+                      t('todoDone'),
+                    ),
+                    results && results[attachment.id]
+                      ? h('span', { style: styles.muted }, results[attachment.id].error || t('attachmentFetched'))
+                      : null,
                   ),
-                  results && results[attachment.id]
-                    ? h('span', { style: styles.muted }, results[attachment.id].error || t('attachmentFetched'))
-                    : null,
                 ),
-              ),
-            )
-          : null,
-        h('p', { style: styles.muted }, t('todoSummaryHint')),
+              )
+            : null,
+          h('p', { style: styles.muted }, t('todoSummaryHint')),
+        ),
         onAgentSend
           ? h(AgentMailComposer, {
               t,
@@ -2928,6 +2940,8 @@ window.__ModuleLoader__.load({
               },
               onSend: onAgentSend,
               sending: agentBusy,
+              storageKey: 'todoAgentDock',
+              dockSpec: { initial: 96, min: 64, max: 260 },
             })
           : null,
       )
