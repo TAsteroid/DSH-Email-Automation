@@ -1257,3 +1257,164 @@ def mark_read_remote(
                 connection.logout()
             except Exception:
                 pass
+
+
+def _imap_session(account: dict, password: str):
+    """Open + login; caller owns logout in its own ``finally``."""
+    connection = imap_client.connect(
+        account["imapHost"],
+        int(account["imapPort"]),
+        account["imapSecurity"],
+    )
+    try:
+        connection.login(account["username"], password)
+    except _IMAP_FAILURES as exc:
+        try:
+            connection.logout()
+        except Exception:
+            pass
+        raise imap_client.ImapError(
+            f"login failed: {_redact(exc, password)}"
+        ) from None
+    return connection
+
+
+def mark_seen_remote(
+    account: dict,
+    password: str,
+    folder: str,
+    uids: list[int],
+    seen: bool,
+) -> None:
+    """Batch ``UID STORE +FLAGS/-FLAGS (\\Seen)`` for one account/folder."""
+    if not uids:
+        return
+    connection = None
+    try:
+        connection = _imap_session(account, password)
+        wire_folder = imap_client.encode_mailbox(folder)
+        try:
+            status, data = connection.select(wire_folder)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"SELECT {folder} failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(f"SELECT {folder} failed: {_text(data)}")
+
+        flag = "+FLAGS" if seen else "-FLAGS"
+        try:
+            status, data = connection.uid(
+                "STORE", ",".join(str(int(uid)) for uid in uids), flag, r"(\Seen)"
+            )
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"STORE {flag} \\Seen failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(
+                f"STORE {flag} \\Seen failed: {_text(data)}"
+            )
+    finally:
+        if connection is not None:
+            try:
+                connection.logout()
+            except Exception:
+                pass
+
+
+def move_messages_remote(
+    account: dict,
+    password: str,
+    source: str,
+    target: str,
+    uids: list[int],
+) -> None:
+    """Move UIDs from ``source`` to ``target`` (MOVE, else COPY+EXPUNGE).
+
+    The target folder is selected first so a nonexistent destination fails
+    before anything is copied.  ``UID MOVE`` is used when the server
+    advertises MOVE; a NO answer also falls back to the COPY path.
+    """
+    if not uids:
+        return
+    uid_set = ",".join(str(int(uid)) for uid in uids)
+    connection = None
+    try:
+        connection = _imap_session(account, password)
+        target_wire = imap_client.encode_mailbox(target)
+        try:
+            status, data = connection.select(target_wire, readonly=True)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"target folder {target} unavailable: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(
+                f"target folder {target} unavailable: {_text(data)}"
+            )
+
+        source_wire = imap_client.encode_mailbox(source)
+        try:
+            status, data = connection.select(source_wire)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"SELECT {source} failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(f"SELECT {source} failed: {_text(data)}")
+
+        supports_move = False
+        try:
+            cap_status, cap_data = connection.capability()
+            if cap_status == "OK":
+                supports_move = "MOVE" in _text(cap_data).upper()
+        except _IMAP_FAILURES:
+            supports_move = False
+
+        if supports_move:
+            try:
+                status, data = connection.uid("MOVE", uid_set, target_wire)
+            except _IMAP_FAILURES:
+                status, data = "NO", b""
+            if status == "OK":
+                return
+
+        try:
+            status, data = connection.uid("COPY", uid_set, target_wire)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"COPY to {target} failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(
+                f"COPY to {target} failed: {_text(data)}"
+            )
+
+        try:
+            status, data = connection.uid(
+                "STORE", uid_set, "+FLAGS", r"(\Deleted)"
+            )
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"STORE \\Deleted failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(
+                f"STORE \\Deleted failed: {_text(data)}"
+            )
+
+        try:
+            status, data = connection.uid("EXPUNGE", uid_set)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"UID EXPUNGE failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(f"UID EXPUNGE failed: {_text(data)}")
+    finally:
+        if connection is not None:
+            try:
+                connection.logout()
+            except Exception:
+                pass

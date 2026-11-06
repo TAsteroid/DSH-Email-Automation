@@ -263,6 +263,8 @@ function handleMethod(method, params) {
       ],
     }
   }
+  if (method === 'message.markSeen') return { updated: params.ids.length, skipped: 0, remote: true }
+  if (method === 'message.move') return { moved: params.ids.length, skipped: 0, failed: 0, errors: [] }
   if (method === 'message.markRead') return { seen: true, remote: false }
   if (method === 'message.get') {
     if (params && params.id === 'missing') {
@@ -891,6 +893,16 @@ check(todoSetNoId && todoSetNoId.status === 400, `todo/set 缺 id 应 400，实�
 
 const contextNoId = await invoke('/api/dsh-mail/summary/context', { method: 'POST', body: '{}' })
 check(contextNoId && contextNoId.status === 400, `summary/context 缺 id 应 400，实际 ${contextNoId && contextNoId.status}`)
+
+const seenNoIds = await invoke('/api/dsh-mail/messages/seen', { method: 'POST', body: JSON.stringify({ ids: [], seen: true }) })
+check(seenNoIds && seenNoIds.status === 400, `批量已读缺 ids 应 400，实际 ${seenNoIds && seenNoIds.status}`)
+const seenOk = await invoke('/api/dsh-mail/messages/seen', { method: 'POST', body: JSON.stringify({ ids: ['msg_1', 'msg_2'], seen: false }) })
+check(seenOk && seenOk.status === 200, `批量已读应 200，实际 ${seenOk && seenOk.status}`)
+
+const moveNoFolder = await invoke('/api/dsh-mail/messages/move', { method: 'POST', body: JSON.stringify({ ids: ['msg_1'] }) })
+check(moveNoFolder && moveNoFolder.status === 400, `批量移动缺 folder 应 400，实际 ${moveNoFolder && moveNoFolder.status}`)
+const moveOk = await invoke('/api/dsh-mail/messages/move', { method: 'POST', body: JSON.stringify({ ids: ['msg_1'], folder: '归档' }) })
+check(moveOk && moveOk.status === 200, `批量移动应 200，实际 ${moveOk && moveOk.status}`)
 
 const markReadNoId = await invoke('/api/dsh-mail/messages/read', { method: 'POST', body: '{}' })
 check(markReadNoId && markReadNoId.status === 400, `标记已读缺 id 应 400，实际 ${markReadNoId && markReadNoId.status}`)

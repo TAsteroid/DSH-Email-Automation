@@ -757,6 +757,18 @@ function runRealReactPass() {
     check(searchMarkup.includes('t:mail.searchResults'), '[真实渲染] 搜索页应有结果标题')
     check(searchMarkup.includes('t:mail.searchEmpty'), '[真实渲染] 无结果时应有空态')
 
+    const selectMarkup = renderToStaticMarkup(
+      h(views.MessageList, {
+        t,
+        messages: [{ id: 'm1', subject: 'A', fromAddr: 'a@b.com', date: '2026-11-06', seen: true }],
+        selectedId: null,
+        selection: { selected: [], has: () => false, toggle: () => {}, toggleAll: () => {}, clear: () => {}, count: 0 },
+        actions: [],
+      }),
+    )
+    check(selectMarkup.includes('t:mail.selectAll'), '[真实渲染] 多选工具条应有「全选」')
+    check(selectMarkup.includes('type="checkbox"'), '[真实渲染] 多选应渲染复选框')
+
     const unreadMarkup = renderToStaticMarkup(
       h(views.MessageList, {
         t,

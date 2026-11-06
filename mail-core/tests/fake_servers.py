@@ -516,6 +516,8 @@ class FakeImapServer(_LoopbackServer):
         reject_login: bool = False,
         reject_store: bool = False,
         reject_flags_fetch: bool = False,
+        support_move: bool = False,
+        missing_folders: set[str] | None = None,
         message_flags: dict[int, list[str]] | None = None,
     ) -> None:
         super().__init__()
@@ -523,6 +525,8 @@ class FakeImapServer(_LoopbackServer):
         self.reject_login = bool(reject_login)
         self.reject_store = bool(reject_store)
         self.reject_flags_fetch = bool(reject_flags_fetch)
+        self.support_move = bool(support_move)
+        self.missing_folders = set(missing_folders or ())
         # ``None`` keeps the old FETCH shape (no FLAGS at all).  When given,
         # each UID maps to its flag list, e.g. ``{1: ["\\Seen"], 2: []}``.
         self.message_flags = (
@@ -549,7 +553,9 @@ class FakeImapServer(_LoopbackServer):
         # Deletion bookkeeping for ``message.delete`` tests.
         self.copies: list[tuple[int, str]] = []
         self.stores: list[tuple[int, str]] = []
+        self.moves: list[tuple[list[int], str]] = []
         self.expunges: int = 0
+        self.uid_expunges: int = 0
         # Fault injection: reply OK but leave the mailbox unchanged.
         self.copy_noop = bool(copy_noop)
         self.expunge_noop = bool(expunge_noop)
@@ -613,9 +619,12 @@ class FakeImapServer(_LoopbackServer):
                 arguments = arguments.strip()
 
                 if command == "CAPABILITY":
+                    capabilities = "IMAP4rev1 UIDPLUS"
+                    if self.support_move:
+                        capabilities += " MOVE"
                     self._send(
                         connection,
-                        b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n",
+                        f"* CAPABILITY {capabilities}\r\n",
                     )
                     self._ok(connection, tag, "CAPABILITY completed")
                 elif command == "LOGIN":
@@ -633,6 +642,12 @@ class FakeImapServer(_LoopbackServer):
                 elif command in ("SELECT", "EXAMINE"):
                     mailbox = _imap_tokens(arguments)
                     name = mailbox[0] if mailbox else ""
+                    if name in self.missing_folders:
+                        self._send(
+                            connection,
+                            f"{tag} NO [NONEXISTENT] Unknown Mailbox: {name}\r\n",
+                        )
+                        continue
                     self._mailbox = name
                     readonly = command == "EXAMINE"
                     self.selected.append((name, readonly))
@@ -796,28 +811,55 @@ class FakeImapServer(_LoopbackServer):
                 self._send(connection, raw)
                 self._send(connection, b")\r\n")
             self._ok(connection, tag, "UID FETCH completed")
-        elif subcommand in ("COPY", "STORE"):
+        elif subcommand in ("COPY", "STORE", "MOVE", "EXPUNGE"):
             uid_token, _, rest = sub_arguments.partition(" ")
-            try:
-                uid = int(uid_token)
-            except ValueError:
+            uid_values = [
+                int(token)
+                for token in uid_token.split(",")
+                if token.strip().isdigit()
+            ]
+            if not uid_values:
                 self._send(connection, f"{tag} BAD invalid UID\r\n")
                 return
             if subcommand == "COPY":
                 tokens = _imap_tokens(rest.strip())
                 target = tokens[0] if tokens else ""
-                self.copies.append((uid, target))
-                if not self.copy_noop and target:
-                    self.extra_uids.setdefault(target, []).append(self._next_uid)
-                    self._next_uid += 1
+                for uid in uid_values:
+                    self.copies.append((uid, target))
+                    if not self.copy_noop and target:
+                        self.extra_uids.setdefault(target, []).append(self._next_uid)
+                        self._next_uid += 1
                 self._ok(connection, tag, "UID COPY completed")
+            elif subcommand == "MOVE":
+                tokens = _imap_tokens(rest.strip())
+                target = tokens[0] if tokens else ""
+                self.moves.append((list(uid_values), target))
+                if not self.support_move:
+                    self._send(connection, f"{tag} NO MOVE not supported\r\n")
+                    return
+                if target:
+                    for uid in uid_values:
+                        self.extra_uids.setdefault(target, []).append(self._next_uid)
+                        self._next_uid += 1
+                        self.deleted_uids.setdefault(self._mailbox, set()).add(uid)
+                self._ok(connection, tag, "UID MOVE completed")
+            elif subcommand == "EXPUNGE":
+                self.uid_expunges += 1
+                if self.expunge_noop:
+                    self._ok(connection, tag, "UID EXPUNGE completed")
+                    return
+                self.deleted_uids.setdefault(self._mailbox, set()).update(
+                    uid_values
+                )
+                self._ok(connection, tag, "UID EXPUNGE completed")
             else:
-                self.stores.append((uid, rest.strip()))
+                for uid in uid_values:
+                    self.stores.append((uid, rest.strip()))
+                    if "\\DELETED" in rest.upper():
+                        self._pending_deleted.setdefault(self._mailbox, set()).add(uid)
                 if self.reject_store:
                     self._send(connection, f"{tag} NO STORE failed\r\n")
                     return
-                if "\\DELETED" in rest.upper():
-                    self._pending_deleted.setdefault(self._mailbox, set()).add(uid)
                 self._ok(connection, tag, "UID STORE completed")
         else:
             self._send(connection, f"{tag} BAD unsupported UID command\r\n")

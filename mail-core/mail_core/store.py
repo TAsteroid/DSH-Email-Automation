@@ -1692,6 +1692,28 @@ class Store:
             )
         return cursor.rowcount > 0
 
+    def set_message_seen_by_id(self, message_id: str, seen: bool) -> bool:
+        """Set one row's ``seen`` by id; unchanged/absent rows are not written."""
+        value = 1 if seen else 0
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET seen = ? WHERE id = ? AND seen <> ?",
+                (value, message_id, value),
+            )
+        return cursor.rowcount > 0
+
+    def delete_messages_by_ids(self, message_ids: Iterable[str]) -> int:
+        """Delete several rows (attachments cascade); returns rows removed."""
+        ids = list(dict.fromkeys(str(item) for item in message_ids))
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self._conn:
+            cursor = self._conn.execute(
+                f"DELETE FROM messages WHERE id IN ({placeholders})", ids
+            )
+        return cursor.rowcount
+
     def delete_messages(self, account_id: str, folder: str) -> int:
         """Drop the cached rows of one folder (used when UIDVALIDITY changed)."""
         with self._conn:

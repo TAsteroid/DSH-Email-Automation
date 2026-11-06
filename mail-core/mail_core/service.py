@@ -183,6 +183,23 @@ def _normalize_email(value: Any) -> str:
     return value.strip().lower()
 
 
+def _require_id_array(params: dict, key: str, *, maximum: int) -> list[str]:
+    """A non-empty array of non-empty id strings, capped at ``maximum``."""
+    value = params.get(key)
+    if not isinstance(value, list) or not value:
+        raise bad_request(f"field {key} must be a non-empty array of strings")
+    if len(value) > maximum:
+        raise bad_request(f"field {key} must contain at most {maximum} ids")
+    ids: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise bad_request(
+                f"field {key} must be an array of non-empty strings"
+            )
+        ids.append(item.strip())
+    return ids
+
+
 class Service:
     """Owns the data directory, the SQLite store and the method table."""
 
@@ -215,6 +232,8 @@ class Service:
             "message.get": self._message_get,
             "message.search": self._message_search,
             "message.markRead": self._message_mark_read,
+            "message.markSeen": self._message_mark_seen,
+            "message.move": self._message_move,
             "message.delete": self._message_delete,
             "message.restore": self._message_restore,
             "todo.list": self._todo_list,
@@ -654,6 +673,108 @@ class Service:
                     f"{message['accountId']}: {type(exc).__name__}"
                 )
         return {"seen": True, "remote": remote}
+
+    def _message_mark_seen(self, params: dict) -> dict:
+        """Batch-set the local read flag, then notify each IMAP server group.
+
+        Unknown ids are counted as ``skipped``.  Local writes happen first and
+        the remote STORE is best-effort: a group that fails only logs and
+        turns ``remote`` off, the call itself still succeeds.
+        """
+        ids = _require_id_array(params, "ids", maximum=500)
+        seen = params.get("seen")
+        if not isinstance(seen, bool):
+            raise bad_request("field seen must be a boolean")
+
+        updated = 0
+        skipped = 0
+        groups: dict[tuple[str, str], list[int]] = {}
+        for message_id in dict.fromkeys(ids):
+            message = self.store.get_message(message_id)
+            if message is None:
+                skipped += 1
+                continue
+            updated += 1
+            self.store.set_message_seen_by_id(message_id, seen)
+
+            account_id = message["accountId"]
+            account = self.store.get_account(account_id)
+            if account is None or (account.get("protocol") or "imap") != "imap":
+                continue
+            key = (account_id, str(message.get("folder") or sync.DEFAULT_FOLDER))
+            groups.setdefault(key, []).append(int(message["uid"]))
+
+        remote = False
+        for (account_id, folder), uids in groups.items():
+            try:
+                account, password = self._account_credentials(account_id)
+                sync.mark_seen_remote(account, password, folder, uids, seen)
+                remote = True
+            except Exception as exc:
+                _log(
+                    "message.markSeen remote failed for "
+                    f"{account_id}/{folder}: {type(exc).__name__}"
+                )
+        return {"updated": updated, "skipped": skipped, "remote": remote}
+
+    def _message_move(self, params: dict) -> dict:
+        """Move messages to another folder (IMAP only, per-account groups).
+
+        The local row is deleted only after the server-side move succeeded;
+        the target folder will re-index the mail on its next sync.  POP3 mail
+        cannot be moved server-side and is reported as ``skipped``.
+        """
+        ids = _require_id_array(params, "ids", maximum=500)
+        target = _require_str(params, "folder")
+
+        skipped = 0
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for message_id in dict.fromkeys(ids):
+            message = self.store.get_message(message_id)
+            if message is None:
+                skipped += 1
+                continue
+            account_id = message["accountId"]
+            account = self.store.get_account(account_id)
+            if account is None or (account.get("protocol") or "imap") != "imap":
+                skipped += 1
+                continue
+            key = (account_id, str(message.get("folder") or sync.DEFAULT_FOLDER))
+            groups.setdefault(key, []).append(message)
+
+        moved = 0
+        failed = 0
+        errors: list[dict] = []
+        for (account_id, source), items in groups.items():
+            try:
+                account, password = self._account_credentials(account_id)
+                sync.move_messages_remote(
+                    account,
+                    password,
+                    source,
+                    target,
+                    [int(item["uid"]) for item in items],
+                )
+            except Exception as exc:
+                failed += len(items)
+                errors.append(
+                    {
+                        "folder": source,
+                        "target": target,
+                        "error": type(exc).__name__,
+                    }
+                )
+                continue
+            self.store.delete_messages_by_ids(
+                [str(item["id"]) for item in items]
+            )
+            moved += len(items)
+        return {
+            "moved": moved,
+            "skipped": skipped,
+            "failed": failed,
+            "errors": errors,
+        }
 
     def _message_delete(self, params: dict) -> dict:
         """Delete one synced message (see ``message.delete``).

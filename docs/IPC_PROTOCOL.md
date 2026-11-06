@@ -341,6 +341,36 @@ POP3 结果：
 - POP3 账号只改本地，`remote` 恒为 `false`。
 - `seen` 的初始来源是同步时 IMAP `FLAGS` 里的 `\Seen`；`message.markRead` 是用户主动标记已读的入口。
 
+### `message.markSeen`
+
+参数：`{"ids": ["msg_xxx", "msg_yyy"], "seen": true}`
+
+结果：`{"updated": 2, "skipped": 1, "remote": true}`
+
+- 批量设置已读 / 未读：`seen: true` → 本地 `seen=1`，`false` → `seen=0`；值没变不写库。
+- `ids` 必须是**非空字符串数组**，单次上限 **500**；空数组 / 非数组 / 非字符串元素 / 超过 500 → `BAD_REQUEST`。`seen` 必须是布尔值。
+- 未知 id 计入 `skipped`，不报错；重复 id 只算一次。
+- 服务器：IMAP 消息按 `(accountId, folder)` 分组，每组一条 `UID STORE <uid-set> +FLAGS/-FLAGS (\Seen)`（尽力而为，失败只记日志）；POP3 消息只改本地。
+- `remote`：是否**至少有一个** IMAP 组成功通知了服务器；全 POP3 或全部失败时 `false`。
+- `updated` 是本地找到并处理的邮件数（即使值本来就相同也算），`skipped` 是未知 id 数。
+
+### `message.move`
+
+参数：`{"ids": ["msg_xxx"], "folder": "Archive"}`
+
+结果：
+
+```json
+{"moved": 1, "skipped": 0, "failed": 0, "errors": []}
+```
+
+- `folder` 是**服务器上的目标文件夹名**（如 `INBOX`、`已发送`），空串 / 非字符串 → `BAD_REQUEST`；`ids` 规则同 `message.markSeen`（非空数组、上限 500）。
+- **仅 IMAP**：POP3 账号的邮件计入 `skipped`，不报错；未知 id 也计入 `skipped`。
+- 按 `(accountId, 当前 folder)` 分组，每组先 `SELECT` 目标文件夹：不存在 → 该组全部计入 `failed`，`errors` 追加一条（不含密码）。
+- 移动优先 `UID MOVE <uid-set> <target>`；服务器 CAPABILITY 不含 `MOVE` 或命令返回 NO 时退回 `UID COPY <uid-set> <target>` + `UID STORE <uid-set> +FLAGS (\Deleted)` + `UID EXPUNGE <uid-set>`。
+- **服务器成功后才删本地行**（附件记录随邮件级联删除），目标文件夹下次同步会重新拉取该邮件；服务器失败时本地行保留。
+- `errors` 每项形如 `{"folder": "INBOX", "target": "Archive", "error": "ImapError"}`：只含文件夹名与异常类型，绝不包含密码。
+
 ### `message.delete`
 
 参数：

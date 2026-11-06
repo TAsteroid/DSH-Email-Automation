@@ -224,6 +224,13 @@ window.__ModuleLoader__.load({
         confirmDeletePermanent: '邮件将被永久删除，无法恢复。',
         deleteConfirm: '确认删除',
         cancel: '取消',
+        selectAll: '全选',
+        selectedCount: '已选',
+        markRead: '标为已读',
+        markUnread: '标为未读',
+        moveTo: '移动到…',
+        movePick: '选择文件夹',
+        moveConfirm: '移动',
         deletedOk: '已删除',
         deleteLocalOnly: 'POP3 账户：只删除了本地副本，服务器上的邮件仍在。',
 
@@ -504,6 +511,13 @@ window.__ModuleLoader__.load({
         confirmDeletePermanent: 'The message will be deleted permanently.',
         deleteConfirm: 'Delete',
         cancel: 'Cancel',
+        selectAll: 'Select all',
+        selectedCount: 'selected',
+        markRead: 'Mark as read',
+        markUnread: 'Mark as unread',
+        moveTo: 'Move to…',
+        movePick: 'Pick a folder',
+        moveConfirm: 'Move',
         deletedOk: 'Deleted',
         deleteLocalOnly: 'POP3 account: only the local copy was removed; the server copy remains.',
 
@@ -831,6 +845,17 @@ window.__ModuleLoader__.load({
         whiteSpace: 'pre-wrap',
         color: 'var(--dsw-alias-label-secondary)',
       },
+      selectionBar: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '6px 10px',
+        borderBottom: '1px solid var(--dsw-alias-border-l1)',
+        background: 'var(--dsw-alias-bg-l2)',
+        flex: 'none',
+      },
+      selectionAll: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' },
+      selectCell: { display: 'flex', alignItems: 'center', paddingLeft: 8, flex: 'none' },
       unreadDot: {
         color: 'var(--dsw-alias-state-info-primary, #4c8dff)',
         marginRight: 6,
@@ -1481,10 +1506,12 @@ window.__ModuleLoader__.load({
     }
 
     /** 左列：分组列表。groups = [{ id, title, items: [{ id, title, meta }] }] */
-    function GroupList({ t, groups, selectedId, onSelect, headerActions }) {
+    function GroupList({ t, groups, selectedId, onSelect, headerActions, selection, toolbar }) {
+      const allIds = groups.flatMap((group) => group.items.map((item) => item.id))
       return h(
         'div',
         { style: styles.listColumn },
+        selection ? h(SelectionBar, { t, selection, allIds, actions: toolbar }) : null,
         groups.map((group, index) =>
           h(
             'div',
@@ -1501,19 +1528,34 @@ window.__ModuleLoader__.load({
               ? h('p', { style: { ...styles.muted, padding: '8px 16px', margin: 0 } }, t('emptyList'))
               : group.items.map((item) =>
                   h(
-                    'button',
-                    {
-                      key: item.id,
-                      type: 'button',
-                      'aria-pressed': selectedId === item.id,
-                      onClick: () => onSelect && onSelect(item.id),
-                      style:
-                        selectedId === item.id
-                          ? { ...styles.listItem, background: 'var(--dsw-alias-interactive-bg-hover)' }
-                          : styles.listItem,
-                    },
-                    h('span', null, item.title),
-                    item.meta ? h('span', { style: styles.listItemMeta }, item.meta) : null,
+                    'div',
+                    { key: item.id, style: { display: 'flex', alignItems: 'stretch' } },
+                    selection
+                      ? h(
+                          'span',
+                          { style: styles.selectCell },
+                          h('input', {
+                            type: 'checkbox',
+                            checked: selection.has(item.id),
+                            onChange: () => selection.toggle(item.id),
+                            'aria-label': t('selectAll'),
+                          }),
+                        )
+                      : null,
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        'aria-pressed': selectedId === item.id,
+                        onClick: () => onSelect && onSelect(item.id),
+                        style:
+                          selectedId === item.id
+                            ? { ...styles.listItem, flex: 1, background: 'var(--dsw-alias-interactive-bg-hover)' }
+                            : { ...styles.listItem, flex: 1 },
+                      },
+                      h('span', null, item.title),
+                      item.meta ? h('span', { style: styles.listItemMeta }, item.meta) : null,
+                    ),
                   ),
                 ),
           ),
@@ -1946,7 +1988,7 @@ window.__ModuleLoader__.load({
 
     // ---- 收件箱 ------------------------------------------------------------
     /** 中间栏：本地索引的邮件列表（按时间倒序）。 */
-    function MessageList({ t, messages, selectedId, onSelect, onSync, syncing, onLoadOlder, loadingOlder, notice }) {
+    function MessageList({ t, messages, selectedId, onSelect, onSync, syncing, onLoadOlder, loadingOlder, notice, selection, actions }) {
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
@@ -1971,6 +2013,9 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
+        selection
+          ? h(SelectionBar, { t, selection, allIds: messages.map((message) => message.id), actions })
+          : null,
         messages.length === 0
           ? h(Empty, { title: t('noMessages'), hint: t('noMessagesHint') })
           : h(
@@ -1978,24 +2023,39 @@ window.__ModuleLoader__.load({
               { style: { flex: 1, minHeight: 0, overflowY: 'auto' } },
               messages.map((message) =>
                 h(
-                  'button',
-                  {
-                    key: message.id,
-                    type: 'button',
-                    'aria-pressed': selectedId === message.id,
-                    onClick: () => onSelect && onSelect(message.id),
-                    style:
-                      selectedId === message.id
-                        ? { ...styles.msgItem, background: 'var(--dsw-alias-interactive-bg-hover)' }
-                        : styles.msgItem,
-                  },
+                  'div',
+                  { key: message.id, style: { display: 'flex', alignItems: 'stretch' } },
+                  selection
+                    ? h(
+                        'span',
+                        { style: styles.selectCell },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: selection.has(message.id),
+                          onChange: () => selection.toggle(message.id),
+                          'aria-label': t('selectAll'),
+                        }),
+                      )
+                    : null,
                   h(
-                    'span',
-                    { style: message.seen === false ? { ...styles.msgTitle, fontWeight: 600 } : styles.msgTitle },
-                    message.seen === false ? h('span', { style: styles.unreadDot }, '•') : null,
-                    message.subject || t('noSubject'),
+                    'button',
+                    {
+                      type: 'button',
+                      'aria-pressed': selectedId === message.id,
+                      onClick: () => onSelect && onSelect(message.id),
+                      style:
+                        selectedId === message.id
+                          ? { ...styles.msgItem, flex: 1, background: 'var(--dsw-alias-interactive-bg-hover)' }
+                          : { ...styles.msgItem, flex: 1 },
+                    },
+                    h(
+                      'span',
+                      { style: message.seen === false ? { ...styles.msgTitle, fontWeight: 600 } : styles.msgTitle },
+                      message.seen === false ? h('span', { style: styles.unreadDot }, '•') : null,
+                      message.subject || t('noSubject'),
+                    ),
+                    h('span', { style: styles.msgMeta }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
                   ),
-                  h('span', { style: styles.msgMeta }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
                 ),
               ),
             ),
@@ -2019,6 +2079,94 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 多选状态：已选 id 列表 + 切换 / 全选 / 清空。 */
+    function useSelection() {
+      const [selected, setSelected] = React.useState([])
+      const has = (id) => selected.includes(id)
+      const toggle = (id) =>
+        setSelected((prev) => (prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]))
+      const toggleAll = (ids) =>
+        setSelected((prev) => (prev.length === ids.length && ids.length > 0 ? [] : [...ids]))
+      const clear = () => setSelected([])
+      const reset = (keep) => setSelected((prev) => prev.filter((id) => keep.includes(id)))
+      return { selected, has, toggle, toggleAll, clear, reset, count: selected.length }
+    }
+
+    /** 多选工具条：全选 + 已选数量 + 各视图自己的批量动作 + 取消。 */
+    function SelectionBar({ t, selection, allIds, actions }) {
+      const allSelected = allIds.length > 0 && selection.count === allIds.length
+      return h(
+        'div',
+        { style: styles.selectionBar },
+        h(
+          'label',
+          { style: styles.selectionAll },
+          h('input', {
+            type: 'checkbox',
+            checked: allSelected,
+            onChange: () => selection.toggleAll(allIds),
+            'aria-label': t('selectAll'),
+          }),
+          h('span', null, t('selectAll')),
+        ),
+        h('span', { style: styles.muted }, `${t('selectedCount')} ${selection.count}`),
+        h('span', { style: styles.spacer }),
+        ...(actions || []),
+        h(
+          'button',
+          {
+            type: 'button',
+            style: styles.btnSmall,
+            disabled: selection.count === 0,
+            onClick: selection.clear,
+          },
+          t('cancel'),
+        ),
+      )
+    }
+
+    /** 移动目标文件夹选择框（列表来自 /folders）。 */
+    function MoveMenu({ t, folders, busy, onMove }) {
+      const [open, setOpen] = React.useState(false)
+      const [target, setTarget] = React.useState('')
+      if (!open) {
+        return h(
+          'button',
+          { type: 'button', style: styles.btnSmall, disabled: busy, onClick: () => setOpen(true) },
+          t('moveTo'),
+        )
+      }
+      return h(
+        'span',
+        { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+        h(
+          'select',
+          {
+            className: 'dsh-mail-select',
+            style: { ...styles.textInput, padding: '2px 6px', minWidth: 140 },
+            value: target,
+            onChange: (event) => setTarget(event.target.value),
+          },
+          h('option', { value: '' }, t('movePick')),
+          folders.map((name) => h('option', { key: name, value: name }, name)),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            style: styles.btnSmall,
+            disabled: busy || !target,
+            onClick: () => {
+              onMove(target)
+              setTarget('')
+              setOpen(false)
+            },
+          },
+          t('moveConfirm'),
+        ),
+        h('button', { type: 'button', style: styles.btnSmall, onClick: () => setOpen(false) }, t('cancel')),
+      )
+    }
     /** 通用二次确认弹窗（删除等破坏性操作）。 */
     function ConfirmDialog({ t, title, body, confirmLabel, onConfirm, onCancel, busy }) {
       return h(
@@ -2092,6 +2240,76 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = React.useState(null)
       const [syncing, setSyncing] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
+      const [note, setNote] = React.useState(null)
+      const [folders, setFolders] = React.useState([])
+      const [bulkBusy, setBulkBusy] = React.useState(false)
+      const selection = useSelection()
+
+      // 移动目标文件夹（IMAP 的服务器文件夹名）
+      React.useEffect(() => {
+        let cancelled = false
+        const load = async () => {
+          try {
+            const params = accountId ? { accountId } : {}
+            const value = await call('/folders', params)
+            if (!cancelled) setFolders((value && value.folders) || [])
+          } catch {
+            if (!cancelled) setFolders([])
+          }
+        }
+        void load()
+        return () => {
+          cancelled = true
+        }
+      }, [accountId])
+
+      const bulkMark = async (seen) => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          await call('/messages/seen', { ids: selection.selected, seen })
+          selection.clear()
+          await loadMessages()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
+
+      const bulkMove = async (folder) => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          await call('/messages/move', { ids: selection.selected, folder })
+          selection.clear()
+          await loadMessages()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
+
+      const bulkDelete = async () => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          for (const id of [...selection.selected]) {
+            try {
+              await call('/messages/delete', { id })
+            } catch {
+              // 单封失败继续处理其余
+            }
+          }
+          selection.clear()
+          await loadMessages()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
 
       const openCompose = (mode) => {
         if (detail) setCompose(buildCompose(mode, detail, t))
@@ -2140,7 +2358,6 @@ window.__ModuleLoader__.load({
       }, [loadMessages])
 
       const [loadingOlder, setLoadingOlder] = React.useState(false)
-      const [note, setNote] = React.useState(null)
       const [pendingDelete, setPendingDelete] = React.useState(null)
       const [deleting, setDeleting] = React.useState(false)
 
@@ -2344,6 +2561,43 @@ window.__ModuleLoader__.load({
             onLoadOlder: loadOlder,
             loadingOlder,
             notice: note,
+            selection,
+            actions: [
+              h(
+                'button',
+                {
+                  key: 'read',
+                  type: 'button',
+                  style: styles.btnSmall,
+                  disabled: bulkBusy || selection.count === 0,
+                  onClick: () => bulkMark(true),
+                },
+                t('markRead'),
+              ),
+              h(
+                'button',
+                {
+                  key: 'unread',
+                  type: 'button',
+                  style: styles.btnSmall,
+                  disabled: bulkBusy || selection.count === 0,
+                  onClick: () => bulkMark(false),
+                },
+                t('markUnread'),
+              ),
+              h(MoveMenu, { key: 'move', t, folders, busy: bulkBusy || selection.count === 0, onMove: bulkMove }),
+              h(
+                'button',
+                {
+                  key: 'delete',
+                  type: 'button',
+                  style: styles.dangerBtn,
+                  disabled: bulkBusy || selection.count === 0,
+                  onClick: bulkDelete,
+                },
+                t('deleteMail'),
+              ),
+            ],
           }),
         ),
         handle('list'),
@@ -2737,6 +2991,86 @@ window.__ModuleLoader__.load({
       const [results, setResults] = React.useState({})
       const [todoBusy, setTodoBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
+      const [folders, setFolders] = React.useState([])
+      const [bulkBusy, setBulkBusy] = React.useState(false)
+      const selection = useSelection()
+
+      React.useEffect(() => {
+        let cancelled = false
+        const load = async () => {
+          try {
+            const value = await call('/folders', accountId ? { accountId } : {})
+            if (!cancelled) setFolders((value && value.folders) || [])
+          } catch {
+            if (!cancelled) setFolders([])
+          }
+        }
+        void load()
+        return () => {
+          cancelled = true
+        }
+      }, [accountId])
+
+      /** 选中项里属于邮件事项的 messageId 列表。 */
+      const selectedMessageIds = () =>
+        selection.selected.filter((id) => id.startsWith('todo_')).map((id) => id.slice('todo_'.length))
+
+      const bulkDone = async () => {
+        const ids = selectedMessageIds()
+        if (ids.length === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          for (const messageId of ids) {
+            try {
+              await call('/todo/set', { messageId, state: 'done' })
+            } catch {
+              // 单条失败继续
+            }
+          }
+          selection.clear()
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
+
+      const bulkDelete = async () => {
+        const ids = selectedMessageIds()
+        if (ids.length === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          for (const id of ids) {
+            try {
+              await call('/messages/delete', { id })
+            } catch {
+              // 单封失败继续
+            }
+          }
+          selection.clear()
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
+
+      const bulkMove = async (target) => {
+        const ids = selectedMessageIds()
+        if (ids.length === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          await call('/messages/move', { ids, folder: target })
+          selection.clear()
+          if (onRefresh) onRefresh()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
 
       /** 把邮件交给 Agent：先按发件人复用会话，否则在专用工作区新建。 */
       const openSummarySession = async (item) => {
@@ -2846,7 +3180,38 @@ window.__ModuleLoader__.load({
           storageKey: 'todo',
           spec: PANE_SPEC,
           label: t('resize'),
-          left: h(GroupList, { t, groups, selectedId, onSelect: setSelectedId }),
+          left: h(GroupList, {
+            t,
+            groups,
+            selectedId,
+            onSelect: setSelectedId,
+            selection,
+            toolbar: [
+              h(
+                'button',
+                {
+                  key: 'done',
+                  type: 'button',
+                  style: styles.btnSmall,
+                  disabled: bulkBusy || selection.count === 0,
+                  onClick: bulkDone,
+                },
+                t('todoDone'),
+              ),
+              h(MoveMenu, { key: 'move', t, folders, busy: bulkBusy || selection.count === 0, onMove: bulkMove }),
+              h(
+                'button',
+                {
+                  key: 'delete',
+                  type: 'button',
+                  style: styles.dangerBtn,
+                  disabled: bulkBusy || selection.count === 0,
+                  onClick: bulkDelete,
+                },
+                t('deleteMail'),
+              ),
+            ],
+          }),
           right: selected
             ? h(
                 'div',
@@ -2913,6 +3278,59 @@ window.__ModuleLoader__.load({
       const [pendingDelete, setPendingDelete] = React.useState(null)
       const [deleting, setDeleting] = React.useState(false)
       const [restoring, setRestoring] = React.useState(false)
+      const [folders, setFolders] = React.useState([])
+      const [bulkBusy, setBulkBusy] = React.useState(false)
+      const selection = useSelection()
+
+      React.useEffect(() => {
+        let cancelled = false
+        const load = async () => {
+          try {
+            const value = await call('/folders', accountId ? { accountId } : {})
+            if (!cancelled) setFolders((value && value.folders) || [])
+          } catch {
+            if (!cancelled) setFolders([])
+          }
+        }
+        void load()
+        return () => {
+          cancelled = true
+        }
+      }, [accountId])
+
+      const bulkDelete = async () => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          for (const id of [...selection.selected]) {
+            try {
+              await call('/messages/delete', { id })
+            } catch {
+              // 单封失败继续
+            }
+          }
+          selection.clear()
+          await loadMessages()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
+
+      const bulkMove = async (target) => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          await call('/messages/move', { ids: selection.selected, folder: target })
+          selection.clear()
+          await loadMessages()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
 
       const accountAddress = account ? account.address : ''
 
@@ -3102,6 +3520,21 @@ window.__ModuleLoader__.load({
             groups,
             selectedId,
             onSelect: select,
+            selection,
+            toolbar: [
+              h(MoveMenu, { key: 'move', t, folders, busy: bulkBusy || selection.count === 0, onMove: bulkMove }),
+              h(
+                'button',
+                {
+                  key: 'delete',
+                  type: 'button',
+                  style: styles.dangerBtn,
+                  disabled: bulkBusy || selection.count === 0,
+                  onClick: bulkDelete,
+                },
+                t('deleteMail'),
+              ),
+            ],
             headerActions: h(
               'button',
               {
@@ -3252,6 +3685,28 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [compose, setCompose] = React.useState(null)
+      const [bulkBusy, setBulkBusy] = React.useState(false)
+      const selection = useSelection()
+
+      const bulkDelete = async () => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          for (const id of [...selection.selected]) {
+            try {
+              await call('/templates/remove', { id })
+            } catch {
+              // 单条失败继续
+            }
+          }
+          selection.clear()
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
 
       const load = React.useCallback(async () => {
         try {
@@ -3328,6 +3783,20 @@ window.__ModuleLoader__.load({
           groups,
           selectedId,
           onSelect: select,
+          selection,
+          toolbar: [
+            h(
+              'button',
+              {
+                key: 'delete',
+                type: 'button',
+                style: styles.dangerBtn,
+                disabled: bulkBusy || selection.count === 0,
+                onClick: bulkDelete,
+              },
+              t('deleteMail'),
+            ),
+          ],
           headerActions: h(
             'button',
             { type: 'button', style: styles.iconBtn, title: t('templateNew'), onClick: startNew },
@@ -3425,6 +3894,28 @@ window.__ModuleLoader__.load({
       const [prompt, setPrompt] = React.useState('')
       const [copied, setCopied] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
+      const [bulkBusy, setBulkBusy] = React.useState(false)
+      const selection = useSelection()
+
+      const bulkDelete = async () => {
+        if (selection.count === 0 || bulkBusy) return
+        setBulkBusy(true)
+        try {
+          for (const id of [...selection.selected]) {
+            try {
+              await call('/contacts/remove', { id })
+            } catch {
+              // 单条失败继续
+            }
+          }
+          selection.clear()
+          await load()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
 
       const load = React.useCallback(async () => {
         try {
@@ -3566,6 +4057,20 @@ window.__ModuleLoader__.load({
           groups,
           selectedId,
           onSelect: select,
+          selection,
+          toolbar: [
+            h(
+              'button',
+              {
+                key: 'delete',
+                type: 'button',
+                style: styles.dangerBtn,
+                disabled: bulkBusy || selection.count === 0,
+                onClick: bulkDelete,
+              },
+              t('deleteMail'),
+            ),
+          ],
           headerActions: h(
             'button',
             {

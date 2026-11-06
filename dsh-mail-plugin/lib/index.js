@@ -2054,6 +2054,20 @@ export function apply(ctx, config) {
       })
     })
 
+    // 批量标记已读/未读
+    route('/messages/seen', async (body) => {
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === 'string' && id.trim()) : []
+      if (ids.length === 0) throw Object.assign(new Error('ids is required'), { code: 'BAD_REQUEST' })
+      return requireCoreResult(await callCore('message.markSeen', { ids, seen: body.seen === true }, { timeoutMs: 120_000 }))
+    })
+
+    // 批量移动邮件到指定文件夹（仅 IMAP）
+    route('/messages/move', async (body) => {
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === 'string' && id.trim()) : []
+      const folder = requireText(body.folder, 'folder')
+      if (ids.length === 0) throw Object.assign(new Error('ids is required'), { code: 'BAD_REQUEST' })
+      return requireCoreResult(await callCore('message.move', { ids, folder }, { timeoutMs: 180_000 }))
+    })
     // 打开邮件后标记已读（IMAP 账户会顺带通知服务器）
     route('/messages/read', async (body) => {
       const id = requireText(body.id, 'id')
