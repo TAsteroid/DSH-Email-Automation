@@ -765,7 +765,7 @@ function runRealReactPass() {
     check(kbMarkup.includes('▾'), '[真实渲染] 知识库分类应可折叠（有折叠箭头）')
     check(kbMarkup.includes('aria-expanded="true"'), '[真实渲染] 知识库分类默认展开')
 
-    for (const key of ['kbSummaries', 'kbDocs', 'kbSheets', 'kbImages']) {
+    for (const key of ['kbSummaries', 'kbDocs', 'kbSheets', 'kbImages', 'kbCalendar', 'kbArchives', 'kbVideos', 'kbOther']) {
       check(kbMarkup.includes(`t:mail.${key}`), `[真实渲染] 知识库缺少分类 ${key}`)
     }
 

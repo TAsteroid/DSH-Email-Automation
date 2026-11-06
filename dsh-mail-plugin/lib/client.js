@@ -279,6 +279,10 @@ window.__ModuleLoader__.load({
         kbDocs: '文档',
         kbSheets: '表格',
         kbImages: '图片',
+        kbCalendar: '日程',
+        kbArchives: '压缩文件',
+        kbVideos: '视频',
+        kbOther: '其他',
         kbNoText: '没有可显示的内容',
         kbContacts: '联系人',
         kbCompanies: '公司',
@@ -549,6 +553,10 @@ window.__ModuleLoader__.load({
         kbDocs: 'Documents',
         kbSheets: 'Spreadsheets',
         kbImages: 'Images',
+        kbCalendar: 'Calendar',
+        kbArchives: 'Archives',
+        kbVideos: 'Videos',
+        kbOther: 'Other',
         kbNoText: 'Nothing to show',
         kbContacts: 'Contacts',
         kbCompanies: 'Companies',
@@ -3875,11 +3883,14 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 附件按扩展名归类：文档 / 表格 / 图片（其余先归到文档）。 */
+    /** 附件按扩展名归类；归不进任何一类的进「其他」。 */
     const FILE_KINDS = {
       docs: ['pdf', 'doc', 'docx', 'txt', 'md', 'markdown', 'rtf', 'odt', 'html', 'htm', 'pages', 'epub'],
       sheets: ['xls', 'xlsx', 'csv', 'tsv', 'ods', 'numbers'],
       images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'tif', 'tiff'],
+      calendar: ['ics', 'ical', 'ifb', 'icalendar'],
+      archives: ['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'cab', 'iso'],
+      videos: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'flv', 'mpeg', 'mpg', '3gp'],
     }
 
     function fileKind(filename) {
@@ -3887,8 +3898,9 @@ window.__ModuleLoader__.load({
       for (const [kind, list] of Object.entries(FILE_KINDS)) {
         if (extension && list.includes(extension)) return kind
       }
-      return 'docs'
+      return 'other'
     }
+
 
     /** 知识库：总结归档 + 已下载的文档/表格/图片；分类可折叠，右侧显示详情。 */
     function KnowledgeView({ t, status, accountId, onSelectAccount, query }) {
@@ -3957,6 +3969,10 @@ window.__ModuleLoader__.load({
         { id: 'docs', title: `${t('kbDocs')} · ${byKind('docs').length}`, items: fileItems(byKind('docs')) },
         { id: 'sheets', title: `${t('kbSheets')} · ${byKind('sheets').length}`, items: fileItems(byKind('sheets')) },
         { id: 'images', title: `${t('kbImages')} · ${byKind('images').length}`, items: fileItems(byKind('images')) },
+        { id: 'calendar', title: `${t('kbCalendar')} · ${byKind('calendar').length}`, items: fileItems(byKind('calendar')) },
+        { id: 'archives', title: `${t('kbArchives')} · ${byKind('archives').length}`, items: fileItems(byKind('archives')) },
+        { id: 'videos', title: `${t('kbVideos')} · ${byKind('videos').length}`, items: fileItems(byKind('videos')) },
+        { id: 'other', title: `${t('kbOther')} · ${byKind('other').length}`, items: fileItems(byKind('other')) },
       ]
 
       const selectedSummary = selected.startsWith('sum:') ? summaries.find((item) => `sum:${item.id}` === selected) : null
