@@ -33,8 +33,8 @@ window.__ModuleLoader__.load({
     const RAIL_DEFAULT = 200
     const RAIL_MIN = 140
     const RAIL_MAX = 360
-    const LIST_DEFAULT = 320
-    const LIST_MIN = 240
+    const LIST_DEFAULT = 420
+    const LIST_MIN = 380
     const LIST_MAX = 640
     const READING_MIN = 320
     const DETAIL_MIN = 360
@@ -855,6 +855,15 @@ window.__ModuleLoader__.load({
         flex: 'none',
       },
       selectionAll: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' },
+      selectionRow: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '0 10px 8px',
+        flexWrap: 'nowrap',
+        justifyContent: 'space-between',
+      },
+      selectionTopRow: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
       selectionCount: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', minWidth: 14, textAlign: 'center' },
       selectCell: { display: 'flex', alignItems: 'center', paddingLeft: 8, flex: 'none' },
       unreadDot: {
@@ -1522,14 +1531,18 @@ window.__ModuleLoader__.load({
                 style:
                   index > 0
                     ? { ...styles.listHead, borderTop: '1px solid var(--dsw-alias-border-l2)' }
-                    : { ...styles.listHead, gap: 6, flexWrap: 'wrap' },
+                    : styles.listHead,
               },
               group.title,
-              h('span', { style: styles.listCount }, group.items.length),
-              index === 0 && (selection || headerActions) ? h('span', { style: styles.spacer }) : null,
-              index === 0 && selection ? selectionControls({ t, selection, allIds, actions: toolbar }) : null,
-              index === 0 ? headerActions : null,
+              index === 0 && selection
+                ? h('span', { style: styles.spacer })
+                : h('span', { style: styles.listCount }, group.items.length),
+              index === 0 && selection ? selectionTop({ t, selection, allIds }) : null,
+              index === 0 && !selection ? headerActions : null,
             ),
+            index === 0 && selection
+              ? selectionButtons({ t, selection, actions: toolbar, extra: headerActions })
+              : null,
             group.items.length === 0
               ? h('p', { style: { ...styles.muted, padding: '8px 16px', margin: 0 } }, t('emptyList'))
               : group.items.map((item) =>
@@ -1995,31 +2008,35 @@ window.__ModuleLoader__.load({
     // ---- 收件箱 ------------------------------------------------------------
     /** 中间栏：本地索引的邮件列表（按时间倒序）。 */
     function MessageList({ t, messages, selectedId, onSelect, onSync, syncing, onLoadOlder, loadingOlder, notice, selection, actions }) {
+      const syncButton = onSync
+        ? h(
+            'button',
+            {
+              key: 'sync',
+              type: 'button',
+              style: styles.iconBtn,
+              title: t('syncNow'),
+              'aria-label': t('syncNow'),
+              disabled: syncing,
+              onClick: onSync,
+            },
+            h(RefreshIcon, {}),
+          )
+        : null
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         h(
           'div',
-          { style: { ...styles.listHead, gap: 6, flexWrap: 'wrap' } },
+          { style: styles.listHead },
           t('messages'),
           h('span', { style: styles.spacer }),
-          selection ? selectionControls({ t, selection, allIds: messages.map((item) => item.id), actions }) : null,
-          h('span', { style: styles.listCount }, String(messages.length)),
-          onSync
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  style: styles.iconBtn,
-                  title: t('syncNow'),
-                  'aria-label': t('syncNow'),
-                  disabled: syncing,
-                  onClick: onSync,
-                },
-                h(RefreshIcon, {}),
-              )
-            : null,
+          selection
+            ? selectionTop({ t, selection, allIds: messages.map((item) => item.id) })
+            : h('span', { style: styles.listCount }, String(messages.length)),
+          selection ? null : syncButton,
         ),
+        selection ? selectionButtons({ t, selection, actions, extra: syncButton }) : null,
         messages.length === 0
           ? h(Empty, { title: t('noMessages'), hint: t('noMessagesHint') })
           : h(
@@ -2097,16 +2114,15 @@ window.__ModuleLoader__.load({
     }
 
     /** 多选工具条：全选 + 已选数量 + 各视图自己的批量动作 + 取消。 */
-    /**
-     * 多选控件（不单独占一行）：全选 + 已选数量 + 各视图批量动作 + 取消。
-     * 直接塞进列表标题行，避免多出一条工具条把列表往下挤。
-     */
-    function selectionControls({ t, selection, allIds, actions }) {
+    /** 多选第一排：全选 + 已选数量。 */
+    function selectionTop({ t, selection, allIds }) {
       const allSelected = allIds.length > 0 && selection.count === allIds.length
-      return [
+      return h(
+        'span',
+        { style: styles.selectionTopRow },
         h(
           'label',
-          { key: 'all', style: styles.selectionAll },
+          { style: styles.selectionAll },
           h('input', {
             type: 'checkbox',
             checked: allSelected,
@@ -2115,7 +2131,15 @@ window.__ModuleLoader__.load({
           }),
           h('span', null, t('selectAll')),
         ),
-        h('span', { key: 'count', style: styles.selectionCount }, String(selection.count)),
+        h('span', { style: styles.selectionCount }, String(selection.count)),
+      )
+    }
+
+    /** 多选第二排：批量动作 + 取消（列变宽时间距自动拉开）。 */
+    function selectionButtons({ t, selection, actions, extra }) {
+      return h(
+        'div',
+        { style: styles.selectionRow },
         ...(actions || []),
         h(
           'button',
@@ -2128,7 +2152,8 @@ window.__ModuleLoader__.load({
           },
           t('cancel'),
         ),
-      ]
+        extra || null,
+      )
     }
 
     /** 移动目标文件夹选择框（列表来自 /folders）。 */
