@@ -263,6 +263,7 @@ function handleMethod(method, params) {
       ],
     }
   }
+  if (method === 'message.markRead') return { seen: true, remote: false }
   if (method === 'message.get') {
     if (params && params.id === 'missing') {
       const error = new Error('message not found')
@@ -890,6 +891,11 @@ check(todoSetNoId && todoSetNoId.status === 400, `todo/set 缺 id 应 400，实�
 
 const contextNoId = await invoke('/api/dsh-mail/summary/context', { method: 'POST', body: '{}' })
 check(contextNoId && contextNoId.status === 400, `summary/context 缺 id 应 400，实际 ${contextNoId && contextNoId.status}`)
+
+const markReadNoId = await invoke('/api/dsh-mail/messages/read', { method: 'POST', body: '{}' })
+check(markReadNoId && markReadNoId.status === 400, `标记已读缺 id 应 400，实际 ${markReadNoId && markReadNoId.status}`)
+const markReadOk = await invoke('/api/dsh-mail/messages/read', { method: 'POST', body: JSON.stringify({ id: 'msg_1' }) })
+check(markReadOk && markReadOk.status === 200, `标记已读应 200，实际 ${markReadOk && markReadOk.status}`)
 
 const summaryDeleteNoId = await invoke('/api/dsh-mail/summary/delete', { method: 'POST', body: '{}' })
 check(summaryDeleteNoId && summaryDeleteNoId.status === 400, `总结删除缺 id 应 400，实际 ${summaryDeleteNoId && summaryDeleteNoId.status}`)

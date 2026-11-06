@@ -209,6 +209,8 @@ POP3 结果：
 
 **待跟进自动登记**：普通模式（非 `mode="backfill"`）只对 **INBOX** 生效。每个账号的第一次普通 INBOX 同步是**基线**：这批邮件 `todo_state` 保持空串（不登记），同步成功后把账号的 `todoBaselineDone` 置 1；之后新插入的 INBOX 邮件一律 `todo_state="pending"`。其它文件夹的普通同步、`history.backfill`、`sync.run mode="backfill"` 和 `attachment.backfill` 都**不登记**。重复同步已存在的邮件不会改变它已有的待跟进状态。
 
+**已读状态**：IMAP 的 `FETCH` 同时取 `FLAGS`，把 `\Seen` 写入本地 `seen`（没有 FLAGS 时按未读处理，不报错）；**每次同步还会对本文件夹已入库的 UID 批量重拉一次 `(UID FLAGS)` 并刷新 `seen`**（`UID FETCH <uid-set> (UID FLAGS)`，按 200 个一批，用响应里的 `UID` 字段匹配本地行——行首数字是序号不是 UID；只更新已存在的行、值没变不写；服务器拒绝/解析失败只记日志、不影响本次同步，整批匹配到 0 个 UID 时会额外打日志）。`BODY.PEEK[]` 不会改变服务器上的未读状态。POP3 没有 flag，`seen` 保持 `false`、不做刷新。用户主动标记已读用 [`message.markRead`](#messagemarkread)。
+
 **UIDVALIDITY 变化**：重置该文件夹游标、按新值重建记录，不得因为旧 uid 冲突而报错。
 
 ### `sync.reset`
@@ -327,6 +329,18 @@ POP3 结果：
 - 分词器是 FTS5 默认的 `unicode61`：**连续汉字算一个词**，所以 `季度报告` 能命中「季度报告」，但 `合同` 命中不了「合同确认书」（两个不同的词）。调用方要按用户输入原样传，别自己加通配符。
 - 索引由触发器维护，`sync.run` / `sync.reset` 增删的邮件自动进/出索引；v3 老库升级到 v4 时会重建一次索引，不需要重新同步。
 
+### `message.markRead`
+
+参数：`{"id": "msg_xxx"}`
+
+结果：`{"seen": true, "remote": false}`
+
+- 先把本地 `seen` 置 1（已为 1 时不重复写，幂等）；`id` 不存在 → `NOT_FOUND`。
+- IMAP 账号会再尝试 `UID STORE <uid> +FLAGS (\Seen)` 把服务器状态也改成已读；成功时 `remote: true`。
+- 服务器操作失败（掉线、认证失效、服务器拒绝等）**不使调用失败**：只记日志，本地仍是已读，返回 `remote: false`。
+- POP3 账号只改本地，`remote` 恒为 `false`。
+- `seen` 的初始来源是同步时 IMAP `FLAGS` 里的 `\Seen`；`message.markRead` 是用户主动标记已读的入口。
+
 ### `message.delete`
 
 参数：
@@ -388,7 +402,8 @@ POP3 结果：
 {"todos": [{
   "messageId": "msg_xxx", "subject": "季度报告", "fromAddr": "a@b.com",
   "date": "2026-11-04T09:12:00Z", "folder": "INBOX", "todoState": "pending",
-  "hasSummary": true, "attachmentCount": 1
+  "hasSummary": true, "attachmentCount": 1,
+  "snippet": "正文前 200 字…", "bodyExcerpt": "正文前 1500 字…"
 }]}
 ```
 
@@ -396,6 +411,7 @@ POP3 结果：
 - 按邮件 `date` **倒序**；`limit` 缺省 50、上限 200（小于 1 → `BAD_REQUEST`）。
 - `accountId` 可省略（所有账户）；账号不存在返回空数组。
 - `hasSummary`：这封邮件是否已有 Agent 总结；`attachmentCount`：非 inline 附件数量（与 `attachment.list` 默认口径一致）。
+- `snippet`：同步时存的正文摘要；`bodyExcerpt`：`body_text` 的前 1500 个字符（没有正文时为空串）。两者都为了卡片直接显示正文，不返回完整邮件。
 - 数据来源是本地 `messages` 表，不联网。
 
 ### `todo.set`

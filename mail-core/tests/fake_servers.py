@@ -514,10 +514,22 @@ class FakeImapServer(_LoopbackServer):
         expunge_noop: bool = False,
         concurrent: bool = False,
         reject_login: bool = False,
+        reject_store: bool = False,
+        reject_flags_fetch: bool = False,
+        message_flags: dict[int, list[str]] | None = None,
     ) -> None:
         super().__init__()
         self.concurrent = bool(concurrent)
         self.reject_login = bool(reject_login)
+        self.reject_store = bool(reject_store)
+        self.reject_flags_fetch = bool(reject_flags_fetch)
+        # ``None`` keeps the old FETCH shape (no FLAGS at all).  When given,
+        # each UID maps to its flag list, e.g. ``{1: ["\\Seen"], 2: []}``.
+        self.message_flags = (
+            None
+            if message_flags is None
+            else {int(uid): list(flags) for uid, flags in message_flags.items()}
+        )
         self.messages = (
             list(messages)
             if messages is not None
@@ -713,20 +725,44 @@ class FakeImapServer(_LoopbackServer):
             self._send(connection, f"* SEARCH{suffix}\r\n")
             self._ok(connection, tag, "UID SEARCH completed")
         elif subcommand == "FETCH":
-            uid_token, _, _spec = sub_arguments.partition(" ")
-            try:
-                uid = int(uid_token)
-            except ValueError:
+            uid_token, _, spec = sub_arguments.partition(" ")
+            uid_values = [
+                int(token)
+                for token in uid_token.split(",")
+                if token.strip().isdigit()
+            ]
+            if not uid_values:
                 self._send(connection, f"{tag} BAD invalid UID\r\n")
                 return
+            sections = re.findall(
+                r"BODY(?:\.PEEK)?\[([^\]]*)\]", spec, re.IGNORECASE
+            )
+            wants_body = bool(sections) or "BODY" in spec.upper()
+            if not wants_body:
+                # FLAGS-only refresh.  Real servers answer with the message
+                # *sequence* number followed by the explicit UID:
+                #   * 117 FETCH (UID 456 FLAGS (\Seen))
+                if self.reject_flags_fetch:
+                    self._send(connection, f"{tag} NO FETCH failed\r\n")
+                    return
+                requested = set(uid_values)
+                for sequence, uid in enumerate(self._current_uids(), start=1):
+                    if uid not in requested:
+                        continue
+                    flags = (self.message_flags or {}).get(uid, [])
+                    flag_text = " FLAGS (" + " ".join(flags) + ")"
+                    self._send(
+                        connection,
+                        f"* {sequence} FETCH (UID {uid}{flag_text})\r\n",
+                    )
+                self._ok(connection, tag, "UID FETCH completed")
+                return
+            uid = uid_values[0]
             raw = (
                 self.messages[uid - 1]
                 if 1 <= uid <= len(self.messages)
                 and uid not in self.deleted_uids.get(self._mailbox, ())
                 else None
-            )
-            sections = re.findall(
-                r"BODY(?:\.PEEK)?\[([^\]]*)\]", _spec, re.IGNORECASE
             )
             if raw is not None and any(section for section in sections):
                 self._send(
@@ -748,8 +784,12 @@ class FakeImapServer(_LoopbackServer):
                     self._send(connection, payload)
                 self._send(connection, b")\r\n")
             elif raw is not None:
+                flag_text = ""
+                if self.message_flags is not None:
+                    flags = self.message_flags.get(uid, [])
+                    flag_text = " FLAGS (" + " ".join(flags) + ")"
                 header = (
-                    f"* {uid} FETCH (UID {uid} RFC822.SIZE {len(raw)} "
+                    f"* {uid} FETCH (UID {uid}{flag_text} RFC822.SIZE {len(raw)} "
                     f"BODY[] {{{len(raw)}}}\r\n"
                 )
                 self._send(connection, header.encode("ascii"))
@@ -773,6 +813,9 @@ class FakeImapServer(_LoopbackServer):
                 self._ok(connection, tag, "UID COPY completed")
             else:
                 self.stores.append((uid, rest.strip()))
+                if self.reject_store:
+                    self._send(connection, f"{tag} NO STORE failed\r\n")
+                    return
                 if "\\DELETED" in rest.upper():
                     self._pending_deleted.setdefault(self._mailbox, set()).add(uid)
                 self._ok(connection, tag, "UID STORE completed")

@@ -206,6 +206,9 @@ window.__ModuleLoader__.load({
         workspaceHint: '所有邮件会话都创建在这个工作区；同名发件人复用同一条会话。',
         workspaceSaved: '已保存',
         todoDone: '已处理',
+        todoBody: '邮件内容',
+        todoShowMore: '展开全文',
+        todoShowLess: '收起',
         todoSummarized: '已总结',
         todoSummaryHint: '会把邮件交给 Agent：先拉上下文，有历史总结会先问你如何处理。',
         todoSessionFailed: '无法打开会话，已把提示词复制到剪贴板',
@@ -478,6 +481,12 @@ window.__ModuleLoader__.load({
         workspaceSaved: 'Saved',
         todoSummary: 'Summarize',
         todoDone: 'Mark done',
+        todoBody: '邮件内容',
+        todoShowMore: '展开全文',
+        todoShowLess: '收起',
+        todoBody: 'Mail body',
+        todoShowMore: 'Show full text',
+        todoShowLess: 'Collapse',
         todoSummarized: 'Summarized',
         todoSummaryHint: 'Hands the mail to the agent: it loads context first and asks how to handle any existing summary.',
         todoSessionFailed: 'Could not open a session; the prompt was copied to the clipboard',
@@ -803,6 +812,30 @@ window.__ModuleLoader__.load({
         color: 'var(--dsw-alias-label-primary)',
         cursor: 'pointer',
         fontSize: 13,
+      },
+      todoBody: {
+        marginTop: 10,
+        padding: '10px 12px',
+        borderRadius: 8,
+        background: 'var(--dsw-alias-bg-l2)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        alignItems: 'flex-start',
+      },
+      todoBodyText: {
+        margin: 0,
+        fontFamily: 'inherit',
+        fontSize: 13,
+        lineHeight: 1.7,
+        whiteSpace: 'pre-wrap',
+        color: 'var(--dsw-alias-label-secondary)',
+      },
+      unreadDot: {
+        color: 'var(--dsw-alias-state-info-primary, #4c8dff)',
+        marginRight: 6,
+        fontSize: 16,
+        lineHeight: 1,
       },
       msgTitle: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       msgMeta: {
@@ -1956,7 +1989,12 @@ window.__ModuleLoader__.load({
                         ? { ...styles.msgItem, background: 'var(--dsw-alias-interactive-bg-hover)' }
                         : styles.msgItem,
                   },
-                  h('span', { style: styles.msgTitle }, message.subject || t('noSubject')),
+                  h(
+                    'span',
+                    { style: message.seen === false ? { ...styles.msgTitle, fontWeight: 600 } : styles.msgTitle },
+                    message.seen === false ? h('span', { style: styles.unreadDot }, '•') : null,
+                    message.subject || t('noSubject'),
+                  ),
                   h('span', { style: styles.msgMeta }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
                 ),
               ),
@@ -2153,7 +2191,17 @@ window.__ModuleLoader__.load({
           tab: 'inbox',
         })
         try {
-          setDetail(await call('/message', { id }))
+          const value = await call('/message', { id })
+          setDetail(value)
+          // 打开即视为已读：本地置 1，IMAP 账户顺带通知服务器
+          if (value && value.seen === false) {
+            try {
+              await call('/messages/read', { id })
+              setMessages((prev) => prev.map((item) => (item.id === id ? { ...item, seen: true } : item)))
+            } catch {
+              // 标记失败不影响阅读
+            }
+          }
         } catch {
           setDetail(null)
         }
@@ -2513,6 +2561,10 @@ window.__ModuleLoader__.load({
     /** 邮件事项卡片：邮件本身 + 它的附件，一起作为一个待处理事项。 */
     function MailTodoCard({ t, item, onSummary, onDone, busy, onFetchAttachment, onDismissAttachment, fetchingId, results }) {
       const attachments = item.attachments || []
+      const body = String(item.bodyExcerpt || item.snippet || '').trim()
+      const [expanded, setExpanded] = React.useState(false)
+      const long = body.length > 600
+      const shown = expanded || !long ? body : `${body.slice(0, 600)}…`
       return h(
         'article',
         { style: { ...styles.aiCard, width: '100%', height: '100%' }, 'aria-label': item.subject || item.messageId },
@@ -2520,6 +2572,20 @@ window.__ModuleLoader__.load({
         h('h3', { style: styles.msgSubject }, item.subject || t('noSubject')),
         h('p', { style: styles.muted }, `${item.fromAddr || ''} · ${item.date || ''}`),
         item.hasSummary ? h('p', { style: styles.muted }, t('todoSummarized')) : null,
+        body
+          ? h(
+              'div',
+              { style: styles.todoBody },
+              h('pre', { style: styles.todoBodyText }, shown),
+              long
+                ? h(
+                    'button',
+                    { type: 'button', style: styles.btnSmall, onClick: () => setExpanded((prev) => !prev) },
+                    expanded ? t('todoShowLess') : t('todoShowMore'),
+                  )
+                : null,
+            )
+          : null,
         h(
           'div',
           { style: styles.formActions },
@@ -2965,7 +3031,16 @@ window.__ModuleLoader__.load({
         setSelectedId(id)
         setDetail(null)
         try {
-          setDetail(await call('/message', { id }))
+          const value = await call('/message', { id })
+          setDetail(value)
+          if (value && value.seen === false) {
+            try {
+              await call('/messages/read', { id })
+              setMessages((prev) => prev.map((item) => (item.id === id ? { ...item, seen: true } : item)))
+            } catch {
+              // 标记失败不影响阅读
+            }
+          }
         } catch {
           setDetail(null)
         }
@@ -3602,7 +3677,15 @@ window.__ModuleLoader__.load({
         setSelectedId(id)
         setDetail(null)
         try {
-          setDetail(await call('/message', { id }))
+          const value = await call('/message', { id })
+          setDetail(value)
+          if (value && value.seen === false) {
+            try {
+              await call('/messages/read', { id })
+            } catch {
+              // 标记失败不影响阅读
+            }
+          }
         } catch {
           setDetail(null)
         }

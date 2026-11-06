@@ -1665,6 +1665,33 @@ class Store:
         ).fetchone()
         return self._message_detail(row) if row is not None else None
 
+    def mark_message_seen(self, message_id: str) -> bool:
+        """Set ``seen = 1`` locally; ``False`` if absent or already seen."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET seen = 1 WHERE id = ? AND seen = 0",
+                (message_id,),
+            )
+        return cursor.rowcount > 0
+
+    def set_message_seen_flag(
+        self, account_id: str, folder: str, uid: int, seen: bool
+    ) -> bool:
+        """Sync one folder row's ``seen`` flag; ``False`` when unchanged/absent.
+
+        Scoped to (account, folder, uid) so a FLAGS refresh can never touch a
+        different folder or account, and the ``seen <> ?`` guard means an
+        unchanged flag performs no write.
+        """
+        value = 1 if seen else 0
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET seen = ? "
+                "WHERE account_id = ? AND folder = ? AND uid = ? AND seen <> ?",
+                (value, account_id, folder, int(uid), value),
+            )
+        return cursor.rowcount > 0
+
     def delete_messages(self, account_id: str, folder: str) -> int:
         """Drop the cached rows of one folder (used when UIDVALIDITY changed)."""
         with self._conn:
@@ -1840,7 +1867,7 @@ class Store:
 
     @staticmethod
     def _todo_item(row: sqlite3.Row) -> dict:
-        """Protocol shape for ``todo.list`` (no body, no message detail)."""
+        """Protocol shape for ``todo.list`` (no full body, a short excerpt)."""
         return {
             "messageId": row["id"],
             "subject": row["subject"],
@@ -1850,6 +1877,8 @@ class Store:
             "todoState": row["todo_state"],
             "hasSummary": bool(row["has_summary"]),
             "attachmentCount": int(row["attachment_count"] or 0),
+            "snippet": row["snippet"] or "",
+            "bodyExcerpt": row["body_excerpt"] or "",
         }
 
     def list_todos(
@@ -1863,7 +1892,9 @@ class Store:
 
         ``hasSummary`` and ``attachmentCount`` are computed in the same query
         so the follow-up list can render badges without extra round trips;
-        inline MIME resources are not counted as attachments.
+        inline MIME resources are not counted as attachments.  The card also
+        gets the stored ``snippet`` and the first 1500 characters of the plain
+        body (never the whole message).
         """
         clauses = ["m.todo_state = ?"]
         args: list[object] = [state]
@@ -1874,6 +1905,8 @@ class Store:
         rows = self._conn.execute(
             f"""
             SELECT m.id, m.subject, m.from_addr, m.date, m.folder, m.todo_state,
+                   m.snippet AS snippet,
+                   substr(coalesce(m.body_text, ''), 1, 1500) AS body_excerpt,
                    EXISTS(
                        SELECT 1 FROM summaries s WHERE s.message_id = m.id
                    ) AS has_summary,

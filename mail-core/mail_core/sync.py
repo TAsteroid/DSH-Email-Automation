@@ -20,6 +20,7 @@ import imaplib
 import poplib
 import re
 import ssl
+import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -31,8 +32,14 @@ DEFAULT_FOLDER = "INBOX"
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 
+# How many UIDs one FLAGS refresh command may carry (keeps the command line
+# short on servers with thousands of messages).
+SEEN_REFRESH_CHUNK = 200
+
 _RFC822_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.IGNORECASE)
 _UIDVALIDITY_IN_STATUS = re.compile(r"UIDVALIDITY\s+(\d+)", re.IGNORECASE)
+_UID_IN_RESPONSE = re.compile(rb"UID\s+(\d+)", re.IGNORECASE)
+_FLAGS = re.compile(rb"FLAGS\s*\(([^)]*)\)", re.IGNORECASE)
 
 # imaplib errors that mean "the server or the network failed" (as opposed to a
 # bug in this module).
@@ -42,6 +49,11 @@ _POP3_FAILURES = (poplib.error_proto, OSError, ssl.SSLError, ValueError)
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _log(message: str) -> None:
+    """Diagnostics go to stderr only; stdout is the protocol channel."""
+    print(f"[mail-core] {message}", file=sys.stderr, flush=True)
 
 
 def _redact(text: Any, secret: str) -> str:
@@ -145,6 +157,7 @@ def _insert(
     parsed: dict,
     *,
     todo_state: str = "",
+    seen: bool = False,
 ) -> bool:
     return store.insert_message(
         account_id=account_id,
@@ -163,6 +176,7 @@ def _insert(
         body_text=parsed["text"],
         body_html=parsed["html"],
         size=parsed["size"],
+        seen=seen,
         attachments=parsed.get("attachments", []),
         todo_state=todo_state,
     )
@@ -225,10 +239,109 @@ def _parse_search(data: Any) -> list[int]:
     return sorted(uids)
 
 
-def _fetch_one(connection, uid: int) -> tuple[bytes, int]:
-    """Fetch one full message; returns ``(raw_bytes, rfc822_size)``."""
+def _parse_seen_flags(head: Any) -> bool:
+    """``True`` when the FETCH response carries the ``\\Seen`` flag.
+
+    Missing/odd ``FLAGS`` data is not an error: the message is simply treated
+    as unread, which matches what an empty or absent flag list means.
+    """
+    if not isinstance(head, (bytes, bytearray)):
+        return False
+    match = _FLAGS.search(bytes(head))
+    if match is None:
+        return False
+    return any(
+        flag.strip().upper() == b"\\SEEN" for flag in match.group(1).split()
+    )
+
+
+def _parse_flags_entries(data: Any) -> dict[int, bool]:
+    """Map ``uid -> seen`` from a ``UID FETCH ... (UID FLAGS)`` response.
+
+    The leading number of an untagged FETCH line is the message *sequence*
+    number, not the UID (``* 117 FETCH (UID 456 FLAGS (\\Seen))``), so only
+    the explicit ``UID`` field is usable as a key.  Lines without it are
+    skipped rather than being mis-keyed.
+    """
+    entries: dict[int, bool] = {}
+    for item in data or []:
+        if isinstance(item, tuple):
+            head = item[0] if item else b""
+        else:
+            head = item
+        if not isinstance(head, (bytes, bytearray)):
+            continue
+        raw = bytes(head)
+        match = _UID_IN_RESPONSE.search(raw)
+        if match is None:
+            continue
+        entries[int(match.group(1))] = _parse_seen_flags(raw)
+    return entries
+
+
+def _refresh_seen_flags(
+    store: Store,
+    connection,
+    account_id: str,
+    folder: str,
+    uidvalidity: int,
+) -> int:
+    """Refresh ``seen`` for the UIDs already stored in one folder.
+
+    New mail already carries FLAGS in its body FETCH, but mail indexed by an
+    earlier run (or read in another client) would otherwise stay unread
+    forever.  Only locally-known UIDs of *this* account/folder are refreshed,
+    in chunks of :data:`SEEN_REFRESH_CHUNK`, and the request asks for ``UID``
+    explicitly so the response can be keyed by real UID (the line prefix is a
+    sequence number and useless for an UPDATE).  A server that rejects the
+    FLAGS fetch only causes this step to be skipped with a log line — never a
+    failed sync.
+    """
+    try:
+        uids = sorted(store.list_message_uids(account_id, folder, uidvalidity))
+    except Exception as exc:
+        _log(f"FLAGS refresh skipped: {type(exc).__name__}")
+        return 0
+
+    updated = 0
+    for start in range(0, len(uids), SEEN_REFRESH_CHUNK):
+        chunk = uids[start : start + SEEN_REFRESH_CHUNK]
+        try:
+            status, data = connection.uid(
+                "FETCH", ",".join(str(uid) for uid in chunk), "(UID FLAGS)"
+            )
+        except _IMAP_FAILURES as exc:
+            _log(f"FLAGS refresh skipped: {type(exc).__name__}")
+            return updated
+        if status != "OK":
+            _log(f"FLAGS refresh skipped: FETCH returned {status}")
+            return updated
+        chunk_set = set(chunk)
+        matched = 0
+        for uid, seen in _parse_flags_entries(data).items():
+            if uid not in chunk_set:
+                continue
+            matched += 1
+            try:
+                if store.set_message_seen_flag(account_id, folder, uid, seen):
+                    updated += 1
+            except Exception as exc:
+                _log(f"FLAGS refresh write skipped: {type(exc).__name__}")
+                return updated
+        if chunk and matched == 0:
+            # Never stay silent again: zero matches for a non-empty request
+            # means the response format changed (or the UIDs are gone).
+            _log(
+                f"FLAGS refresh matched 0/{len(chunk)} UIDs in {folder}; "
+                "check the FETCH UID response format"
+            )
+    return updated
+
+
+def _fetch_one(connection, uid: int) -> tuple[bytes, int, bool]:
+    """Fetch one full message; returns ``(raw_bytes, rfc822_size, seen)``."""
     status, data = connection.uid(
-        "FETCH", str(uid), "(UID RFC822.SIZE BODY.PEEK[])"
+        "FETCH", str(uid), "(UID FLAGS RFC822.SIZE BODY.PEEK[])"
     )
     if status != "OK":
         raise imap_client.ImapError(
@@ -237,13 +350,17 @@ def _fetch_one(connection, uid: int) -> tuple[bytes, int]:
 
     raw: Optional[bytes] = None
     size: Optional[int] = None
+    seen = False
     for item in data or []:
         if not isinstance(item, tuple):
             continue
         head = item[0] if item else b""
-        match = _RFC822_SIZE.search(head if isinstance(head, (bytes, bytearray)) else b"")
+        head_bytes = bytes(head) if isinstance(head, (bytes, bytearray)) else b""
+        match = _RFC822_SIZE.search(head_bytes)
         if match:
             size = int(match.group(1))
+        if _parse_seen_flags(head_bytes):
+            seen = True
         # A literal response is ``(head, literal_bytes)``.
         for part in item[1:]:
             if isinstance(part, (bytes, bytearray)):
@@ -254,7 +371,7 @@ def _fetch_one(connection, uid: int) -> tuple[bytes, int]:
 
     if raw is None:
         raise imap_client.ImapError(f"FETCH {uid} returned no message body")
-    return raw, size if size is not None else len(raw)
+    return raw, size if size is not None else len(raw), seen
 
 
 def _todo_registration(store: Store, account_id: str, folder: str) -> tuple[bool, str]:
@@ -346,7 +463,7 @@ def _sync_imap(
         uids = pending[-limit:] if len(pending) > limit else pending
 
         for uid in uids:
-            raw, size = _fetch_one(connection, uid)
+            raw, size, seen = _fetch_one(connection, uid)
             parsed = _parse(account_id, folder, uidvalidity, uid, raw, size)
             inserted = _insert(
                 store,
@@ -356,6 +473,7 @@ def _sync_imap(
                 uid,
                 parsed,
                 todo_state=todo_state,
+                seen=seen,
             )
             fetched += 1
             if inserted:
@@ -363,6 +481,11 @@ def _sync_imap(
             else:
                 skipped += 1
             last_uid = uid
+
+        # Refresh the read state of mail that was already indexed: a message
+        # read in another client must show up as read here too.  This never
+        # fails the sync (errors are logged inside).
+        _refresh_seen_flags(store, connection, account_id, folder, uidvalidity)
     except MailCoreError as exc:
         _record_error(
             store,
@@ -689,11 +812,13 @@ def _backfill_imap(
         ][:limit]
 
         for uid in candidates:
-            raw, size = _fetch_one(connection, uid)
+            raw, size, seen = _fetch_one(connection, uid)
             parsed = _parse(account_id, folder, uidvalidity, uid, raw, size)
             if not parsed["date"] or parsed["date"] >= before:
                 continue
-            if _insert(store, account_id, folder, uidvalidity, uid, parsed):
+            if _insert(
+                store, account_id, folder, uidvalidity, uid, parsed, seen=seen
+            ):
                 stored += 1
             fetched += 1
     except MailCoreError:
@@ -941,7 +1066,7 @@ def _backfill_attachments_imap(
                     )
                     continue
                 try:
-                    raw, size = _fetch_one(connection, message["uid"])
+                    raw, size, _seen = _fetch_one(connection, message["uid"])
                     parsed = _parse(
                         account_id,
                         folder_name,
@@ -1073,3 +1198,62 @@ def _backfill_attachments_pop3(
     return _attachment_backfill_result(
         account_id, folder or "", scanned, updated, skipped, errors
     )
+
+
+# -- one-off commands ------------------------------------------------------
+
+
+def mark_read_remote(
+    account: dict,
+    password: str,
+    folder: str,
+    uid: int,
+) -> None:
+    """STORE ``\\Seen`` on the server for one message (IMAP only).
+
+    Errors are raised so the caller can log them and still keep the local
+    flag: refusing to mark a message read because the network blinked would
+    be the wrong trade-off.
+    """
+    connection = None
+    try:
+        connection = imap_client.connect(
+            account["imapHost"],
+            int(account["imapPort"]),
+            account["imapSecurity"],
+        )
+        try:
+            connection.login(account["username"], password)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"login failed: {_redact(exc, password)}"
+            ) from None
+
+        wire_folder = imap_client.encode_mailbox(folder)
+        try:
+            status, data = connection.select(wire_folder)
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"SELECT {folder} failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(f"SELECT {folder} failed: {_text(data)}")
+
+        try:
+            status, data = connection.uid(
+                "STORE", str(uid), "+FLAGS", r"(\Seen)"
+            )
+        except _IMAP_FAILURES as exc:
+            raise imap_client.ImapError(
+                f"STORE {uid} +FLAGS failed: {_redact(exc, password)}"
+            ) from None
+        if status != "OK":
+            raise imap_client.ImapError(
+                f"STORE {uid} +FLAGS failed: {_text(data)}"
+            )
+    finally:
+        if connection is not None:
+            try:
+                connection.logout()
+            except Exception:
+                pass

@@ -214,6 +214,7 @@ class Service:
             "message.list": self._message_list,
             "message.get": self._message_get,
             "message.search": self._message_search,
+            "message.markRead": self._message_mark_read,
             "message.delete": self._message_delete,
             "message.restore": self._message_restore,
             "todo.list": self._todo_list,
@@ -620,6 +621,39 @@ class Service:
             query.strip(), limit=limit, offset=offset
         )
         return {"total": total, "messages": messages}
+
+    def _message_mark_read(self, params: dict) -> dict:
+        """Mark one message read locally, then best-effort on the IMAP server.
+
+        The local flag is written first; a missing credential, network error or
+        rejected STORE is only logged and reported as ``remote: false``, never
+        as a failed call.  POP3 has no flag to update.
+        """
+        message_id = _require_str(params, "id")
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise MailCoreError(NOT_FOUND, "message not found")
+
+        self.store.mark_message_seen(message_id)
+
+        remote = False
+        account = self.store.get_account(message["accountId"])
+        if account is not None and (account.get("protocol") or "imap") == "imap":
+            try:
+                account, password = self._account_credentials(message["accountId"])
+                sync.mark_read_remote(
+                    account,
+                    password,
+                    str(message.get("folder") or sync.DEFAULT_FOLDER),
+                    int(message["uid"]),
+                )
+                remote = True
+            except Exception as exc:
+                _log(
+                    "message.markRead remote failed for "
+                    f"{message['accountId']}: {type(exc).__name__}"
+                )
+        return {"seen": True, "remote": remote}
 
     def _message_delete(self, params: dict) -> dict:
         """Delete one synced message (see ``message.delete``).

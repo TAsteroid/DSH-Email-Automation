@@ -95,6 +95,128 @@ class SyncTests(unittest.TestCase):
             self.assertNotIn("html", message)
         self.assertNotIn(PASSWORD, json.dumps(listed, ensure_ascii=False))
 
+    def test_imap_sync_reads_seen_flag(self):
+        with FakeImapServer(
+            MESSAGES,
+            message_flags={1: [r"\Seen"], 2: []},
+        ) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+            commands = list(server.commands)
+
+        by_uid = {
+            message["uid"]: message
+            for message in self._list(accountId=account_id)["messages"]
+        }
+        self.assertTrue(by_uid[1]["seen"])
+        self.assertFalse(by_uid[2]["seen"])
+        # The FETCH asks for FLAGS in the same round trip as the body.
+        self.assertTrue(
+            any(
+                "FETCH" in command and "FLAGS" in command
+                for command in commands
+            )
+        )
+
+    def test_mark_read_updates_local_and_remote(self):
+        with FakeImapServer(MESSAGES) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+            message = self._list(accountId=account_id)["messages"][0]
+
+            result = self.service.dispatch(
+                "message.markRead", {"id": message["id"]}
+            )
+            self.assertEqual(result, {"seen": True, "remote": True})
+            self.assertEqual(
+                list(server.stores), [(message["uid"], "+FLAGS (\\Seen)")]
+            )
+            # Idempotent: a second call still succeeds.
+            again = self.service.dispatch(
+                "message.markRead", {"id": message["id"]}
+            )
+            self.assertTrue(again["seen"])
+
+        detail = self.service.dispatch(
+            "message.get", {"id": message["id"]}
+        )
+        self.assertTrue(detail["seen"])
+
+    def test_mark_read_keeps_local_flag_when_remote_fails(self):
+        with FakeImapServer(MESSAGES, reject_store=True) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+            message = self._list(accountId=account_id)["messages"][0]
+
+            result = self.service.dispatch(
+                "message.markRead", {"id": message["id"]}
+            )
+
+        self.assertEqual(result, {"seen": True, "remote": False})
+        self.assertTrue(
+            self.service.dispatch("message.get", {"id": message["id"]})["seen"]
+        )
+        with self.assertRaises(MailCoreError) as context:
+            self.service.dispatch("message.markRead", {"id": "msg_missing"})
+        self.assertEqual(context.exception.code, "NOT_FOUND")
+
+    def test_second_sync_refreshes_seen_flags_without_refetching_body(self):
+        with FakeImapServer(MESSAGES) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+            before_flags = {
+                message["uid"]: message["seen"]
+                for message in self._list(accountId=account_id)["messages"]
+            }
+            self.assertFalse(before_flags[1])
+
+            # UID 1 was expunged elsewhere, so the response sequence numbers no
+            # longer equal UIDs: * 1 FETCH (UID 2 ...).  UID 2 was read in
+            # another client; the refresh must key on UID, not the sequence.
+            server.deleted_uids["INBOX"] = {1}
+            server.message_flags = {2: [r"\Seen"]}
+            start = len(server.commands)
+            result = self._sync(account_id)
+            second_commands = list(server.commands[start:])
+
+        self.assertEqual(result["stored"], 0)
+        self.assertEqual(result["fetched"], 0)
+        after_flags = {
+            message["uid"]: message["seen"]
+            for message in self._list(accountId=account_id)["messages"]
+        }
+        self.assertTrue(after_flags[2], "the UID in the response must win")
+        self.assertFalse(after_flags[1], "the sequence number must not be used")
+        self.assertFalse(after_flags[3])
+        self.assertTrue(
+            any(
+                "FETCH" in command and "(UID FLAGS)" in command
+                for command in second_commands
+            )
+        )
+        self.assertFalse(
+            any("BODY.PEEK[]" in command for command in second_commands),
+            "the FLAGS refresh must not download bodies again",
+        )
+
+    def test_seen_refresh_failure_does_not_fail_sync(self):
+        with FakeImapServer(MESSAGES[:2], reject_flags_fetch=True) as server:
+            account_id = self._add_account(server.port)
+            self._sync(account_id)
+
+            server.messages.append(
+                make_message(
+                    subject="Third",
+                    date="Thu, 05 Mar 2026 09:00:00 +0000",
+                    message_id="<third@example.com>",
+                    body="third body",
+                )
+            )
+            result = self._sync(account_id)
+
+        self.assertEqual(result["stored"], 1)
+        self.assertEqual(self._list(accountId=account_id)["total"], 3)
+
     def test_limit_fetches_newest_first(self):
         with FakeImapServer(MESSAGES) as server:
             account_id = self._add_account(server.port)

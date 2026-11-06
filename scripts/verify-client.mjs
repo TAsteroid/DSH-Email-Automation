@@ -757,6 +757,28 @@ function runRealReactPass() {
     check(searchMarkup.includes('t:mail.searchResults'), '[真实渲染] 搜索页应有结果标题')
     check(searchMarkup.includes('t:mail.searchEmpty'), '[真实渲染] 无结果时应有空态')
 
+    const unreadMarkup = renderToStaticMarkup(
+      h(views.MessageList, {
+        t,
+        messages: [
+          { id: 'm1', subject: '未读邮件', fromAddr: 'a@b.com', date: '2026-11-06', seen: false },
+          { id: 'm2', subject: '已读邮件', fromAddr: 'c@d.com', date: '2026-11-05', seen: true },
+        ],
+        selectedId: 'm1',
+      }),
+    )
+    check(unreadMarkup.includes('•'), '[真实渲染] 未读邮件应有未读标记')
+
+    const todoMarkup = renderToStaticMarkup(
+      h(views.MailTodoCard, {
+        t,
+        item: { messageId: 'msg_1', subject: '主题', fromAddr: 'a@b.com', date: '2026-11-06', bodyExcerpt: '这是邮件正文内容', attachments: [] },
+        onSummary: () => {},
+        onDone: () => {},
+      }),
+    )
+    check(todoMarkup.includes('这是邮件正文内容'), '[真实渲染] 待办卡片应显示邮件正文')
+
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
     const formMarkup = renderToStaticMarkup(h(views.AccountForm, { t }))
     check(formMarkup.includes('t:mail.accountPasswordField'), '[真实渲染] 新增账户的密码字段应标为「密码」')

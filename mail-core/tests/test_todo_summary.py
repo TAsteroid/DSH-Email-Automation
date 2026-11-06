@@ -119,6 +119,8 @@ class SchemaV9MigrationTests(unittest.TestCase):
                     "todoState": "",
                     "hasSummary": False,
                     "attachmentCount": 0,
+                    "snippet": "",
+                    "bodyExcerpt": "",
                 }
             ],
         )
@@ -203,6 +205,8 @@ class SyncTodoTests(unittest.TestCase):
                 "todoState",
                 "hasSummary",
                 "attachmentCount",
+                "snippet",
+                "bodyExcerpt",
             },
         )
 
@@ -285,6 +289,8 @@ class TodoApiTests(unittest.TestCase):
         from_addr: str = "sender@example.com",
         account_id: str = "",
         attachments: list[dict] | None = None,
+        body: str = "正文",
+        snippet: str = "",
     ) -> str:
         account_id = account_id or self.account_id
         self._uid += 1
@@ -297,7 +303,8 @@ class TodoApiTests(unittest.TestCase):
             subject=subject,
             from_addr=from_addr,
             date=date,
-            body_text="正文",
+            snippet=snippet,
+            body_text=body,
             todo_state=todo_state,
             attachments=attachments or [],
         )
@@ -326,6 +333,30 @@ class TodoApiTests(unittest.TestCase):
         self.assertTrue(todos[0]["hasSummary"])
         self.assertEqual(todos[0]["attachmentCount"], 1)
         self.assertFalse(todos[1]["hasSummary"])
+
+    def test_todo_list_returns_snippet_and_body_excerpt(self):
+        with_body = self._insert(
+            subject="有正文",
+            date="Tue, 03 Feb 2026 09:00:00 +0000",
+            todo_state="pending",
+            snippet="正文开头…",
+            body="B" * 1600,
+        )
+        empty = self._insert(
+            subject="无正文",
+            date="Mon, 02 Feb 2026 09:00:00 +0000",
+            todo_state="pending",
+            body="",
+        )
+
+        todos = {
+            item["messageId"]: item
+            for item in self.service.dispatch("todo.list", {})["todos"]
+        }
+        self.assertEqual(todos[with_body]["snippet"], "正文开头…")
+        self.assertEqual(len(todos[with_body]["bodyExcerpt"]), 1500)
+        self.assertEqual(todos[empty]["snippet"], "")
+        self.assertEqual(todos[empty]["bodyExcerpt"], "")
 
     def test_state_filter_account_filter_and_limit(self):
         pending = self._insert(

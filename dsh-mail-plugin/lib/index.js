@@ -2054,6 +2054,11 @@ export function apply(ctx, config) {
       })
     })
 
+    // 打开邮件后标记已读（IMAP 账户会顺带通知服务器）
+    route('/messages/read', async (body) => {
+      const id = requireText(body.id, 'id')
+      return requireCoreResult(await callCore('message.markRead', { id }))
+    })
     route('/messages', async (body) => {
       const params = {}
       if (typeof body.accountId === 'string' && body.accountId.trim()) params.accountId = body.accountId.trim()
