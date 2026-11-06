@@ -348,6 +348,10 @@ window.__ModuleLoader__.load({
         accountFailed: '保存失败',
         accountPassword: '改密码',
         accountPasswordField: '密码',
+        accountSignature: '签名',
+        accountSignatureSaved: '签名已保存',
+        accountSignatureHint: '支持 HTML，保存后会在新邮件 / 回复 / 转发时自动附在正文底部。',
+        accountSignaturePlaceholder: '<p>唐明珺<br>China Bridge Energy</p>',
         accountPasswordPlaceholder: '输入邮箱当前密码 / 授权码',
         accountPasswordSaved: '密码已更新，正在重启连接',
         saving: '保存中…',
@@ -634,6 +638,11 @@ window.__ModuleLoader__.load({
         accountSaved: 'Account saved',
         accountFailed: 'Save failed',
         accountPassword: 'Password',
+        accountPasswordField: 'Password',
+        accountSignature: 'Signature',
+        accountSignatureSaved: 'Signature saved',
+        accountSignatureHint: 'HTML supported; appended to the bottom of new / reply / forward mail.',
+        accountSignaturePlaceholder: '<p>Your Name<br>Company</p>',
         accountPasswordPlaceholder: 'Current mailbox password / app password',
         accountPasswordSaved: 'Password updated, restarting connection',
         saving: 'Saving…',
@@ -1248,6 +1257,13 @@ window.__ModuleLoader__.load({
         borderTop: '1px dashed var(--dsw-alias-border-l2)',
       },
       accountNote: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+      accountSignatureBox: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        paddingTop: 8,
+        borderTop: '1px dashed var(--dsw-alias-border-l2)',
+      },
       sectionHead: {
         margin: '18px 0 8px',
         paddingTop: 14,
@@ -1762,6 +1778,31 @@ window.__ModuleLoader__.load({
       const [copied, setCopied] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
+
+      // 打开时把该账户的签名（纯文本形式）附在正文底部；发送时 Core 会换成 HTML 版
+      React.useEffect(() => {
+        let cancelled = false
+        const run = async () => {
+          if (!accountId) return
+          try {
+            const value = await call('/accounts', {})
+            const account = ((value && value.accounts) || []).find((item) => item.id === accountId)
+            const plain = htmlToText(account && account.signatureHtml)
+            if (!plain || cancelled) return
+            setDraft((prev) => {
+              const body = String(prev.body || '')
+              if (body.includes(plain.slice(0, 40))) return prev
+              return { ...prev, body: `${body.replace(/\s+$/, '')}\n\n${plain}\n` }
+            })
+          } catch {
+            // 签名取不到就不附
+          }
+        }
+        void run()
+        return () => {
+          cancelled = true
+        }
+      }, [accountId])
 
       const submit = async () => {
         if (busy) return
@@ -2800,6 +2841,19 @@ window.__ModuleLoader__.load({
       return match ? match[1].toLowerCase() : ''
     }
 
+    /** 把简单的 HTML 签名转成纯文本，用于在纯文本编辑器里展示。 */
+    function htmlToText(html) {
+      return String(html || '')
+        .replace(/<\s*br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+    }
     /** 开会话失败时的兜底：新开一个带提示词草稿的会话；再不行就复制到剪贴板。 */
     async function fallbackToDraft(prompt, error) {
       let opened = false
@@ -4883,6 +4937,8 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState(null)
       const [editing, setEditing] = React.useState(false)
       const [password, setPassword] = React.useState('')
+      const [signing, setSigning] = React.useState(false)
+      const [signature, setSignature] = React.useState(account.signatureHtml || '')
 
       const savePassword = async () => {
         if (!password.trim() || busy !== null) return
@@ -4893,6 +4949,23 @@ window.__ModuleLoader__.load({
           setPassword('')
           setEditing(false)
           setNote(t('accountPasswordSaved'))
+          if (onChanged) onChanged()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(null)
+        }
+      }
+
+      const saveSignature = async () => {
+        if (busy !== null) return
+        setBusy('signature')
+        setNote(null)
+        try {
+          const value = await call('/accounts/signature', { accountId: account.id, html: signature })
+          setSignature((value && value.signatureHtml) || '')
+          setSigning(false)
+          setNote(t('accountSignatureSaved'))
           if (onChanged) onChanged()
         } catch (error) {
           setNote(error.message)
@@ -4968,6 +5041,19 @@ window.__ModuleLoader__.load({
             ),
             h(
               'button',
+              {
+                type: 'button',
+                style: styles.btnSmall,
+                disabled: busy !== null,
+                onClick: () => {
+                  setSigning((prev) => !prev)
+                  setSignature(account.signatureHtml || '')
+                },
+              },
+              t('accountSignature'),
+            ),
+            h(
+              'button',
               { type: 'button', style: styles.dangerBtn, disabled: busy !== null, onClick: remove },
               t('accountRemove'),
             ),
@@ -4990,6 +5076,29 @@ window.__ModuleLoader__.load({
                 busy === 'password' ? t('saving') : t('save'),
               ),
               h('button', { type: 'button', style: styles.btnSmall, onClick: () => setEditing(false) }, t('cancel')),
+            )
+          : null,
+        signing
+          ? h(
+              'div',
+              { style: styles.accountSignatureBox },
+              h('p', { style: styles.formHint }, t('accountSignatureHint')),
+              h('textarea', {
+                style: { ...styles.textArea, minHeight: 90, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+                value: signature,
+                placeholder: t('accountSignaturePlaceholder'),
+                onChange: (event) => setSignature(event.target.value),
+              }),
+              h(
+                'div',
+                { style: { display: 'flex', gap: 8 } },
+                h(
+                  'button',
+                  { type: 'button', style: styles.btn, disabled: busy !== null, onClick: saveSignature },
+                  busy === 'signature' ? t('saving') : t('save'),
+                ),
+                h('button', { type: 'button', style: styles.btnSmall, onClick: () => setSigning(false) }, t('cancel')),
+              ),
             )
           : null,
         note ? h('div', { style: styles.accountNote }, note) : null,

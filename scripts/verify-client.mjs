@@ -795,6 +795,15 @@ function runRealReactPass() {
     check(todoMarkup.includes('t:mail.agentChatSend'), '[真实渲染] 待办卡片应有 Agent 对话框')
 
     const kbMarkup = renderToStaticMarkup(h(views.KnowledgeView, { t, status: statusPayload }))
+    const accountRowMarkup = renderToStaticMarkup(
+      h(views.AccountRow, {
+        t,
+        account: { id: 'acc_1', address: 'a@b.com', imapHost: 'imap', imapPort: 993, imapSecurity: 'ssl', hasCredential: true, signatureHtml: '' },
+        onChanged: () => {},
+      }),
+    )
+    check(accountRowMarkup.includes('t:mail.accountSignature'), '[真实渲染] 账户行应有签名按钮')
+
     const formMarkup = renderToStaticMarkup(h(views.AccountForm, { t }))
     check(formMarkup.includes('t:mail.accountPasswordField'), '[真实渲染] 新增账户的密码字段应标为「密码」')
     check(!formMarkup.includes('t:mail.accountPassword\b'), '[真实渲染] 新增账户不应显示「改密码」')

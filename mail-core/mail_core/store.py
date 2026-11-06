@@ -37,6 +37,8 @@ Schema v11 adds ``attachments.dismissed_at`` so an attachment can be marked
 as already handled and drops out of the pending list.
 Schema v12 adds ``messages.body_purged_at``: ``admin.cleanup`` clears the local
 body of old, already-summarised mail and records when it did so.
+Schema v13 adds ``accounts.signature_html``, the per-account HTML signature
+that outgoing mail appends (empty keeps plain-text-only sending).
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -459,6 +461,16 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
         )
 
 
+# Schema v13: per-account HTML signature, appended to outgoing mail by
+# ``sender``.  Empty means "no signature" (plain-text sending, unchanged).
+def _migrate_to_v13(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+    if "signature_html" not in columns:
+        conn.execute(
+            "ALTER TABLE accounts ADD COLUMN signature_html TEXT NOT NULL DEFAULT ''"
+        )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -472,6 +484,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     10: _migrate_to_v10,
     11: _migrate_to_v11,
     12: _migrate_to_v12,
+    13: _migrate_to_v13,
 }
 
 
@@ -688,6 +701,7 @@ class Store:
             "username": row["username"],
             "enabled": bool(row["enabled"]),
             "hasCredential": bool(row["password_blob"]),
+            "signatureHtml": row["signature_html"],
             "createdAt": row["created_at"],
         }
 
@@ -771,6 +785,15 @@ class Store:
                 (password_blob, timestamp, account_id),
             )
         return timestamp if cursor.rowcount > 0 else None
+
+    def set_account_signature(self, account_id: str, signature_html: str) -> bool:
+        """Store the account's (already sanitised) HTML signature."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE accounts SET signature_html = ?, updated_at = ? WHERE id = ?",
+                (signature_html, utc_now(), account_id),
+            )
+        return cursor.rowcount > 0
 
     def get_credential(self, account_id: str) -> Optional[str]:
         """Return the stored DPAPI blob (base64) or ``None``; never plaintext."""

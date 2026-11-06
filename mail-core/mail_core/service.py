@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import attachment_text, attachments, backup, crypto, delete, drafts, idle, imap_client, pop3_client, sender, smtp_client, summaries
+from . import attachment_text, attachments, backup, crypto, delete, drafts, idle, imap_client, pop3_client, sender, signature, smtp_client, summaries
 from . import protocol
 from . import sync
 from .protocol import (
@@ -224,6 +224,7 @@ class Service:
             "account.remove": self._account_remove,
             "account.test": self._account_test,
             "account.updateCredential": self._account_update_credential,
+            "account.setSignature": self._account_set_signature,
             "folder.list": self._folder_list,
             "sync.status": self._sync_status,
             "sync.run": self._sync_run,
@@ -473,6 +474,25 @@ class Service:
         if updated_at is None:
             raise MailCoreError(NOT_FOUND, "account not found")
         return {"id": account_id, "updatedAt": updated_at}
+
+    def _account_set_signature(self, params: dict) -> dict:
+        """Store a sanitised HTML signature (empty string clears it)."""
+        account_id = _require_str(params, "accountId")
+        html = params.get("html")
+        if not isinstance(html, str):
+            raise bad_request("field html must be a string")
+        if len(html) > signature.MAX_SIGNATURE_CHARS:
+            raise bad_request(
+                "field html must be at most "
+                f"{signature.MAX_SIGNATURE_CHARS} characters"
+            )
+        if self.store.get_account(account_id) is None:
+            raise MailCoreError(NOT_FOUND, "account not found")
+
+        cleaned = signature.sanitize_html(html)
+        if not self.store.set_account_signature(account_id, cleaned):
+            raise MailCoreError(NOT_FOUND, "account not found")
+        return {"accountId": account_id, "signatureHtml": cleaned}
 
     # -- folders -----------------------------------------------------------
 

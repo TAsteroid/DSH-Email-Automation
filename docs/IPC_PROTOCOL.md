@@ -72,12 +72,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 12}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 13}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记。**它和 `protocol` 无关**：v12 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记 / v13 账户 HTML 签名。**它和 `protocol` 无关**：v13 只新增列和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -92,11 +92,12 @@
   "imapHost": "imap.b.com", "imapPort": 993, "imapSecurity": "ssl",
   "smtpHost": "smtp.b.com", "smtpPort": 465, "smtpSecurity": "ssl",
   "username": "a@b.com", "enabled": true, "hasCredential": true,
+  "signatureHtml": "<div>签名</div>",
   "createdAt": "2026-11-04T12:00:00Z"
 }]}
 ```
 
-`protocol` 取值 `imap` | `pop3`（收信协议）。POP3 账号的 `imapHost/imapPort/imapSecurity` 表示 **POP3 服务器**——字段名沿用，避免两套结构。
+`protocol` 取值 `imap` | `pop3`（收信协议）。POP3 账号的 `imapHost/imapPort/imapSecurity` 表示 **POP3 服务器**——字段名沿用，避免两套结构。`signatureHtml` 是账户的 HTML 签名（空串表示未设置）。
 
 **任何方法都不得返回密码或 DPAPI 密文**，只允许 `hasCredential` 布尔。
 
@@ -154,6 +155,17 @@ POP3 结果：
 - 用 DPAPI 重新加密后覆盖 `password_blob` 并刷新 `updatedAt`；明文**不写日志、不落盘、不在响应里返回**。
 - 空密码 / 全空白 / 非字符串 → `BAD_REQUEST`；`id` 不存在 → `NOT_FOUND`。
 - 密码已失效的 IDLE worker 会停在 `auth-failed`；更新凭据后再调 [`idle.start`](#idlestart) 即可为该账号拉起新的 worker。
+
+### `account.setSignature`
+
+参数：`{"accountId": "acc_xxx", "html": "<div>签名<br>张三</div>"}`
+
+结果：`{"accountId": "acc_xxx", "signatureHtml": "<div>签名<br>张三</div>"}`
+
+- 保存该账户的 HTML 签名；`html` 允许空串（= 清除签名），非字符串 → `BAD_REQUEST`。
+- **上限 20000 字符**（按传入的原始 `html` 长度），超过 → `BAD_REQUEST`；`accountId` 不存在 → `NOT_FOUND`。
+- 保存前做保守清理：移除 `<script>` / `<iframe>` / `<object>` / `<embed>`（含其内容/标签）、`on*=` 事件属性、`javascript:` 链接；其它标签与样式原样保留。返回值是**清理后**实际保存的内容，`account.list` 里的 `signatureHtml` 与之一致。
+- 发送时由核心层自动追加到 HTML 部分（见 [`action.execute`](#actionexecute) 的「发送与结果」）。
 
 ### `folder.list`
 
@@ -1004,7 +1016,11 @@ POP3 结果：
 发送与结果：
 
 - 用草稿所属账号的 `smtpHost` / `smtpPort` / `smtpSecurity`（`ssl` → `SMTP_SSL`；`starttls` → `SMTP` + `STARTTLS`；`none` → `SMTP`），用 DPAPI 解出的密码 `login`，超时 20 秒，证书用 `ssl.create_default_context()`。
-- `From` = 账号地址，`To` / `Cc` 取草稿，`Subject` 取草稿，正文为**纯文本**；`Message-ID` 由核心层生成并原样返回。
+- `From` = 账号地址，`To` / `Cc` 取草稿，`Subject` 取草稿；`Message-ID` 由核心层生成并原样返回。
+- **正文与签名（MIME）**：
+  - 账户 `signatureHtml` 为空 → 与以前完全一致：单个 `text/plain`。正文原样。
+  - 账户有签名 → `multipart/alternative`：`text/plain` + `text/html`。HTML 部分 = 纯文本正文按行转义、换行变 `<br>`，再接 `<br><br>` + 签名 HTML。
+  - **纯文本部分**：客户端 composer 会在正文末尾显示签名的纯文本版。若正文末尾确实含有该文本（去标签后的签名文本匹配，忽略首尾空白/多余空行），先把这段从纯文本正文中去掉再发送；若正文里没有，纯文本保持原样。这样签名只以格式化 HTML 出现一次，不会既重复又丢格式。
 - 成功：草稿 `status = sent`、审批保持 `approved`、写一条 `mail_actions(result = sent)`，返回上面三个字段。
 - 失败（未配置 `smtpHost`、没有可用密码、DPAPI 解密失败、连接 / 认证 / 发信出错）：写一条 `mail_actions(result = failed, error = 原因)`，**草稿状态不变**，返回 `SMTP_ERROR`。`error` 和响应 message **绝不包含密码**。
 - **幂等**：`idempotency_key` 在 `mail_actions` 里是 UNIQUE。首次执行记录写入后（无论 `sent` 还是 `failed`），同一个键再次 `execute` 一律返回 `ALREADY_EXECUTED`，绝不重发。发送失败后要重试，调用方需要提供**新的** `idempotencyKey`，并在界面上明确这是另一次发送尝试。
@@ -1097,3 +1113,4 @@ POP3 结果：
 - v10 只**新增** `contact_sessions` 表（邮箱地址 ↔ DSH 会话映射）与 `idx_contact_sessions_email` 索引：`(account_id, email)` 唯一，`account_id` 外键 `ON DELETE CASCADE`（删账号连带清映射），`email` 由核心层统一小写；不改旧表、不丢旧数据。老库（v1~v9）启动时先自动备份再升级；迁移幂等。
 - v11 只给 `attachments` **新增** `dismissed_at` 一列（默认空串，表示尚未标记为已处理），不改旧表结构、不丢旧数据、不删附件文件；`attachment.list` 的 `pendingOnly` 语义随之变为「未 dismiss + 属于 INBOX」（下载状态不影响待办，下载完仍需用户 dismiss 才消失）。老库（v1~v10）启动时先自动备份再升级；迁移用列检查保证幂等。
 - v12 只给 `messages` **新增** `body_purged_at` 一列（默认空串），记录 `admin.cleanup` 清理本地正文的时间；不改旧表结构、不删旧数据、不动附件行。老库（v1~v11）启动时先自动备份再升级；迁移用列检查保证幂等。
+- v13 只给 `accounts` **新增** `signature_html` 一列（默认空串，表示没有签名），不改旧表结构、不丢旧数据；空串时发送保持原来的纯文本行为。老库（v1~v12）启动时先自动备份再升级；迁移用列检查保证幂等。

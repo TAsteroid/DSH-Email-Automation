@@ -228,6 +228,7 @@ function handleMethod(method, params) {
   }
   if (method === 'admin.cleanup') return { candidates: 3, cleaned: params.dryRun ? 0 : 2, skippedNoSummary: 1, skippedTodo: 0, dryRun: Boolean(params.dryRun) }
   if (method === 'admin.rebasePaths') return { updated: 0 }
+  if (method === 'account.setSignature') return { accountId: params.accountId, signatureHtml: params.html }
   if (method === 'account.updateCredential') return { id: params.id, updatedAt: '2026-11-05T00:00:00Z' }
   if (method === 'idle.stop') return { stopped: ['acc_1'] }
   if (method === 'idle.start') return { started: ['acc_1'], skipped: [] }

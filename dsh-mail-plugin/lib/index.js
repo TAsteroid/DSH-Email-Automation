@@ -1946,6 +1946,12 @@ export function apply(ctx, config) {
     })
 
     // 更新密码（不删账号，保数据）；成功后重启 IDLE
+    // 账户签名（HTML）：保存前由 Core 清理脚本/事件属性
+    route('/accounts/signature', async (body) => {
+      const accountId = requireText(body.accountId, 'accountId')
+      const html = typeof body.html === 'string' ? body.html : ''
+      return requireCoreResult(await callCore('account.setSignature', { accountId, html }))
+    })
     route('/accounts/password', async (body) => {
       const id = requireText(body.id, 'id')
       const password = requireText(body.password, 'password')
