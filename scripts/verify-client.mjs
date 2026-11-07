@@ -499,9 +499,8 @@ function runRealReactPass() {
       counters: { ...statusPayload.counters, pendingApprovals: 1 },
     }
     const railWithPending = renderToStaticMarkup(h(views.ApprovalsRail, { t, status: pendingStatus }))
-    check(railWithPending.includes('报价回复'), '[真实渲染] 待审批应显示草稿主题')
-    check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应有「复制发送指令」')
-    check(railWithPending.includes('t:mail.approvalPendingLabel'), '[真实渲染] 待审批项应标注状态')
+    check(!railWithPending.includes('报价回复'), '[真实渲染] 审批栏不应显示待审批项（只展示历史）')
+    check(!railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 未选中时不应展开复制指令')
 
     // 审批历史要显示批准方式
     const historyStatus = {
@@ -522,8 +521,8 @@ function runRealReactPass() {
     check(historyMarkup.includes('t:mail.decidedByPolicy'), '[真实渲染] 历史应显示「策略放行」')
     check(historyMarkup.includes('t:mail.approvalStateApproved'), '[真实渲染] 已批准条目应有状态角标')
     check(historyMarkup.includes('t:mail.approvalStateExpired'), '[真实渲染] 已过期条目应有状态角标')
-    check(!railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批不应再有「拒绝」（改为 DSH 审批弹窗）')
-    check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应保留「复制发送指令」')
+    check(!historyMarkup.includes('t:mail.copySendCommand'), '[真实渲染] 历史条目未选中时不显示复制指令')
+    check(!railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 审批栏不应再有「拒绝」（发信走 DSH 弹窗）')
 
     const agentMarkup = renderToStaticMarkup(h(views.AgentMailComposer, { t, message: baseMessage }))
     check(agentMarkup.includes('t:mail.agentChatTitle'), '[真实渲染] 详情页应有 Agent 区')

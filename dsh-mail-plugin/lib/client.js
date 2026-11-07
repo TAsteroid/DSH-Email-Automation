@@ -4450,11 +4450,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(null)
       const [note, setNote] = React.useState(null)
       const [selectedApproval, setSelectedApproval] = React.useState('')
-      const pending = (status && status.approvals && status.approvals.pending) || []
       const history = (status && status.approvals && status.approvals.history) || []
-      const count = (status && status.counters && status.counters.pendingApprovals) || pending.length
-      // 审批历史：待审批的排在最前，其后是已处理记录
-      const items = [...pending.map((item) => ({ ...item, _pending: true })), ...history]
+      // 这里只展示历史记录；待审批的单子由 DSH 的审批弹窗处理，不再混进列表
+      const items = history
 
       React.useEffect(() => {
         storeWidth('approvalsRail', width)
@@ -4529,8 +4527,7 @@ window.__ModuleLoader__.load({
               'div',
               null,
               items.map((item) => {
-                const pendingItem = item._pending === true
-                const state = pendingItem ? 'pending' : String(item.status || '')
+                const state = String(item.status || '')
                 const badgeLabel =
                   state === 'approved'
                     ? t('approvalStateApproved')
@@ -4583,7 +4580,7 @@ window.__ModuleLoader__.load({
                     h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, item.subject || item.draftId || item.id),
                   ),
                   h('span', { style: styles.listItemMeta }, [via, item.to || ''].filter(Boolean).join(' · ')),
-                  pendingItem || selectedItem
+                  selectedItem
                     ? h(
                         'div',
                         { style: { display: 'flex', gap: 6, marginTop: 6 } },
