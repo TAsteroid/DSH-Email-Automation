@@ -6,7 +6,7 @@ Brings a real mailbox into DeepSeek Harness: real-time mail push, automatic foll
 
 The plugin has two halves: a DSH host plugin (`dsh-mail-plugin/`) and a pure-stdlib Python Core (`mail-core/`, spawned and supervised by the plugin — you never run it yourself). All data lives in a local SQLite database; mailbox passwords are encrypted with Windows DPAPI.
 
-Current version: **v0.2.0** (database schema v14)
+Current version: **v0.3.0** (database schema v15)
 
 ## What it does
 
@@ -14,10 +14,12 @@ Current version: **v0.2.0** (database schema v14)
 |---|---|
 | Receive | IMAP accounts use **IDLE push** (mail shows up within ~30s); POP3 accounts poll on an interval |
 | Unread & bulk | Inbox marks unread (bold + dot); every tab supports multi-select: mark read/unread, move, delete, select all |
+| Reading | Detail view switches between **HTML and plain text**; HTML renders in a sandboxed iframe with dark-theme adaptation |
+| Composing | **Rich text editor**: bold/italic/lists/links/clear formatting, insert signature, HTML source toggle, save as draft |
 | Follow-up list | New mail becomes a to-do with the body inline; an Agent chat box sits under the body |
 | Agent summaries | One click opens a session and hands the mail (attachments included as files) to an Agent, filed under 8 categories |
 | Send approval | You must click **Allow** in the DSH approval prompt; the agent cannot approve itself and no HTTP approve endpoint exists |
-| Signature | Per-account, HTML with **inline images** (CID, renders in Outlook); appended to new / reply / forward mail |
+| Signature | Per-account, HTML with **inline images** (CID, renders in Outlook); at the end for new mail, before the quote for replies |
 | Attachments | Metadata only until you download; once downloaded they can be **passed to the Agent as real files** |
 | Search | FTS5 full-text search (with CJK substring fallback), thread grouping, historical backfill |
 | Knowledge base | Summaries / documents / spreadsheets / images / calendar / archives / videos / other; search, collapse, delete |
@@ -29,7 +31,7 @@ Current version: **v0.2.0** (database schema v14)
 
 ```powershell
 # download the tgz from https://github.com/TAsteroid/DSH-Email-Automation/releases/latest
-dsh plugin --profile desktop add file:<path>/dsh-mail-plugin-0.2.0.tgz
+dsh plugin --profile desktop add file:<path>/dsh-mail-plugin-0.3.0.tgz
 ```
 
 `dsh` is the CLI shipped with DSH; it installs the package into the profile and registers it in both `dependencies` and `dsh.profile.bundles`.
@@ -38,7 +40,7 @@ dsh plugin --profile desktop add file:<path>/dsh-mail-plugin-0.2.0.tgz
 
 ```powershell
 node scripts/build-package.mjs     # produces dist\dsh-mail-plugin-<version>.tgz
-dsh plugin --profile desktop add file:./dist/dsh-mail-plugin-0.2.0.tgz
+dsh plugin --profile desktop add file:./dist/dsh-mail-plugin-0.3.0.tgz
 ```
 
 > On another machine, copy the `.tgz` over and replace `./dist/...` with its real path.
@@ -77,11 +79,12 @@ DSH host plugin (Node)
 | Drafts · approval · controlled sending · HTML signature | ✅ |
 | Follow-ups · summaries · attachments · realtime | ✅ |
 | Multi-select · unread state · knowledge categories | ✅ |
+| Rich composing · HTML reading · save as draft | ✅ |
 | Install / upgrade / docs / releases | ✅ |
 | Automatic summarization (no click) | ⏳ blocked on a host-side agent invocation API |
 | Cross-mail knowledge index | ⏳ not started |
 
-Database schema v14; 248 Python tests plus two JS suites (fake host child process, real React rendering).
+Database schema v15; 244 Python tests plus two JS suites (fake host child process, real React rendering).
 
 ## Documentation
 
@@ -99,7 +102,10 @@ The original requirements plan is a private local document (`docs/PLAN.md`, not 
 
 - Mail is only synced while DSH runs; there is no standalone background service
 - Summaries need a click: automatic triggering requires host support for agent invocation
-- Plain-text mail clients cannot see the HTML signature (it only exists in the HTML part)
+- Plain-text mail clients cannot see the HTML signature or formatting
+- HTML reading flattens coloured block backgrounds for dark-theme readability; brand-coloured text turns light grey
+- Rich text is built on `contenteditable`; pasted complex HTML is only roughly cleaned
+- Drafts can be saved but not reopened for editing from the draft list yet
 - Moving mail deletes the local row; the mail is re-imported when the target folder syncs (its summary/to-do state is lost)
 - PDF text extraction covers only the text layer — hand scanned files to the agent directly
 - POP3 cannot fetch attachments on demand; deleting only removes the local copy
