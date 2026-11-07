@@ -511,6 +511,7 @@ function runRealReactPass() {
         history: [
           { id: 'apr_h1', subject: '报价回复', to: 'x@b.com', status: 'approved', decidedVia: 'prompt', decidedBy: 'user' },
           { id: 'apr_h2', subject: '另一封', to: 'y@b.com', status: 'approved', decidedVia: 'policy-never', decidedBy: '' },
+          { id: 'apr_h3', subject: '过期的一封', to: 'z@b.com', status: 'expired', decidedVia: '', decidedBy: '' },
         ],
       },
     }
@@ -519,6 +520,8 @@ function runRealReactPass() {
     )
     check(historyMarkup.includes('t:mail.decidedByUser'), '[真实渲染] 历史应显示「用户批准」')
     check(historyMarkup.includes('t:mail.decidedByPolicy'), '[真实渲染] 历史应显示「策略放行」')
+    check(historyMarkup.includes('t:mail.approvalStateApproved'), '[真实渲染] 已批准条目应有状态角标')
+    check(historyMarkup.includes('t:mail.approvalStateExpired'), '[真实渲染] 已过期条目应有状态角标')
     check(!railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批不应再有「拒绝」（改为 DSH 审批弹窗）')
     check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应保留「复制发送指令」')
 

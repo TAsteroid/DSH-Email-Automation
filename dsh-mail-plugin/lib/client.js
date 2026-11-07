@@ -281,6 +281,9 @@ window.__ModuleLoader__.load({
         collapseHistory: '收起审批历史',
         expandHistory: '展开审批历史',
         approvalPendingLabel: '待审批',
+        approvalStateApproved: '已批准',
+        approvalStateRejected: '已拒绝',
+        approvalStateExpired: '已过期',
         approvalHistoryHint: '已批准或已拒绝的操作会留在这里。',
         back: '返回',
         approvalDetailTitle: '审批详情',
@@ -578,6 +581,9 @@ window.__ModuleLoader__.load({
         collapseHistory: 'Collapse approval history',
         expandHistory: 'Expand approval history',
         approvalPendingLabel: 'pending',
+        approvalStateApproved: 'approved',
+        approvalStateRejected: 'rejected',
+        approvalStateExpired: 'expired',
         approvalHistoryHint: 'Approved and rejected actions stay here.',
         back: 'Back',
         approvalDetailTitle: 'Approval detail',
@@ -1276,6 +1282,19 @@ window.__ModuleLoader__.load({
         borderRadius: 8,
         background: '#fff',
       },
+      statusBadge: {
+        display: 'inline-block',
+        flex: 'none',
+        padding: '0 6px',
+        borderRadius: 9,
+        fontSize: 11,
+        lineHeight: '17px',
+        border: '1px solid transparent',
+      },
+      badgeApproved: { color: '#3fb950', background: 'rgba(63, 185, 80, 0.14)', borderColor: 'rgba(63, 185, 80, 0.4)' },
+      badgeRejected: { color: '#f85149', background: 'rgba(248, 81, 73, 0.14)', borderColor: 'rgba(248, 81, 73, 0.4)' },
+      badgeExpired: { color: '#8b949e', background: 'rgba(139, 148, 158, 0.14)', borderColor: 'rgba(139, 148, 158, 0.4)' },
+      badgePending: { color: '#d29922', background: 'rgba(210, 153, 34, 0.14)', borderColor: 'rgba(210, 153, 34, 0.4)' },
       accountSignatureBox: {
         display: 'flex',
         flexDirection: 'column',
@@ -4430,6 +4449,7 @@ window.__ModuleLoader__.load({
       })
       const [busy, setBusy] = React.useState(null)
       const [note, setNote] = React.useState(null)
+      const [selectedApproval, setSelectedApproval] = React.useState('')
       const pending = (status && status.approvals && status.approvals.pending) || []
       const history = (status && status.approvals && status.approvals.history) || []
       const count = (status && status.counters && status.counters.pendingApprovals) || pending.length
@@ -4510,27 +4530,60 @@ window.__ModuleLoader__.load({
               null,
               items.map((item) => {
                 const pendingItem = item._pending === true
+                const state = pendingItem ? 'pending' : String(item.status || '')
+                const badgeLabel =
+                  state === 'approved'
+                    ? t('approvalStateApproved')
+                    : state === 'rejected'
+                      ? t('approvalStateRejected')
+                      : state === 'expired'
+                        ? t('approvalStateExpired')
+                        : state === 'pending'
+                          ? t('approvalPendingLabel')
+                          : state
+                const badgeStyle =
+                  state === 'approved'
+                    ? styles.badgeApproved
+                    : state === 'rejected'
+                      ? styles.badgeRejected
+                      : state === 'pending'
+                        ? styles.badgePending
+                        : styles.badgeExpired
+                const via =
+                  item.decidedVia === 'prompt'
+                    ? t('decidedByUser')
+                    : item.decidedVia === 'policy-never'
+                      ? t('decidedByPolicy')
+                      : item.decidedVia === 'api'
+                        ? t('decidedByAgent')
+                        : ''
+                const selectedItem = selectedApproval === item.id
                 return h(
                   'div',
-                  { key: item.id, style: { ...styles.listItem, cursor: 'default' } },
-                  h('span', null, item.subject || item.draftId || item.id),
+                  {
+                    key: item.id,
+                    role: 'button',
+                    tabIndex: 0,
+                    'aria-pressed': selectedItem,
+                    style: selectedItem
+                      ? { ...styles.listItem, cursor: 'pointer', background: 'var(--dsw-alias-interactive-bg-hover)' }
+                      : { ...styles.listItem, cursor: 'pointer' },
+                    onClick: () => setSelectedApproval((prev) => (prev === item.id ? '' : item.id)),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        setSelectedApproval((prev) => (prev === item.id ? '' : item.id))
+                      }
+                    },
+                  },
                   h(
                     'span',
-                    { style: styles.listItemMeta },
-                    (() => {
-                      if (pendingItem) return `${t('approvalPendingLabel')} · ${item.to || ''}`
-                      const via =
-                        item.decidedVia === 'prompt'
-                          ? t('decidedByUser')
-                          : item.decidedVia === 'policy-never'
-                            ? t('decidedByPolicy')
-                            : item.decidedVia === 'api'
-                              ? t('decidedByAgent')
-                              : ''
-                      return [item.status || '', via, item.to || ''].filter(Boolean).join(' · ')
-                    })(),
+                    { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+                    h('span', { style: { ...styles.statusBadge, ...badgeStyle } }, badgeLabel),
+                    h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, item.subject || item.draftId || item.id),
                   ),
-                  pendingItem
+                  h('span', { style: styles.listItemMeta }, [via, item.to || ''].filter(Boolean).join(' · ')),
+                  pendingItem || selectedItem
                     ? h(
                         'div',
                         { style: { display: 'flex', gap: 6, marginTop: 6 } },
@@ -4540,7 +4593,10 @@ window.__ModuleLoader__.load({
                             type: 'button',
                             style: styles.btnSmall,
                             disabled: busy === item.id,
-                            onClick: () => copySendCommand(item),
+                            onClick: (event) => {
+                              event.stopPropagation()
+                              copySendCommand(item)
+                            },
                           },
                           t('copySendCommand'),
                         ),
