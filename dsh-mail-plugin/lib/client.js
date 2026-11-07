@@ -159,6 +159,13 @@ window.__ModuleLoader__.load({
         composeCc: '抄送',
         composeSubject: '主题',
         composeBody: '正文',
+        composeLink: '链接',
+        composeLinkPrompt: '输入链接地址',
+        composeClearFormat: '清除格式',
+        composeInsertSignature: '插入签名',
+        composeSourceOn: 'HTML 源码',
+        composeSourceOff: '返回编辑',
+        composeNoSignature: '这个账户还没有设置签名',
         composeClose: '关闭',
         composeCopyBody: '复制邮件',
         composeCopied: '已复制',
@@ -281,6 +288,8 @@ window.__ModuleLoader__.load({
         collapseHistory: '收起审批历史',
         expandHistory: '展开审批历史',
         approvalPendingLabel: '待审批',
+        bodyViewHtml: 'HTML',
+        bodyViewText: '纯文本',
         approvalStateApproved: '已批准',
         approvalStateRejected: '已拒绝',
         approvalStateExpired: '已过期',
@@ -452,6 +461,13 @@ window.__ModuleLoader__.load({
         composeCc: 'Cc',
         composeSubject: 'Subject',
         composeBody: 'Body',
+        composeLink: 'Link',
+        composeLinkPrompt: 'Enter the link URL',
+        composeClearFormat: 'Clear formatting',
+        composeInsertSignature: 'Insert signature',
+        composeSourceOn: 'HTML source',
+        composeSourceOff: 'Back to editor',
+        composeNoSignature: 'This account has no signature yet',
         composeClose: 'Close',
         composeCopyBody: 'Copy mail',
         composeCopied: 'Copied',
@@ -581,6 +597,8 @@ window.__ModuleLoader__.load({
         collapseHistory: 'Collapse approval history',
         expandHistory: 'Expand approval history',
         approvalPendingLabel: 'pending',
+        bodyViewHtml: 'HTML',
+        bodyViewText: 'Plain text',
         approvalStateApproved: 'approved',
         approvalStateRejected: 'rejected',
         approvalStateExpired: 'expired',
@@ -1282,6 +1300,26 @@ window.__ModuleLoader__.load({
         borderRadius: 8,
         background: '#fff',
       },
+      composeToolbar: {
+        display: 'flex',
+        gap: 6,
+        flexWrap: 'wrap',
+        marginBottom: 6,
+      },
+      composeEditor: {
+        minHeight: 220,
+        maxHeight: 420,
+        overflowY: 'auto',
+        padding: '10px 12px',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-sm)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: 13,
+        lineHeight: 1.7,
+      },
+      bodyViewBar: { display: 'flex', gap: 6, marginBottom: 10 },
+      bodyViewActive: { background: 'var(--dsw-alias-interactive-bg-hover)' },
       statusBadge: {
         display: 'inline-block',
         flex: 'none',
@@ -1733,6 +1771,49 @@ window.__ModuleLoader__.load({
       return String(header.from).toLowerCase().includes(String(accountAddress).toLowerCase())
     }
 
+    /** 粗略清理邮件 HTML：去掉脚本、内联框架、事件属性与 javascript: 链接。 */
+    function sanitizeEmailHtml(html) {
+      return String(html || '')
+        .replace(/<\s*(script|iframe|object|embed|link|meta)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+        .replace(/<\s*(script|iframe|object|embed|link|meta)\b[^>]*\/?>/gi, '')
+        .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/javascript\s*:/gi, '')
+        .trim()
+    }
+
+    /** 把邮件 HTML 包成可直接放进 sandbox iframe 的文档（深色底、图片自适应）。 */
+    function emailHtmlDocument(html) {
+      return `<!doctype html><html><head><meta charset="utf-8"><style>
+        html,body{margin:0;padding:0;background:transparent;color:#e6e6e6;font-family:-apple-system,"Segoe UI",Arial,sans-serif;font-size:13px;line-height:1.6}
+        img{max-width:100%;height:auto}
+        a{color:#4c9aff}
+        table{max-width:100%!important}
+        pre,code{white-space:pre-wrap;word-break:break-word}
+      </style></head><body>${sanitizeEmailHtml(html)}</body></html>`
+    }
+
+    /** 只读渲染邮件 HTML：sandbox iframe + 禁止脚本，按内容自适应高度。 */
+    function MessageHtml({ t, html }) {
+      const [height, setHeight] = React.useState(240)
+      const resize = (event) => {
+        try {
+          const doc = event.currentTarget.contentDocument
+          if (!doc) return
+          const next = Math.min(8000, Math.max(120, doc.documentElement.scrollHeight + 8))
+          setHeight(next)
+        } catch {
+          // 读不到内容高度就保持默认
+        }
+      }
+      return h('iframe', {
+        title: t('bodyViewHtml'),
+        sandbox: 'allow-same-origin',
+        srcDoc: emailHtmlDocument(html),
+        onLoad: resize,
+        style: { width: '100%', height, border: 'none', background: 'transparent', display: 'block' },
+      })
+    }
+
     /** 对话气泡：最新一封在最上方且常显，历史引用排在下面、默认折叠。 */
     function ThreadBubbles({ t, message, accountAddress }) {
       const segments = React.useMemo(() => splitQuoted(message.text), [message.text])
@@ -1811,44 +1892,141 @@ window.__ModuleLoader__.load({
     }
 
     /** 回复/转发/发送共用的编辑页。发送未接通（Phase 5 需审批），先提供复制。 */
+    /** HTML 文本转义。 */
+    function escapeHtmlText(text) {
+      return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    }
+
+    /** 把 cid: 图片换成可直接显示的本机地址（编辑/预览用）。 */
+    function cidToDisplay(html) {
+      return String(html || '').replace(/cid:(sig_[A-Za-z0-9]+)/g, (match, cid) =>
+        `${API}/accounts/signature/image/raw?id=${cid.slice(4)}`,
+      )
+    }
+
+    /** 反向转换：把本机图片地址还原成 cid:，保存草稿时必须用 cid。 */
+    function displayToCid(html) {
+      const prefix = `${API}/accounts/signature/image/raw?id=`
+      return String(html || '').split(prefix).join('cid:sig_')
+    }
+
+    /** 纯文本邮件转成初始 HTML：引用原文包成 blockquote，签名插在引用之前。 */
+    function htmlFromPlainDraft(body, signatureHtml) {
+      const text = String(body || '')
+      const signature = String(signatureHtml || '').trim()
+      const quoteMark = '------------------ 原邮件 ------------------'
+      const quoteAt = text.indexOf(quoteMark)
+      const head = (quoteAt >= 0 ? text.slice(0, quoteAt) : text).replace(/\s+$/, '')
+      const quoted = quoteAt >= 0 ? text.slice(quoteAt + quoteMark.length).replace(/^\s+/, '') : ''
+      const parts = []
+      if (head) parts.push(escapeHtmlText(head).replace(/\n/g, '<br>'))
+      if (signature) parts.push(signature)
+      if (quoted) parts.push(`<blockquote style="margin:12px 0 0;padding-left:10px;border-left:2px solid #555;color:#9aa0a6">${escapeHtmlText(quoted).replace(/\n/g, '<br>')}</blockquote>`)
+      return parts.join('<br><br>') || '<br>'
+    }
+
+    /** 从 HTML 提取纯文本（草稿的 body 字段、列表预览用）。 */
+    function plainFromHtml(html) {
+      const source = String(html || '')
+      if (typeof document === 'undefined') return htmlToText(source)
+      try {
+        const holder = document.createElement('div')
+        holder.innerHTML = source
+        return (holder.innerText || holder.textContent || '').trim()
+      } catch {
+        return htmlToText(source)
+      }
+    }
+
     function ComposeModal({ t, initial, onClose, accountId, onSubmitted }) {
       const [draft, setDraft] = React.useState(initial)
       const [copied, setCopied] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
+      const [sourceMode, setSourceMode] = React.useState(false)
+      const [signatureHtml, setSignatureHtml] = React.useState('')
+      const editorRef = React.useRef(null)
+      const sourceRef = React.useRef(null)
+      const readyRef = React.useRef(false)
 
-      // 打开时把该账户的签名（纯文本形式）附在正文底部；发送时 Core 会换成 HTML 版
+      // 取账户签名（HTML 版），用于初始正文与「插入签名」
       React.useEffect(() => {
         let cancelled = false
         const run = async () => {
-          if (!accountId) return
+          let signature = ''
           try {
             const value = await call('/accounts', {})
             const account = ((value && value.accounts) || []).find((item) => item.id === accountId)
-            const plain = htmlToText(account && account.signatureHtml)
-            if (!plain || cancelled) return
-            setDraft((prev) => {
-              const body = String(prev.body || '')
-              if (body.includes(plain.slice(0, 40))) return prev
-              // 回复/转发：签名放在本次回复正文之后、引用原文之前
-              const quoteMark = '------------------ 原邮件 ------------------'
-              const quoteAt = body.indexOf(quoteMark)
-              if (quoteAt >= 0) {
-                const head = body.slice(0, quoteAt).replace(/\s+$/, '')
-                const tail = body.slice(quoteAt)
-                return { ...prev, body: `${head}\n\n${plain}\n\n${tail}` }
-              }
-              return { ...prev, body: `${body.replace(/\s+$/, '')}\n\n${plain}\n` }
-            })
+            signature = (account && account.signatureHtml) || ''
           } catch {
-            // 签名取不到就不附
+            signature = ''
+          }
+          if (cancelled) return
+          setSignatureHtml(signature)
+          if (!readyRef.current && editorRef.current) {
+            readyRef.current = true
+            editorRef.current.innerHTML = cidToDisplay(htmlFromPlainDraft(initial.body, signature))
           }
         }
         void run()
         return () => {
           cancelled = true
         }
-      }, [accountId])
+      }, [accountId, initial])
+
+      const exec = (command, value) => {
+        if (typeof document === 'undefined') return
+        if (sourceMode) return
+        try {
+          document.execCommand(command, false, value)
+          editorRef.current && editorRef.current.focus()
+        } catch {
+          // 命令不支持就算了
+        }
+      }
+
+      const insertSignature = () => {
+        if (!signatureHtml) {
+          setNote(t('composeNoSignature'))
+          return
+        }
+        exec('insertHTML', cidToDisplay(signatureHtml))
+      }
+
+      const insertLink = () => {
+        if (typeof window === 'undefined') return
+        const url = window.prompt(t('composeLinkPrompt'), 'https://')
+        if (url) exec('createLink', url)
+      }
+
+      const currentHtml = () => {
+        if (sourceMode) return displayToCid(String((sourceRef.current && sourceRef.current.value) || ''))
+        return displayToCid(String((editorRef.current && editorRef.current.innerHTML) || ''))
+      }
+
+      const currentText = () => {
+        if (sourceMode) return plainFromHtml(String((sourceRef.current && sourceRef.current.value) || ''))
+        return plainFromHtml(String((editorRef.current && editorRef.current.innerHTML) || ''))
+      }
+
+      const toggleSource = () => {
+        if (!sourceMode) {
+          const html = String((editorRef.current && editorRef.current.innerHTML) || '')
+          setSourceMode(true)
+          setTimeout(() => {
+            if (sourceRef.current) sourceRef.current.value = displayToCid(html)
+          }, 0)
+          return
+        }
+        const html = displayToCid(String((sourceRef.current && sourceRef.current.value) || ''))
+        setSourceMode(false)
+        setTimeout(() => {
+          if (editorRef.current) editorRef.current.innerHTML = cidToDisplay(html)
+        }, 0)
+      }
 
       const submit = async () => {
         if (busy) return
@@ -1859,12 +2037,15 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setNote(null)
         try {
+          const bodyHtml = currentHtml()
+          const body = currentText() || draft.body
           const saved = await call('/drafts/save', {
             accountId,
             to: draft.to,
             cc: draft.cc,
             subject: draft.subject,
-            body: draft.body,
+            body,
+            bodyHtml,
           })
           await call('/approvals/request', { draftId: saved.id })
           setNote(t('composePendingHint'))
@@ -1875,6 +2056,7 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }
+
       const field = (labelKey, key, extra) =>
         h(
           'label',
@@ -1889,7 +2071,7 @@ window.__ModuleLoader__.load({
         )
 
       const copy = async () => {
-        const text = `收件人: ${draft.to}\n抄送: ${draft.cc}\n主题: ${draft.subject}\n\n${draft.body}`
+        const text = `收件人: ${draft.to}\n抄送: ${draft.cc}\n主题: ${draft.subject}\n\n${sourceMode ? plainFromHtml(String((sourceRef.current && sourceRef.current.value) || '')) : currentText()}`
         try {
           if (typeof navigator !== 'undefined' && navigator.clipboard) await navigator.clipboard.writeText(text)
           setCopied(true)
@@ -1897,6 +2079,9 @@ window.__ModuleLoader__.load({
           setCopied(false)
         }
       }
+
+      const toolbarButton = (key, label, onClick, title) =>
+        h('button', { key, type: 'button', style: styles.btnSmall, title: title || label, onClick }, label)
 
       return h(
         'div',
@@ -1917,11 +2102,31 @@ window.__ModuleLoader__.load({
             'label',
             { style: styles.formRow },
             h('span', { style: styles.label }, t('composeBody')),
-            h('textarea', {
-              style: { ...styles.textArea, minHeight: 220 },
-              value: draft.body,
-              onChange: (event) => setDraft((prev) => ({ ...prev, body: event.target.value })),
-            }),
+            h(
+              'div',
+              { style: styles.composeToolbar },
+              toolbarButton('bold', 'B', () => exec('bold')),
+              toolbarButton('italic', 'I', () => exec('italic')),
+              toolbarButton('underline', 'U', () => exec('underline')),
+              toolbarButton('ul', '• 列表', () => exec('insertUnorderedList')),
+              toolbarButton('ol', '1. 列表', () => exec('insertOrderedList')),
+              toolbarButton('link', t('composeLink'), insertLink),
+              toolbarButton('clear', t('composeClearFormat'), () => exec('removeFormat')),
+              toolbarButton('signature', t('composeInsertSignature'), insertSignature),
+              toolbarButton('source', sourceMode ? t('composeSourceOff') : t('composeSourceOn'), toggleSource),
+            ),
+            sourceMode
+              ? h('textarea', {
+                  ref: sourceRef,
+                  style: { ...styles.textArea, minHeight: 220, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+                  defaultValue: '',
+                })
+              : h('div', {
+                  ref: editorRef,
+                  contentEditable: true,
+                  suppressContentEditableWarning: true,
+                  style: styles.composeEditor,
+                }),
           ),
           h('p', { style: { ...styles.muted, margin: 0 } }, t('composeSendBlocked')),
           note ? h('p', { style: { ...styles.muted, margin: 0 } }, note) : null,
@@ -2317,6 +2522,22 @@ window.__ModuleLoader__.load({
 
     /** 右栏：选中邮件的正文。 */
     function MessageDetail({ t, message, accountAddress, actions, agentChat, onAgentSend, agentBusy }) {
+      const hasHtml = Boolean(message && message.html && String(message.html).trim())
+      const [bodyView, setBodyView] = React.useState(() => {
+        try {
+          return localStorage.getItem('dsh-mail:bodyView') === 'text' ? 'text' : 'html'
+        } catch {
+          return 'html'
+        }
+      })
+      const switchBodyView = (next) => {
+        setBodyView(next)
+        try {
+          localStorage.setItem('dsh-mail:bodyView', next)
+        } catch {
+          // 存不下也不影响本次切换
+        }
+      }
       if (!message) {
         return h(
           'div',
@@ -2347,7 +2568,33 @@ window.__ModuleLoader__.load({
             : null,
           h('h2', { style: styles.msgSubject }, message.subject || t('noSubject')),
           h('p', { style: { ...styles.muted, marginBottom: 12 } }, `${message.fromAddr || '?'} · ${message.date || '?'}`),
-          h(ThreadBubbles, { t, message, accountAddress }),
+          hasHtml
+            ? h(
+                'div',
+                { style: styles.bodyViewBar },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: bodyView === 'html' ? { ...styles.btnSmall, ...styles.bodyViewActive } : styles.btnSmall,
+                    onClick: () => switchBodyView('html'),
+                  },
+                  t('bodyViewHtml'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    style: bodyView === 'text' ? { ...styles.btnSmall, ...styles.bodyViewActive } : styles.btnSmall,
+                    onClick: () => switchBodyView('text'),
+                  },
+                  t('bodyViewText'),
+                ),
+              )
+            : null,
+          hasHtml && bodyView === 'html'
+            ? h(MessageHtml, { t, html: message.html })
+            : h(ThreadBubbles, { t, message, accountAddress }),
         ),
         agentChat ? h(AgentMailComposer, { t, message, onSend: onAgentSend, sending: agentBusy }) : null,
       )
@@ -6181,6 +6428,10 @@ window.__ModuleLoader__.load({
         splitQuoted,
         buildCompose,
         withSignature,
+        htmlFromPlainDraft,
+        plainFromHtml,
+        cidToDisplay,
+        displayToCid,
         ComposeModal,
         AgentMailComposer,
         TodoView,

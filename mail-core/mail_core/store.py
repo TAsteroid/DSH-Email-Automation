@@ -41,6 +41,8 @@ Schema v13 adds ``accounts.signature_html``, the per-account HTML signature
 that outgoing mail appends (empty keeps plain-text-only sending).
 Schema v14 adds ``signature_images``, the local files referenced by ``cid:``
 from a signature (files live under ``<data-dir>/signature-images``).
+Schema v15 adds ``drafts.body_html``: rich-text drafts keep their HTML next to
+the plain-text fallback, and the approval content hash covers both.
 """
 
 from __future__ import annotations
@@ -56,7 +58,7 @@ from typing import Callable, Iterable, Optional, Union
 
 from . import threads
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -499,6 +501,16 @@ def _migrate_to_v14(conn: sqlite3.Connection) -> None:
     )
 
 
+# Schema v15: drafts may carry rich-text HTML (``body_html``).  The plain
+# ``body`` stays the fallback and the approval hash covers both.
+def _migrate_to_v15(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(drafts)")}
+    if "body_html" not in columns:
+        conn.execute(
+            "ALTER TABLE drafts ADD COLUMN body_html TEXT NOT NULL DEFAULT ''"
+        )
+
+
 MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     1: _MIGRATION_1,
     2: _migrate_to_v2,
@@ -514,6 +526,7 @@ MIGRATIONS: dict[int, Union[str, Callable[[sqlite3.Connection], None]]] = {
     12: _migrate_to_v12,
     13: _migrate_to_v13,
     14: _migrate_to_v14,
+    15: _migrate_to_v15,
 }
 
 
@@ -2528,6 +2541,7 @@ class Store:
             "cc": row["cc_addr"],
             "subject": row["subject"],
             "body": row["body"],
+            "bodyHtml": row["body_html"],
             "contentHash": row["content_hash"],
             "status": row["status"],
             "createdAt": row["created_at"],
@@ -2542,6 +2556,7 @@ class Store:
             "accountId": row["account_id"],
             "to": row["to_addr"],
             "subject": row["subject"],
+            "bodyHtml": row["body_html"],
             "contentHash": row["content_hash"],
             "status": row["status"],
             "updatedAt": row["updated_at"],
@@ -2555,6 +2570,7 @@ class Store:
         cc_addr: str = "",
         subject: str = "",
         body: str = "",
+        body_html: str = "",
         content_hash: str = "",
         draft_id: Optional[str] = None,
         created_at: Optional[str] = None,
@@ -2565,9 +2581,9 @@ class Store:
             self._conn.execute(
                 """
                 INSERT INTO drafts (
-                    id, account_id, to_addr, cc_addr, subject, body,
+                    id, account_id, to_addr, cc_addr, subject, body, body_html,
                     content_hash, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
                 """,
                 (
                     draft_id,
@@ -2576,6 +2592,7 @@ class Store:
                     cc_addr,
                     subject,
                     body,
+                    body_html,
                     content_hash,
                     timestamp,
                     timestamp,
@@ -2592,6 +2609,7 @@ class Store:
         cc_addr: str = "",
         subject: str = "",
         body: str = "",
+        body_html: str = "",
         content_hash: str = "",
         status: str = "draft",
         updated_at: Optional[str] = None,
@@ -2602,7 +2620,8 @@ class Store:
                 """
                 UPDATE drafts SET
                     account_id = ?, to_addr = ?, cc_addr = ?, subject = ?,
-                    body = ?, content_hash = ?, status = ?, updated_at = ?
+                    body = ?, body_html = ?, content_hash = ?, status = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -2611,6 +2630,7 @@ class Store:
                     cc_addr,
                     subject,
                     body,
+                    body_html,
                     content_hash,
                     status,
                     updated_at or utc_now(),

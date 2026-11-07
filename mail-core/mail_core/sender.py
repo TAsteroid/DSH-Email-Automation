@@ -223,45 +223,22 @@ def _related_images(
     return wanted
 
 
-def build_message(
-    *,
-    from_addr: str,
-    to_addr: str,
-    cc_addr: str = "",
-    subject: str = "",
-    body: str = "",
-    signature_html: str = "",
-    signature_images: Optional[Iterable[dict]] = None,
-    message_id: Optional[str] = None,
-) -> tuple[EmailMessage, str]:
-    """Build the outgoing message; returns ``(message, message_id)``.
+def _plain_from_html(html_text: str) -> str:
+    """Visible text of an HTML body, used as the plain-text fallback."""
+    return signature_html.plain_text(html_text)
 
-    An empty signature yields the previous single-part ``text/plain`` message;
-    a non-empty one adds a ``text/html`` alternative.  When the signature
-    references ``cid:`` images that exist for the account, the result becomes
-    ``multipart/related`` whose first part is the ``multipart/alternative``
-    (text + HTML), followed by the image parts.
-    """
-    message_id = message_id or new_message_id(from_addr)
-    text_body, html_body, signature_used = _compose_bodies(
-        body, signature_html
-    )
-    message = EmailMessage()
-    message["From"] = from_addr
-    message["To"] = to_addr
-    if cc_addr:
-        message["Cc"] = cc_addr
-    message["Subject"] = subject
-    message["Date"] = formatdate(localtime=True)
-    message["Message-ID"] = message_id
-    message.set_content(text_body)
-    if not html_body:
-        return message, message_id
 
-    related = _related_images(signature_used, signature_images or ())
+def _attach_html(
+    message: EmailMessage,
+    text_body: str,
+    html_body: str,
+    signature_images: Optional[Iterable[dict]],
+) -> EmailMessage:
+    """Add ``html_body`` as the alternative (and cid images as related parts)."""
+    related = _related_images(html_body, signature_images or ())
     if not related:
         message.add_alternative(html_body, subtype="html")
-        return message, message_id
+        return message
 
     alternative = EmailMessage(policy=message.policy)
     alternative.set_content(text_body)
@@ -288,7 +265,67 @@ def build_message(
             filename=str(image.get("filename") or "") or None,
         )
         root.attach(part)
-    return root, message_id
+    return root
+
+
+def build_message(
+    *,
+    from_addr: str,
+    to_addr: str,
+    cc_addr: str = "",
+    subject: str = "",
+    body: str = "",
+    body_html: str = "",
+    signature_html: str = "",
+    signature_images: Optional[Iterable[dict]] = None,
+    message_id: Optional[str] = None,
+) -> tuple[EmailMessage, str]:
+    """Build the outgoing message; returns ``(message, message_id)``.
+
+    A non-empty ``body_html`` (rich-text draft) wins: it is used verbatim as
+    the HTML part, ``body`` is the text part and the account signature is
+    *not* appended again.  Without it, the legacy build applies: an empty
+    signature yields a single ``text/plain`` message; a non-empty one adds a
+    ``text/html`` alternative (with the signature).  ``cid:`` images found in
+    the HTML are attached as ``multipart/related`` parts.
+    """
+    message_id = message_id or new_message_id(from_addr)
+    if str(body_html or "").strip():
+        text_body = str(body or "")
+        if not text_body.strip():
+            text_body = _plain_from_html(body_html)
+        html_body = str(body_html)
+        message = EmailMessage()
+        message["From"] = from_addr
+        message["To"] = to_addr
+        if cc_addr:
+            message["Cc"] = cc_addr
+        message["Subject"] = subject
+        message["Date"] = formatdate(localtime=True)
+        message["Message-ID"] = message_id
+        message.set_content(text_body)
+        return (
+            _attach_html(message, text_body, html_body, signature_images),
+            message_id,
+        )
+
+    text_body, html_body, _ = _compose_bodies(body, signature_html)
+    message = EmailMessage()
+    message["From"] = from_addr
+    message["To"] = to_addr
+    if cc_addr:
+        message["Cc"] = cc_addr
+    message["Subject"] = subject
+    message["Date"] = formatdate(localtime=True)
+    message["Message-ID"] = message_id
+    message.set_content(text_body)
+    if not html_body:
+        return message, message_id
+
+    return (
+        _attach_html(message, text_body, html_body, signature_images),
+        message_id,
+    )
 
 
 def _close(client) -> None:
@@ -365,6 +402,7 @@ def send_draft(
         cc_addr=str(draft.get("cc") or ""),
         subject=str(draft.get("subject") or ""),
         body=str(draft.get("body") or ""),
+        body_html=str(draft.get("bodyHtml") or ""),
         signature_html=str(account.get("signatureHtml") or ""),
         signature_images=signature_images,
     )

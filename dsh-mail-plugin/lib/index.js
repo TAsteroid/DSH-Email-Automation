@@ -2047,6 +2047,7 @@ export function apply(ctx, config) {
         cc: typeof body.cc === 'string' ? body.cc.trim() : '',
         subject: typeof body.subject === 'string' ? body.subject : '',
         body: typeof body.body === 'string' ? body.body : '',
+        bodyHtml: typeof body.bodyHtml === 'string' ? body.bodyHtml : '',
       }
       if (typeof body.draftId === 'string' && body.draftId.trim()) params.draftId = body.draftId.trim()
       return requireCoreResult(await callCore('draft.save', params))

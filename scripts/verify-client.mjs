@@ -435,6 +435,22 @@ function runRealReactPass() {
     )
     check(detailWithAgent.includes('t:mail.agentChatSend'), '[真实渲染] 邮件详情应有「在会话中讨论」')
 
+    const htmlMessage = { id: 'm1', subject: '主题', fromAddr: 'a@b.com', date: '2026-11-06', text: '这是 HTML 正文', html: '<p>这是 <b>HTML</b> 正文</p>' }
+    const htmlDetail = renderToStaticMarkup(h(views.MessageDetail, { t, message: htmlMessage }))
+    check(htmlDetail.includes('allow-same-origin'), '[真实渲染] 详情页默认应渲染 HTML iframe')
+    check(htmlDetail.includes('t:mail.bodyViewText'), '[真实渲染] 详情页应提供纯文本切换')
+    const plainDetail = renderToStaticMarkup(h(views.MessageDetail, { t, message: { ...htmlMessage, html: '' } }))
+    check(!plainDetail.includes('allow-same-origin'), '[真实渲染] 无 HTML 时不应渲染 iframe')
+
+    const fromPlain = views.htmlFromPlainDraft(`回复内容\n\n------------------ 原邮件 ------------------\n原文`, '<p>SIG</p>')
+    check(fromPlain.includes('<p>SIG</p>') && fromPlain.includes('<blockquote'), '[HTML] 初始 HTML 应带签名与引用块')
+    check(fromPlain.indexOf('<p>SIG</p>') < fromPlain.indexOf('<blockquote'), '[HTML] 签名应在引用之前')
+    check(views.plainFromHtml('<p>你好<br>世界</p>').includes('你好'), '[HTML] 应能从 HTML 提取纯文本')
+
+    const composeRich = renderToStaticMarkup(h(views.ComposeModal, { t, initial: { mode: 'reply', to: 'a@b.com', cc: '', subject: 'Re: x', body: '正文' }, onClose: () => {} }))
+    check(composeRich.includes('t:mail.composeInsertSignature'), '[真实渲染] 编辑器应有「插入签名」')
+    check(composeRich.includes('t:mail.composeSourceOn'), '[真实渲染] 编辑器应有「HTML 源码」切换')
+    check(composeRich.includes('contenteditable'), '[真实渲染] 编辑器应为富文本可编辑区')
     const noSelectionMarkup = renderToStaticMarkup(h(views.MessageDetail, { t, message: null }))
     check(noSelectionMarkup.includes('t:mail.selectMessage'), '[真实渲染] 未选中时应显示占位')
 

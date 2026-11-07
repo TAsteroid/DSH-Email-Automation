@@ -1433,11 +1433,12 @@ class Service:
         cc_addr = _optional_str(params, "cc", "")
         subject = _optional_str(params, "subject", "")
         body = _optional_str(params, "body", "")
+        body_html = _optional_str(params, "bodyHtml", "")
 
         if self.store.get_account(account_id) is None:
             raise MailCoreError(NOT_FOUND, "account not found")
 
-        digest = drafts.content_hash(to_addr, cc_addr, subject, body)
+        digest = drafts.content_hash(to_addr, cc_addr, subject, body, body_html)
         if draft_id is None:
             saved = self.store.create_draft(
                 account_id=account_id,
@@ -1445,6 +1446,7 @@ class Service:
                 cc_addr=cc_addr,
                 subject=subject,
                 body=body,
+                body_html=body_html,
                 content_hash=digest,
             )
         else:
@@ -1455,6 +1457,7 @@ class Service:
                 cc_addr=cc_addr,
                 subject=subject,
                 body=body,
+                body_html=body_html,
                 content_hash=digest,
                 status="draft",
             )

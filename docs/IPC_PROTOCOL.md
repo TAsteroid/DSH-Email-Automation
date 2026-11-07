@@ -72,12 +72,12 @@
 结果：
 
 ```json
-{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 14}
+{"protocol": 1, "version": "0.1.0", "dbPath": "...", "dataDir": "...", "schemaVersion": 15}
 ```
 
 父进程启动后第一条请求必须是它；`protocol` 不等于 1 时插件应拒绝工作并在界面上报错。
 
-`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记 / v13 账户 HTML 签名 / v14 签名内嵌图片。**它和 `protocol` 无关**：v14 只新增表和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
+`schemaVersion` 是本地 SQLite schema 版本：v1 账号 / v2 收信协议 / v3 邮件索引 / v4 通讯录、模板与全文检索 / v5 草稿、审批与发送记录 / v6 审批审计字段 / v7 邮件线程 / v8 附件元数据 / v9 待跟进与 Agent 总结 / v10 联系人 ↔ 会话映射 / v11 附件已处理状态 / v12 正文清理标记 / v13 账户 HTML 签名 / v14 签名内嵌图片 / v15 草稿富文本 HTML。**它和 `protocol` 无关**：v15 只新增表和字段，协议版本仍是 1，旧插件遇到新 `schemaVersion` 不需要特殊处理（不认识的字段忽略即可）。
 
 ### `account.list`
 
@@ -947,16 +947,17 @@ POP3 结果：
 
 ```json
 {"draftId": "dft_xxx", "accountId": "acc_xxx", "to": "you@example.com",
- "cc": "", "subject": "季度报告", "body": "您好，附件是报告。"}
+ "cc": "", "subject": "季度报告", "body": "您好，附件是报告。",
+ "bodyHtml": "<p>您好，附件是报告。</p>"}
 ```
 
 结果：`{"id": "dft_xxx", "contentHash": "9f2c…", "status": "draft"}`
 
-- 不带 `draftId` 新建（id 由核心层生成，`dft_` 前缀）；带 `draftId` 就地替换该草稿的 `accountId` / `to` / `cc` / `subject` / `body`，`id` 不存在 → `NOT_FOUND`。
-- `accountId` / `to` 必填；`accountId` 必须存在，否则 `NOT_FOUND`；`cc` / `subject` / `body` 可省略，缺省空串。
+- 不带 `draftId` 新建（id 由核心层生成，`dft_` 前缀）；带 `draftId` 就地替换该草稿的 `accountId` / `to` / `cc` / `subject` / `body` / `bodyHtml`，`id` 不存在 → `NOT_FOUND`。
+- `accountId` / `to` 必填；`accountId` 必须存在，否则 `NOT_FOUND`；`cc` / `subject` / `body` / `bodyHtml` 可省略，缺省空串；`bodyHtml` 非字符串 → `BAD_REQUEST`。
 - 每次保存都重算 `contentHash` 和 `updatedAt`；`createdAt` 只在新建时写入。
 - 已批准 / 已驳回 / 已发送的草稿被再次保存时，状态退回 `draft`。旧审批记录保持原状态，但绑定的是旧哈希，执行时必然 `HASH_MISMATCH`。
-- `contentHash = sha256(to + "\n" + cc + "\n" + subject + "\n" + body)` 的小写十六进制；四个字段先统一换行（`\r\n`、`\r` → `\n`）再拼接，按 UTF-8 编码。除 `to` 在校验时去掉首尾空格外，字段内容不做 trim。
+- `contentHash = sha256(to + "\n" + cc + "\n" + subject + "\n" + body + "\n" + bodyHtml)` 的小写十六进制；五个字段先统一换行（`\r\n`、`\r` → `\n`）再拼接，按 UTF-8 编码。除 `to` 在校验时去掉首尾空格外，字段内容不做 trim。**`bodyHtml` 参与哈希**，所以只改 HTML、不改纯文本时审批也会失效。
 
 ### `draft.get`
 
@@ -966,7 +967,8 @@ POP3 结果：
 
 ```json
 {"id": "dft_xxx", "accountId": "acc_xxx", "to": "you@example.com", "cc": "",
- "subject": "季度报告", "body": "您好，附件是报告。", "contentHash": "9f2c…",
+ "subject": "季度报告", "body": "您好，附件是报告。",
+ "bodyHtml": "<p>您好，附件是报告。</p>", "contentHash": "9f2c…",
  "status": "draft", "createdAt": "2026-11-04T12:00:00Z", "updatedAt": "2026-11-04T12:00:00Z"}
 ```
 
@@ -980,11 +982,12 @@ POP3 结果：
 
 ```json
 {"drafts": [{"id": "dft_xxx", "accountId": "acc_xxx", "to": "you@example.com",
-  "subject": "季度报告", "contentHash": "9f2c…", "status": "draft",
+  "subject": "季度报告", "bodyHtml": "<p>您好，附件是报告。</p>",
+  "contentHash": "9f2c…", "status": "draft",
   "updatedAt": "2026-11-04T12:00:00Z"}]}
 ```
 
-按 `updatedAt` 倒序（最近修改的在前）。列表**不含** `body`；要正文请调 `draft.get`。
+按 `updatedAt` 倒序（最近修改的在前）。列表**不含** `body`，但包含 `bodyHtml`；要完整纯文本正文请调 `draft.get`。
 
 ### `draft.remove`
 
@@ -1067,10 +1070,12 @@ POP3 结果：
 - 用草稿所属账号的 `smtpHost` / `smtpPort` / `smtpSecurity`（`ssl` → `SMTP_SSL`；`starttls` → `SMTP` + `STARTTLS`；`none` → `SMTP`），用 DPAPI 解出的密码 `login`，超时 20 秒，证书用 `ssl.create_default_context()`。
 - `From` = 账号地址，`To` / `Cc` 取草稿，`Subject` 取草稿；`Message-ID` 由核心层生成并原样返回。
 - **正文与签名（MIME）**：
+  - **草稿带 `bodyHtml`（非空）时 HTML 优先**：直接用它作为 `text/html` part（不再从纯文本转义生成），`body` 作为 `text/plain` part（为空时用去标签后的 HTML 文本兜底）；**不再追加账户 `signature_html`**（客户端已把签名 HTML 放进 `bodyHtml`），也不做引用分隔行处理。此时仍解析 `bodyHtml` 里的 `src="cid:XXX"` 附加内嵌图片（规则同下）。
+  - 草稿 `bodyHtml` 为空 → 按下面的签名逻辑发送。
   - 账户 `signatureHtml` 为空 → 与以前完全一致：单个 `text/plain`。正文原样。
   - 账户有签名 → `multipart/alternative`：`text/plain` + `text/html`。HTML 部分 = 纯文本正文按行转义、换行变 `<br>`，再接 `<br><br>` + 签名 HTML。
   - **纯文本部分**：客户端 composer 会在正文末尾显示签名的纯文本版。若正文末尾确实含有该文本（去标签后的签名文本匹配，忽略首尾空白/多余空行），先把这段从纯文本正文中去掉再发送；若正文里没有，纯文本保持原样。这样签名只以格式化 HTML 出现一次，不会既重复又丢格式。
-  - **内嵌图片**：解析签名 HTML 里所有 `src="cid:XXX"`（大小写不敏感、单双引号均可），在本账户 `signature_images` 中按 cid 查图片。找到的图片作为内嵌 part（`Content-ID: <cid>`、`Content-Disposition: inline`）附加，MIME 结构变为根 `multipart/related`、**第一个子 part 是 `multipart/alternative`**（text + html），其后是各图片 part；HTML 里的 `cid:` 引用原样保留。找不到的 cid 忽略、不报错；无图片时仍按上面的 alternative / 纯文本结构发送。
+  - **内嵌图片**：解析签名 HTML（草稿 `bodyHtml` 非空时解析 `bodyHtml`）里所有 `src="cid:XXX"`（大小写不敏感、单双引号均可），在本账户 `signature_images` 中按 cid 查图片。找到的图片作为内嵌 part（`Content-ID: <cid>`、`Content-Disposition: inline`）附加，MIME 结构变为根 `multipart/related`、**第一个子 part 是 `multipart/alternative`**（text + html），其后是各图片 part；HTML 里的 `cid:` 引用原样保留。找不到的 cid 忽略、不报错；无图片时仍按上面的 alternative / 纯文本结构发送。
   - **回复/转发（引用分隔行）**：正文中存在精确匹配的 `------------------ 原邮件 ------------------` 行（允许前后空白）时，HTML 部分改为「引用前正文（先去掉客户端插入的签名纯文本块）→ `<br><br>` → 签名 HTML → `<br><br>` → 引用正文」，即签名插在引用原文**之前**；`text/plain` 部分保持客户端原文不变（含分隔行与签名纯文本）。没有该分隔行时仍按上面的末尾追加逻辑。
 - 成功：草稿 `status = sent`、审批保持 `approved`、写一条 `mail_actions(result = sent)`，返回上面三个字段。
 - 失败（未配置 `smtpHost`、没有可用密码、DPAPI 解密失败、连接 / 认证 / 发信出错）：写一条 `mail_actions(result = failed, error = 原因)`，**草稿状态不变**，返回 `SMTP_ERROR`。`error` 和响应 message **绝不包含密码**。
@@ -1166,3 +1171,4 @@ POP3 结果：
 - v12 只给 `messages` **新增** `body_purged_at` 一列（默认空串），记录 `admin.cleanup` 清理本地正文的时间；不改旧表结构、不删旧数据、不动附件行。老库（v1~v11）启动时先自动备份再升级；迁移用列检查保证幂等。
 - v13 只给 `accounts` **新增** `signature_html` 一列（默认空串，表示没有签名），不改旧表结构、不丢旧数据；空串时发送保持原来的纯文本行为。老库（v1~v12）启动时先自动备份再升级；迁移用列检查保证幂等。
 - v14 **新增** `signature_images` 表（签名内嵌图片的本地元数据；`account_id` 外键 `ON DELETE CASCADE`，`(account_id, sha256)` 唯一用于去重）与账号索引；图片文件只落在 `<data-dir>/signature-images/`，库里不存二进制。不改旧表结构、不丢旧数据。老库（v1~v13）启动时先自动备份再升级；建表用 `IF NOT EXISTS`，迁移幂等。
+- v15 只给 `drafts` **新增** `body_html` 一列（默认空串，表示没有富文本 HTML，发送按旧逻辑）；不改旧表结构、不丢旧数据。`contentHash` 从此包含 `bodyHtml`，旧审批绑定的哈希仍按旧值比较（内容未变则不受影响；改了 HTML 会正确地 `HASH_MISMATCH`）。老库（v1~v14）启动时先自动备份再升级；迁移用列检查保证幂等。

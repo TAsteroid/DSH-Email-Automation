@@ -33,11 +33,18 @@ INSERT INTO accounts (
 class DraftHashTests(unittest.TestCase):
     def test_hash_is_sha256_of_fields_joined_with_newline(self):
         expected = hashlib.sha256(
-            "to@example.com\ncc@example.com\n主题\n正文".encode("utf-8")
+            "to@example.com\ncc@example.com\n主题\n正文\n".encode("utf-8")
         ).hexdigest()
         self.assertEqual(
             drafts.content_hash("to@example.com", "cc@example.com", "主题", "正文"),
             expected,
+        )
+        # The rich-text HTML is part of the approval binding too.
+        self.assertNotEqual(
+            drafts.content_hash(
+                "to@example.com", "cc@example.com", "主题", "正文", "<p>富文本</p>"
+            ),
+            drafts.content_hash("to@example.com", "cc@example.com", "主题", "正文"),
         )
 
     def test_hash_normalizes_line_endings(self):
@@ -204,7 +211,16 @@ class DraftServiceTests(unittest.TestCase):
         self.assertEqual(len(all_drafts), 3)
         self.assertEqual(
             set(all_drafts[0]),
-            {"id", "accountId", "to", "subject", "contentHash", "status", "updatedAt"},
+            {
+                "id",
+                "accountId",
+                "to",
+                "subject",
+                "bodyHtml",
+                "contentHash",
+                "status",
+                "updatedAt",
+            },
         )
         self.assertNotIn("body", all_drafts[0])
 
