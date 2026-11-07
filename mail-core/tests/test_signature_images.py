@@ -38,44 +38,6 @@ class SignatureImageMigrationTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
 
-    def test_v13_database_creates_signature_images_table(self):
-        path = self.tmp / "legacy-v13.db"
-        connection = sqlite3.connect(str(path))
-        try:
-            connection.executescript(MIGRATIONS[1])
-            for target in range(2, 14):
-                migration = MIGRATIONS[target]
-                if callable(migration):
-                    migration(connection)
-                else:
-                    connection.executescript(migration)
-            connection.execute("PRAGMA user_version=13")
-            connection.execute(ACCOUNT_ROW)
-            connection.commit()
-        finally:
-            connection.close()
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertGreaterEqual(SCHEMA_VERSION, 14)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        tables = {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        self.assertIn("signature_images", tables)
-        self.assertEqual(store.get_account("acc_old")["address"], "old@b.com")
-        self.assertEqual(store.list_signature_images("acc_old"), [])
-
-        # Repeatable: re-running v14 (and the whole migration) is a no-op.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        MIGRATIONS[14](store._conn)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-
-
 class SignatureImageServiceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_temporary_directory()

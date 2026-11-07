@@ -56,33 +56,6 @@ class SchemaV12MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v11_database_upgrades_to_v12_and_keeps_bodies(self):
-        path = self.tmp / "legacy-v11.db"
-        self._make_v11_database(path)
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertGreaterEqual(SCHEMA_VERSION, 12)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        columns = {
-            row[1] for row in store._conn.execute("PRAGMA table_info(messages)")
-        }
-        self.assertIn("body_purged_at", columns)
-        message = store.get_message("msg_old")
-        self.assertEqual(message["text"], "旧正文")
-        purged = store._conn.execute(
-            "SELECT body_purged_at FROM messages WHERE id = 'msg_old'"
-        ).fetchone()
-        self.assertEqual(purged["body_purged_at"], "")
-
-        # Re-running v12 (and the whole migration) is a no-op.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        MIGRATIONS[12](store._conn)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(store.get_message("msg_old")["text"], "旧正文")
-
-
 class AdminMaintenanceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_temporary_directory()

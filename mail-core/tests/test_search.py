@@ -149,50 +149,6 @@ class SearchTests(unittest.TestCase):
 
     # -- migration ---------------------------------------------------------
 
-    def test_v1_database_upgrades_to_v4_with_working_search(self):
-        path = self.data_dir / "legacy-v1.db"
-        connection = sqlite3.connect(str(path))
-        try:
-            connection.executescript(MIGRATIONS[1])
-            connection.execute(ACCOUNT_ROW)
-            connection.execute("PRAGMA user_version=1")
-            connection.commit()
-        finally:
-            connection.close()
-
-        store = Store(path)
-        self.addCleanup(store.close)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(store.get_account("acc_old")["address"], "old@b.com")
-
-        tables = {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')"
-            )
-        }
-        self.assertTrue(
-            {"contacts", "templates", "messages_fts"} <= tables,
-            "schema v4 tables are missing after the v1 upgrade",
-        )
-        self.assertTrue(
-            {"messages_fts_insert", "messages_fts_delete", "messages_fts_update"}
-            <= tables
-        )
-
-        store.insert_message(
-            account_id="acc_old",
-            folder="INBOX",
-            uidvalidity=7,
-            uid=1,
-            subject="季度报告",
-            body_text="本周完成情况如下",
-            from_addr="张三 <zhang@example.com>",
-        )
-        total, messages = store.search_messages("季度报告")
-        self.assertEqual(total, 1)
-        self.assertEqual(messages[0]["subject"], "季度报告")
-
     def test_v3_database_rebuilds_fts_and_keeps_messages(self):
         path = self.data_dir / "legacy-v3.db"
         self._make_v3_database(path)

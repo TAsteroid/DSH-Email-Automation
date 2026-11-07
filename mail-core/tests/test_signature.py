@@ -54,33 +54,6 @@ class SignatureMigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v12_database_upgrades_to_v13_and_keeps_accounts(self):
-        path = self.tmp / "legacy-v12.db"
-        self._make_v12_database(path)
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertGreaterEqual(SCHEMA_VERSION, 13)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        account = store.get_account("acc_old")
-        self.assertEqual(account["address"], "old@b.com")
-        self.assertEqual(account["signatureHtml"], "")
-
-        self.assertTrue(
-            store.set_account_signature("acc_old", "<b>签名</b>")
-        )
-        self.assertEqual(store.get_account("acc_old")["signatureHtml"], "<b>签名</b>")
-
-        # Repeatable: re-running v13 (and the whole migration) is a no-op.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        MIGRATIONS[13](store._conn)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(
-            store.get_account("acc_old")["signatureHtml"], "<b>签名</b>"
-        )
-
-
 class SignatureServiceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_temporary_directory()

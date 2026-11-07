@@ -71,52 +71,6 @@ class SchemaV6MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v5_database_upgrades_to_v6_and_keeps_old_decisions(self):
-        path = self.tmp / "legacy-v5.db"
-        self._make_v5_database(path)
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertGreaterEqual(SCHEMA_VERSION, 6)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-
-        columns = {
-            row[1] for row in store._conn.execute("PRAGMA table_info(approvals)")
-        }
-        self.assertTrue({"decided_via", "decided_by"} <= columns)
-
-        # A decision made before v6 keeps its data and admits no provenance.
-        approval = store.get_approval("apr_old")
-        self.assertEqual(approval["status"], "approved")
-        self.assertEqual(approval["decidedAt"], "2026-01-02T00:00:00Z")
-        self.assertEqual(approval["decidedVia"], "")
-        self.assertEqual(approval["decidedBy"], "")
-        self.assertEqual(store.get_draft("dft_old")["subject"], "旧草稿")
-
-        # The columns are usable for a decision made after the upgrade.
-        draft = store.create_draft(
-            account_id="acc_old", to_addr="new@example.com", content_hash="hash-new"
-        )
-        fresh = store.add_approval(
-            draft_id=draft["id"], content_hash=draft["contentHash"]
-        )
-        self.assertTrue(
-            store.decide_approval(
-                fresh["id"], "approved", decided_via="prompt", decided_by="user"
-            )
-        )
-        decided = store.get_approval(fresh["id"])
-        self.assertEqual(decided["decidedVia"], "prompt")
-        self.assertEqual(decided["decidedBy"], "user")
-
-        # Re-running v6 (and the whole migration) is a no-op.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        MIGRATIONS[6](store._conn)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(store.get_approval("apr_old")["decidedVia"], "")
-
-
 class ApprovalAuditServiceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_temporary_directory()

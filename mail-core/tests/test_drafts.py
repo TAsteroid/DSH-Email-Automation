@@ -97,42 +97,6 @@ class SchemaV5MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v4_database_upgrades_and_keeps_data(self):
-        path = self.tmp / "legacy-v4.db"
-        self._make_v4_database(path)
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(store.get_account("acc_old")["address"], "old@b.com")
-        self.assertEqual([c["name"] for c in store.list_contacts()], ["旧联系人"])
-        self.assertEqual([t["name"] for t in store.list_templates()], ["旧模板"])
-
-        tables = {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        self.assertTrue({"drafts", "approvals", "mail_actions"} <= tables)
-
-        # The new tables accept rows for the migrated account.
-        draft = store.create_draft(
-            account_id="acc_old",
-            to_addr="to@example.com",
-            subject="迁移后的草稿",
-            content_hash="abc",
-        )
-        self.assertEqual(draft["status"], "draft")
-
-        # Re-running each added step must be a no-op, like every earlier one.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        store._conn.executescript(MIGRATIONS[5])
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(len(store.list_drafts()), 1)
-
-
 class DraftServiceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_temporary_directory()

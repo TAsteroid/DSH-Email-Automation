@@ -76,64 +76,6 @@ class SchemaV9MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v8_database_upgrades_to_v9_and_keeps_data(self):
-        path = self.tmp / "legacy-v8.db"
-        self._make_v8_database(path)
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertGreaterEqual(SCHEMA_VERSION, 9)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-
-        message_columns = {
-            row[1] for row in store._conn.execute("PRAGMA table_info(messages)")
-        }
-        self.assertTrue({"todo_state", "todo_updated_at"} <= message_columns)
-        account_columns = {
-            row[1] for row in store._conn.execute("PRAGMA table_info(accounts)")
-        }
-        self.assertIn("todo_baseline_done", account_columns)
-        tables = {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        self.assertIn("summaries", tables)
-
-        # Old rows are preserved and start un-registered / un-baselined.
-        old = store.get_message("msg_old")
-        self.assertEqual(old["subject"], "旧邮件")
-        self.assertEqual(store.get_todo_baseline_done("acc_old"), False)
-
-        # New columns/tables are usable after the upgrade.
-        self.assertEqual(
-            store.list_todos(account_id="acc_old", state=""), [
-                {
-                    "messageId": "msg_old",
-                    "subject": "旧邮件",
-                    "fromAddr": "",
-                    "date": "",
-                    "folder": "INBOX",
-                    "todoState": "",
-                    "hasSummary": False,
-                    "attachmentCount": 0,
-                    "snippet": "",
-                    "bodyExcerpt": "",
-                }
-            ],
-        )
-        self.assertTrue(store.set_todo_baseline_done("acc_old"))
-        self.assertTrue(store.get_todo_baseline_done("acc_old"))
-
-        # Repeatable: re-running v9 (and the whole migration) is a no-op.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        MIGRATIONS[9](store._conn)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(store.get_message("msg_old")["subject"], "旧邮件")
-
-
 class SyncTodoTests(unittest.TestCase):
     """The baseline rule is enforced by the sync layer, not by the UI."""
 

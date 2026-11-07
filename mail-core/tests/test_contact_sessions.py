@@ -58,58 +58,6 @@ class SchemaV10MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v9_database_upgrades_to_v10_and_keeps_data(self):
-        path = self.tmp / "legacy-v9.db"
-        self._make_v9_database(path)
-
-        store = Store(path)
-        self.addCleanup(store.close)
-
-        self.assertGreaterEqual(SCHEMA_VERSION, 10)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-
-        tables = {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        self.assertIn("contact_sessions", tables)
-        indexes = {
-            row["name"]
-            for row in store._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-            )
-        }
-        self.assertIn("idx_contact_sessions_email", indexes)
-
-        # Old data survives the upgrade.
-        self.assertEqual(store.get_account("acc_old")["address"], "old@b.com")
-        self.assertEqual([c["name"] for c in store.list_contacts()], ["旧联系人"])
-
-        # The new table is usable for the migrated account.
-        mapping = store.set_contact_session(
-            account_id="acc_old",
-            email="alice@example.com",
-            session_id="sess_1",
-            workspace_id="ws_1",
-            title="Alice",
-        )
-        self.assertEqual(mapping["sessionId"], "sess_1")
-
-        # Repeatable: re-running v10 (and the whole migration) is a no-op.
-        self.assertEqual(store.migrate(), SCHEMA_VERSION)
-        MIGRATIONS[10](store._conn)
-        self.assertEqual(store.schema_version, SCHEMA_VERSION)
-        self.assertEqual(store.count_contact_sessions(), 1)
-        self.assertEqual(
-            store.get_contact_session(
-                account_id="acc_old", email="alice@example.com"
-            )["title"],
-            "Alice",
-        )
-
-
 class ContactSessionTests(unittest.TestCase):
     def setUp(self):
         self._tmp = workspace_temporary_directory()

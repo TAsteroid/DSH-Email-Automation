@@ -693,20 +693,32 @@ class Store:
         return int(row[0]) if row is not None else 0
 
     def migrate(self) -> int:
-        """Bring the database up to :data:`SCHEMA_VERSION`; safe to repeat."""
+        """Bring the database up to :data:`SCHEMA_VERSION`; safe to repeat.
+
+        A brand-new database runs every migration in one go, so the per-step
+        fsync cost is skipped (``synchronous=OFF`` while building the initial
+        schema).  Existing databases keep the durable per-step commits.
+        """
         version = self.schema_version
-        while version < SCHEMA_VERSION:
-            target = version + 1
-            migration = MIGRATIONS.get(target)
-            if migration is None:
-                raise RuntimeError(f"missing migration {target}")
-            with self._conn:
-                if callable(migration):
-                    migration(self._conn)
-                else:
-                    self._conn.executescript(migration)
-                self._conn.execute(f"PRAGMA user_version={target}")
-            version = target
+        fresh = version == 0
+        if fresh:
+            self._conn.execute("PRAGMA synchronous=OFF")
+        try:
+            while version < SCHEMA_VERSION:
+                target = version + 1
+                migration = MIGRATIONS.get(target)
+                if migration is None:
+                    raise RuntimeError(f"missing migration {target}")
+                with self._conn:
+                    if callable(migration):
+                        migration(self._conn)
+                    else:
+                        self._conn.executescript(migration)
+                    self._conn.execute(f"PRAGMA user_version={target}")
+                version = target
+        finally:
+            if fresh:
+                self._conn.execute("PRAGMA synchronous=NORMAL")
         if version >= 7:
             # A v6 mailbox has messages but no thread ids.  Recompute them once
             # (repeatable: with nothing left to fill this is a cheap no-op).
