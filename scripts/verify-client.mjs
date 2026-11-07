@@ -448,6 +448,7 @@ function runRealReactPass() {
     const fromPlain = views.htmlFromPlainDraft(`回复内容\n\n------------------ 原邮件 ------------------\n原文`, '<p>SIG</p>')
     check(fromPlain.includes('<p>SIG</p>') && fromPlain.includes('<blockquote'), '[HTML] 初始 HTML 应带签名与引用块')
     check(fromPlain.indexOf('<p>SIG</p>') < fromPlain.indexOf('<blockquote'), '[HTML] 签名应在引用之前')
+    check(fromPlain.includes('回复内容<br><br><br><p>SIG</p>'), '[HTML] 签名上方应留三行空行')
     check(views.plainFromHtml('<p>你好<br>世界</p>').includes('你好'), '[HTML] 应能从 HTML 提取纯文本')
 
     const composeRich = renderToStaticMarkup(h(views.ComposeModal, { t, initial: { mode: 'reply', to: 'a@b.com', cc: '', subject: 'Re: x', body: '正文' }, onClose: () => {} }))

@@ -1935,9 +1935,10 @@ window.__ModuleLoader__.load({
       const quoted = quoteAt >= 0 ? text.slice(quoteAt + quoteMark.length).replace(/^\s+/, '') : ''
       const parts = []
       if (head) parts.push(escapeHtmlText(head).replace(/\n/g, '<br>'))
-      if (signature) parts.push(signature)
+      // 预载签名上方留三行空行，方便直接写信
+      if (signature) parts.push(`${'<br>'.repeat(3)}${signature}`)
       if (quoted) parts.push(`<blockquote style="margin:12px 0 0;padding-left:10px;border-left:2px solid #555;color:#9aa0a6">${escapeHtmlText(quoted).replace(/\n/g, '<br>')}</blockquote>`)
-      return parts.join('<br><br>') || '<br>'
+      return parts.join('') || '<br><br><br>'
     }
 
     /** 从 HTML 提取纯文本（草稿的 body 字段、列表预览用）。 */
