@@ -171,6 +171,8 @@ window.__ModuleLoader__.load({
         composeCopied: '已复制',
         composeSendBlocked: '点「发送」会先存为草稿并提交审批；批准在右侧审批栏完成，Core 在校验内容哈希后才真正发信。',
         composeSubmit: '发送',
+        composeSaveDraft: '存为草稿',
+        composeDraftSaved: '已存入草稿箱，可稍后再发',
         composePendingHint: '已提交审批，去右侧审批栏批准后才会真正发送。',
         approveAndSend: '批准并发送',
         rejectApproval: '拒绝',
@@ -473,6 +475,8 @@ window.__ModuleLoader__.load({
         composeCopied: 'Copied',
         composeSendBlocked: 'Sending saves the draft and requests approval first; approving happens in the Approvals rail, and the Core verifies the content hash before sending.',
         composeSubmit: 'Send',
+        composeSaveDraft: 'Save as draft',
+        composeDraftSaved: 'Saved to drafts — you can send it later',
         composePendingHint: 'Submitted for approval — it is sent only after you approve it in the rail.',
         approveAndSend: 'Approve and send',
         rejectApproval: 'Reject',
@@ -1960,6 +1964,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState(null)
       const [sourceMode, setSourceMode] = React.useState(false)
+      const [savedDraftId, setSavedDraftId] = React.useState('')
       const [signatureHtml, setSignatureHtml] = React.useState('')
       const editorRef = React.useRef(null)
       const sourceRef = React.useRef(null)
@@ -2054,15 +2059,47 @@ window.__ModuleLoader__.load({
           const body = currentText() || draft.body
           const saved = await call('/drafts/save', {
             accountId,
+            draftId: savedDraftId || undefined,
             to: draft.to,
             cc: draft.cc,
             subject: draft.subject,
             body,
             bodyHtml,
           })
+          setSavedDraftId(saved.id)
           await call('/approvals/request', { draftId: saved.id })
           setNote(t('composePendingHint'))
           if (onSubmitted) onSubmitted()
+        } catch (error) {
+          setNote(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      /** 只存草稿，不提交审批。 */
+      const saveDraft = async () => {
+        if (busy) return
+        if (!accountId) {
+          setNote(t('accountNoCredential'))
+          return
+        }
+        setBusy(true)
+        setNote(null)
+        try {
+          const bodyHtml = currentHtml()
+          const body = currentText() || draft.body
+          const saved = await call('/drafts/save', {
+            accountId,
+            draftId: savedDraftId || undefined,
+            to: draft.to,
+            cc: draft.cc,
+            subject: draft.subject,
+            body,
+            bodyHtml,
+          })
+          setSavedDraftId(saved.id)
+          setNote(t('composeDraftSaved'))
         } catch (error) {
           setNote(error.message)
         } finally {
@@ -2163,6 +2200,7 @@ window.__ModuleLoader__.load({
             'div',
             { style: styles.formActions },
             h('button', { type: 'button', style: styles.btn, disabled: busy, onClick: submit }, t('composeSubmit')),
+            h('button', { type: 'button', style: styles.btnSmall, disabled: busy, onClick: saveDraft }, t('composeSaveDraft')),
             h('button', { type: 'button', style: styles.btnSmall, onClick: copy }, t('composeCopyBody')),
             copied ? h('span', { style: styles.muted }, t('composeCopied')) : null,
             h('span', { style: styles.spacer }),
