@@ -4485,20 +4485,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const reject = async (approval) => {
-        if (busy) return
-        setBusy(approval.id)
-        setNote(null)
-        try {
-          await call('/approvals/reject', { id: approval.id })
-          if (onRefresh) onRefresh()
-        } catch (error) {
-          setNote(error.message)
-        } finally {
-          setBusy(null)
-        }
-      }
-
       // 发送改为 Agent 发起 + 宿主审批框；这里只提供把指令复制到对话的入口
       const copySendCommand = async (approval) => {
         const text = `请发送审批编号 ${approval.id} 的邮件（主题：${approval.subject || '(无主题)'}）`
@@ -4558,16 +4544,6 @@ window.__ModuleLoader__.load({
                           },
                           t('copySendCommand'),
                         ),
-                        h(
-                          'button',
-                          {
-                            type: 'button',
-                            style: styles.dangerBtn,
-                            disabled: busy === item.id,
-                            onClick: () => reject(item),
-                          },
-                          t('rejectApproval'),
-                        ),
                       )
                     : null,
                 )
@@ -4604,7 +4580,6 @@ window.__ModuleLoader__.load({
               },
               '▸',
             ),
-            count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
           ),
         )
       }
@@ -4640,7 +4615,6 @@ window.__ModuleLoader__.load({
             'div',
             { style: styles.railHeader },
             h('span', { style: styles.railHeaderTitle }, t('approvalHistory')),
-            count > 0 ? h('span', { style: styles.railCount }, String(count)) : null,
             h('span', { style: styles.spacer }),
             h(
               'button',

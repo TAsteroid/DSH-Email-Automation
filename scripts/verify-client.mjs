@@ -375,7 +375,7 @@ function runRealReactPass() {
         status: { ...statusPayload, counters: { ...statusPayload.counters, pendingApprovals: 4 } },
       }),
     )
-    check(railBusy.includes('>4<'), '[真实渲染] 有待审批时应显示数量')
+    check(!railBusy.includes('>4<'), '[真实渲染] 审批栏不再显示红色数量气泡')
 
     const railHistory = renderToStaticMarkup(
       h(views.ApprovalsRail, {
@@ -519,7 +519,8 @@ function runRealReactPass() {
     )
     check(historyMarkup.includes('t:mail.decidedByUser'), '[真实渲染] 历史应显示「用户批准」')
     check(historyMarkup.includes('t:mail.decidedByPolicy'), '[真实渲染] 历史应显示「策略放行」')
-    check(railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批应有「拒绝」')
+    check(!railWithPending.includes('t:mail.rejectApproval'), '[真实渲染] 待审批不应再有「拒绝」（改为 DSH 审批弹窗）')
+    check(railWithPending.includes('t:mail.copySendCommand'), '[真实渲染] 待审批应保留「复制发送指令」')
 
     const agentMarkup = renderToStaticMarkup(h(views.AgentMailComposer, { t, message: baseMessage }))
     check(agentMarkup.includes('t:mail.agentChatTitle'), '[真实渲染] 详情页应有 Agent 区')
