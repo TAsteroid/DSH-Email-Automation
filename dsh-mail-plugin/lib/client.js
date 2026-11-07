@@ -1783,14 +1783,17 @@ window.__ModuleLoader__.load({
 
     /** 把邮件 HTML 包成可直接放进 sandbox iframe 的文档（深色底、图片自适应）。 */
     function emailHtmlDocument(html) {
-      // 深色主题：整体反色 + 图片再反回来，避免白底刺眼、深色文字看不见
+      // 深色主题：直接把邮件 HTML 的背景/文字压成深色，图片保持原样
       return `<!doctype html><html><head><meta charset="utf-8"><style>
-        html{-webkit-filter:invert(0.92) hue-rotate(180deg);filter:invert(0.92) hue-rotate(180deg)}
-        html,body{margin:0;padding:0;background:transparent;font-family:-apple-system,"Segoe UI",Arial,sans-serif;font-size:13px;line-height:1.6}
-        img,svg,video,picture,canvas{-webkit-filter:invert(1) hue-rotate(180deg);filter:invert(1) hue-rotate(180deg);max-width:100%;height:auto}
-        a{color:#4c9aff}
-        table{max-width:100%!important}
-        pre,code{white-space:pre-wrap;word-break:break-word}
+        html,body{margin:0;padding:0;background:transparent !important;color:#e6e6e6 !important;
+          font-family:-apple-system,"Segoe UI",Arial,sans-serif;font-size:13px;line-height:1.6}
+        html body, html body *{background-color:transparent !important;color:#e6e6e6 !important;border-color:#3a3d42 !important}
+        html body a, html body a *{color:#4c9aff !important}
+        html body img, html body svg, html body video, html body picture, html body canvas{
+          max-width:100%;height:auto;background:transparent !important;filter:none !important}
+        html body blockquote{border-left:2px solid #444 !important;margin:12px 0 0;padding-left:10px}
+        html body table{max-width:100%!important}
+        html body pre, html body code{white-space:pre-wrap;word-break:break-word}
       </style></head><body>${sanitizeEmailHtml(html)}</body></html>`
     }
 
