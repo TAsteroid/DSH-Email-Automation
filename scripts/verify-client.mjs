@@ -438,6 +438,8 @@ function runRealReactPass() {
     const htmlMessage = { id: 'm1', subject: '主题', fromAddr: 'a@b.com', date: '2026-11-06', text: '这是 HTML 正文', html: '<p>这是 <b>HTML</b> 正文</p>' }
     const htmlDetail = renderToStaticMarkup(h(views.MessageDetail, { t, message: htmlMessage }))
     check(htmlDetail.includes('allow-same-origin'), '[真实渲染] 详情页默认应渲染 HTML iframe')
+    check(htmlDetail.includes('#0f1115'), '[真实渲染] HTML 邮件画布应为深色')
+    check(!views.sanitizeEmailHtml('<div style=\"background:#fff;color:#000\">x</div>').includes('background'), '[HTML] 应剥掉行内背景色')
     check(htmlDetail.includes('background-color:transparent !important'), '[真实渲染] HTML 邮件应按深色主题强制背景')
     check(htmlDetail.includes('t:mail.bodyViewText'), '[真实渲染] 详情页应提供纯文本切换')
     const plainDetail = renderToStaticMarkup(h(views.MessageDetail, { t, message: { ...htmlMessage, html: '' } }))

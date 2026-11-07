@@ -1773,11 +1773,17 @@ window.__ModuleLoader__.load({
 
     /** 粗略清理邮件 HTML：去掉脚本、内联框架、事件属性与 javascript: 链接。 */
     function sanitizeEmailHtml(html) {
+      const stripBackgrounds = (css) =>
+        String(css).replace(/(?:background(?:-color|-image)?|bgcolor)\s*:\s*[^;]+;?/gi, '')
       return String(html || '')
         .replace(/<\s*(script|iframe|object|embed|link|meta)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
         .replace(/<\s*(script|iframe|object|embed|link|meta)\b[^>]*\/?>/gi, '')
         .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
         .replace(/javascript\s*:/gi, '')
+        .replace(/\sbgcolor\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (match, css) => `<style>${stripBackgrounds(css)}</style>`)
+        .replace(/style\s*=\s*"([^"]*)"/gi, (match, css) => `style="${stripBackgrounds(css)}"`)
+        .replace(/style\s*=\s*'([^']*)'/gi, (match, css) => `style="${stripBackgrounds(css)}"`)
         .trim()
     }
 
@@ -1785,14 +1791,15 @@ window.__ModuleLoader__.load({
     function emailHtmlDocument(html) {
       // 深色主题：直接把邮件 HTML 的背景/文字压成深色，图片保持原样
       return `<!doctype html><html><head><meta charset="utf-8"><style>
-        html,body{margin:0;padding:0;background:transparent !important;color:#e6e6e6 !important;
+        html, html body{margin:0;padding:0;background:#0f1115 !important;background-color:#0f1115 !important;color:#e6e6e6 !important;
           font-family:-apple-system,"Segoe UI",Arial,sans-serif;font-size:13px;line-height:1.6}
-        html body, html body *{background-color:transparent !important;color:#e6e6e6 !important;border-color:#3a3d42 !important}
+        html, body, html body *, html body *::before, html body *::after{background-color:transparent !important;color:#e6e6e6 !important;border-color:#3a3d42 !important}
         html body a, html body a *{color:#4c9aff !important}
         html body img, html body svg, html body video, html body picture, html body canvas{
           max-width:100%;height:auto;background:transparent !important;filter:none !important}
         html body blockquote{border-left:2px solid #444 !important;margin:12px 0 0;padding-left:10px}
         html body table{max-width:100%!important}
+        html body *[class]{background-color:transparent !important;background-image:none !important}
         html body pre, html body code{white-space:pre-wrap;word-break:break-word}
       </style></head><body>${sanitizeEmailHtml(html)}</body></html>`
     }
@@ -6453,6 +6460,7 @@ window.__ModuleLoader__.load({
         plainFromHtml,
         cidToDisplay,
         displayToCid,
+        sanitizeEmailHtml,
         ComposeModal,
         AgentMailComposer,
         TodoView,
