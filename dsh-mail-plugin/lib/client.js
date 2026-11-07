@@ -1783,9 +1783,11 @@ window.__ModuleLoader__.load({
 
     /** 把邮件 HTML 包成可直接放进 sandbox iframe 的文档（深色底、图片自适应）。 */
     function emailHtmlDocument(html) {
+      // 深色主题：整体反色 + 图片再反回来，避免白底刺眼、深色文字看不见
       return `<!doctype html><html><head><meta charset="utf-8"><style>
-        html,body{margin:0;padding:0;background:transparent;color:#e6e6e6;font-family:-apple-system,"Segoe UI",Arial,sans-serif;font-size:13px;line-height:1.6}
-        img{max-width:100%;height:auto}
+        html{-webkit-filter:invert(0.92) hue-rotate(180deg);filter:invert(0.92) hue-rotate(180deg)}
+        html,body{margin:0;padding:0;background:transparent;font-family:-apple-system,"Segoe UI",Arial,sans-serif;font-size:13px;line-height:1.6}
+        img,svg,video,picture,canvas{-webkit-filter:invert(1) hue-rotate(180deg);filter:invert(1) hue-rotate(180deg);max-width:100%;height:auto}
         a{color:#4c9aff}
         table{max-width:100%!important}
         pre,code{white-space:pre-wrap;word-break:break-word}
@@ -2080,6 +2082,20 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const RICH_EDITOR_CSS = `
+        .dsh-mail-rich-editor, .dsh-mail-rich-editor * {
+          color: inherit !important;
+          background-color: transparent !important;
+          font-family: inherit !important;
+        }
+        .dsh-mail-rich-editor a { color: #4c9aff !important; }
+        .dsh-mail-rich-editor blockquote {
+          margin: 12px 0 0; padding-left: 10px;
+          border-left: 2px solid var(--dsw-alias-border-l2);
+        }
+        .dsh-mail-rich-editor img { max-width: 100%; height: auto; }
+      `
+
       const toolbarButton = (key, label, onClick, title) =>
         h('button', { key, type: 'button', style: styles.btnSmall, title: title || label, onClick }, label)
 
@@ -2089,6 +2105,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: styles.modal },
+          h('style', { dangerouslySetInnerHTML: { __html: RICH_EDITOR_CSS } }),
           h(
             'div',
             { style: styles.modalHead },
@@ -2125,6 +2142,7 @@ window.__ModuleLoader__.load({
                   ref: editorRef,
                   contentEditable: true,
                   suppressContentEditableWarning: true,
+                  className: 'dsh-mail-rich-editor',
                   style: styles.composeEditor,
                 }),
           ),
