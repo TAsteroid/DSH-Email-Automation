@@ -1830,6 +1830,14 @@ window.__ModuleLoader__.load({
             setDraft((prev) => {
               const body = String(prev.body || '')
               if (body.includes(plain.slice(0, 40))) return prev
+              // 回复/转发：签名放在本次回复正文之后、引用原文之前
+              const quoteMark = '------------------ 原邮件 ------------------'
+              const quoteAt = body.indexOf(quoteMark)
+              if (quoteAt >= 0) {
+                const head = body.slice(0, quoteAt).replace(/\s+$/, '')
+                const tail = body.slice(quoteAt)
+                return { ...prev, body: `${head}\n\n${plain}\n\n${tail}` }
+              }
               return { ...prev, body: `${body.replace(/\s+$/, '')}\n\n${plain}\n` }
             })
           } catch {
@@ -2898,6 +2906,21 @@ window.__ModuleLoader__.load({
       ].join('')
     }
 
+    /** 把签名纯文本插进正文：回复/转发放在引用原文之前，新邮件放末尾。 */
+    function withSignature(body, plain) {
+      const text = String(body || '')
+      const signature = String(plain || '').trim()
+      if (!signature) return text
+      if (text.includes(signature.slice(0, 40))) return text
+      const quoteMark = '------------------ 原邮件 ------------------'
+      const quoteAt = text.indexOf(quoteMark)
+      if (quoteAt >= 0) {
+        const head = text.slice(0, quoteAt).replace(/\s+$/, '')
+        const tail = text.slice(quoteAt)
+        return `${head}\n\n${signature}\n\n${tail}`
+      }
+      return `${text.replace(/\s+$/, '')}\n\n${signature}\n`
+    }
     /** 把签名 HTML 里的 cid: 换成可访问的图片地址，用于设置页预览。 */
     function signaturePreviewDoc(html) {
       const body = String(html || '').replace(/cid:([A-Za-z0-9_\-]+)/g, (match, cid) => {
@@ -6157,6 +6180,7 @@ window.__ModuleLoader__.load({
         ThreadBubbles,
         splitQuoted,
         buildCompose,
+        withSignature,
         ComposeModal,
         AgentMailComposer,
         TodoView,

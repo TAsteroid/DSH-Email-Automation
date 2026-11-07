@@ -471,6 +471,14 @@ function runRealReactPass() {
     const replyAllDraft = views.buildCompose('replyAll', baseMessage, t)
     check(replyAllDraft.cc.includes('me@b.com') && replyAllDraft.cc.includes('c@b.com'), '[撰写] 回复全部应带上原收件人与抄送')
 
+    const quoteLine = '------------------ 原邮件 ------------------'
+    const replyWithSig = views.withSignature(`好的，我确认。\n\n${quoteLine}\n发件人: a@b.com\n原文`, 'Alice Chen\nTel 123')
+    const sigAt = replyWithSig.indexOf('Alice Chen')
+    const quoteAt = replyWithSig.indexOf(quoteLine)
+    check(sigAt >= 0 && quoteAt >= 0 && sigAt < quoteAt, '[签名] 回复时签名应在引用原文之前')
+    check(replyWithSig.split('Alice Chen').length - 1 === 1, '[签名] 签名只应出现一次')
+    check(views.withSignature('正文', 'Alice Chen').trimEnd().endsWith('Alice Chen'), '[签名] 新邮件签名应在末尾')
+    check(views.withSignature(`正文\n\n${quoteLine}\n原文`, 'Alice Chen').includes('Alice Chen'), '[签名] 回复应插入签名')
     const forwardDraft = views.buildCompose('forward', baseMessage, t)
     check(forwardDraft.subject === 'Fwd: 项目 A' && forwardDraft.to === '', '[撰写] 转发应加 Fwd: 且收件人为空')
 

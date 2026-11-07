@@ -98,6 +98,103 @@ _CID_SRC = re.compile(
     r"""src\s*=\s*["']\s*cid:([^"']+?)\s*["']""", re.IGNORECASE
 )
 
+# The client inserts this exact divider line between a reply's new text and
+# the quoted message; surrounding whitespace is tolerated.
+QUOTE_SEPARATOR = "------------------ 原邮件 ------------------"
+
+
+def _split_quote(body: str) -> Optional[tuple[str, str]]:
+    """Split a reply body into ``(head, quoted)`` at the divider line.
+
+    The divider itself is dropped; ``head`` is everything before it and
+    ``quoted`` everything after it.  ``None`` when the body has no divider.
+    """
+    text = str(body or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.strip() == QUOTE_SEPARATOR:
+            return "\n".join(lines[:index]), "\n".join(lines[index + 1 :])
+    return None
+
+
+def _signature_variants(signature: str) -> list[str]:
+    """Plain-text renderings of the signature used to locate it in a body."""
+    plain = signature_html.plain_text(signature)
+    variants: list[str] = []
+    for candidate in (
+        plain,
+        plain.replace("\n", " "),
+        re.sub(r"\s+", " ", plain),
+    ):
+        candidate = candidate.strip()
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return variants
+
+
+def _strip_signature_block(head: str, signature: str) -> str:
+    """Remove the plain-text signature block from ``head`` (and blank lines).
+
+    The block is located through the first-40-character text preview used
+    elsewhere, then whole lines around it are removed, including the blank
+    lines directly before and after it.
+    """
+    lines = str(head or "").split("\n")
+    if not str(signature or "").strip():
+        return head
+    for candidate in _signature_variants(signature):
+        joined = "\n".join(lines)
+        index = joined.find(candidate)
+        if index < 0:
+            continue
+        start_line = joined.count("\n", 0, index)
+        end_char = index + len(candidate)
+        end_line = joined.count("\n", 0, end_char)
+        if end_char > 0 and joined[end_char - 1] == "\n":
+            end_line -= 1
+        first = start_line
+        while first > 0 and not lines[first - 1].strip():
+            first -= 1
+        last = end_line
+        while last + 1 < len(lines) and not lines[last + 1].strip():
+            last += 1
+        return "\n".join(lines[:first] + lines[last + 1 :])
+    return head
+
+
+def _compose_bodies(body: str, signature: str) -> tuple[str, str, str]:
+    """Return ``(text_body, html_body, signature_html_used)``.
+
+    With a quote divider, the HTML puts the signature between the reply head
+    (minus the composer's plain-text signature preview) and the quoted text,
+    while the text part is left exactly as the client produced it.  Without a
+    divider the previous trailing-signature behaviour is kept.
+    """
+    if not str(signature or "").strip():
+        return body, "", ""
+
+    quoted = _split_quote(body)
+    if quoted is not None:
+        head, tail = quoted
+        head_text = _strip_signature_block(head, signature).strip()
+        quoted_text = tail.strip()
+        pieces: list[str] = []
+        if head_text:
+            pieces.append(_html_from_text(head_text))
+        pieces.append(signature)
+        if quoted_text:
+            pieces.append(_html_from_text(quoted_text))
+        return body, "<br><br>".join(pieces), signature
+
+    text_body, signature_to_append = _trailing_signature(body, signature)
+    if not signature_to_append:
+        return text_body, "", ""
+    html_body = _html_from_text(text_body)
+    if html_body:
+        html_body += "<br><br>"
+    html_body += signature_to_append
+    return text_body, html_body, signature_to_append
+
 
 def _related_images(
     signature: str, signature_images: Iterable[dict]
@@ -146,7 +243,7 @@ def build_message(
     (text + HTML), followed by the image parts.
     """
     message_id = message_id or new_message_id(from_addr)
-    text_body, signature_to_append = _trailing_signature(
+    text_body, html_body, signature_used = _compose_bodies(
         body, signature_html
     )
     message = EmailMessage()
@@ -158,14 +255,10 @@ def build_message(
     message["Date"] = formatdate(localtime=True)
     message["Message-ID"] = message_id
     message.set_content(text_body)
-    if not signature_to_append:
+    if not html_body:
         return message, message_id
 
-    html_body = _html_from_text(text_body)
-    if html_body:
-        html_body += "<br><br>"
-    html_body += signature_to_append
-    related = _related_images(signature_to_append, signature_images or ())
+    related = _related_images(signature_used, signature_images or ())
     if not related:
         message.add_alternative(html_body, subtype="html")
         return message, message_id

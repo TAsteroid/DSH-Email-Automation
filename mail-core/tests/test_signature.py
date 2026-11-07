@@ -158,6 +158,8 @@ class SignatureSenderTests(unittest.TestCase):
         self.assertIn("Hello<br>", html_body)
         self.assertIn("World", html_body)
         self.assertIn(signature_html, html_body)
+        # Without a quote divider the signature is still appended at the end.
+        self.assertTrue(html_body.rstrip().endswith(signature_html))
 
         # The composer showed the plain-text signature at the end of the body:
         # it is removed from text/plain and kept once as HTML.
@@ -174,6 +176,31 @@ class SignatureSenderTests(unittest.TestCase):
         self.assertFalse(plain.is_multipart())
         self.assertEqual(plain.get_content_type(), "text/plain")
         self.assertEqual(plain.get_content().strip(), "Hello\nWorld")
+
+    def test_reply_signature_is_html_before_quoted_text(self):
+        signature_html = "<div>签名</div><div>张三</div>"
+        body = (
+            "回复内容\n"
+            "签名\n"
+            "张三\n"
+            "------------------ 原邮件 ------------------\n"
+            "> 原邮件内容"
+        )
+        message = self._message(body=body, signature_html=signature_html)
+
+        # The text part keeps exactly what the client produced.
+        self.assertEqual(self._text_part(message).strip(), body)
+
+        html_body = self._html_part(message)
+        self.assertIn("回复内容", html_body)
+        self.assertIn("原邮件内容", html_body)
+        self.assertLess(
+            html_body.index(signature_html),
+            html_body.index("原邮件内容"),
+            "signature HTML must come before the quoted message",
+        )
+        self.assertEqual(html_body.count("签名"), 1)
+        self.assertNotIn("------------------ 原邮件 ------------------", html_body)
 
 
 if __name__ == "__main__":

@@ -1071,6 +1071,7 @@ POP3 结果：
   - 账户有签名 → `multipart/alternative`：`text/plain` + `text/html`。HTML 部分 = 纯文本正文按行转义、换行变 `<br>`，再接 `<br><br>` + 签名 HTML。
   - **纯文本部分**：客户端 composer 会在正文末尾显示签名的纯文本版。若正文末尾确实含有该文本（去标签后的签名文本匹配，忽略首尾空白/多余空行），先把这段从纯文本正文中去掉再发送；若正文里没有，纯文本保持原样。这样签名只以格式化 HTML 出现一次，不会既重复又丢格式。
   - **内嵌图片**：解析签名 HTML 里所有 `src="cid:XXX"`（大小写不敏感、单双引号均可），在本账户 `signature_images` 中按 cid 查图片。找到的图片作为内嵌 part（`Content-ID: <cid>`、`Content-Disposition: inline`）附加，MIME 结构变为根 `multipart/related`、**第一个子 part 是 `multipart/alternative`**（text + html），其后是各图片 part；HTML 里的 `cid:` 引用原样保留。找不到的 cid 忽略、不报错；无图片时仍按上面的 alternative / 纯文本结构发送。
+  - **回复/转发（引用分隔行）**：正文中存在精确匹配的 `------------------ 原邮件 ------------------` 行（允许前后空白）时，HTML 部分改为「引用前正文（先去掉客户端插入的签名纯文本块）→ `<br><br>` → 签名 HTML → `<br><br>` → 引用正文」，即签名插在引用原文**之前**；`text/plain` 部分保持客户端原文不变（含分隔行与签名纯文本）。没有该分隔行时仍按上面的末尾追加逻辑。
 - 成功：草稿 `status = sent`、审批保持 `approved`、写一条 `mail_actions(result = sent)`，返回上面三个字段。
 - 失败（未配置 `smtpHost`、没有可用密码、DPAPI 解密失败、连接 / 认证 / 发信出错）：写一条 `mail_actions(result = failed, error = 原因)`，**草稿状态不变**，返回 `SMTP_ERROR`。`error` 和响应 message **绝不包含密码**。
 - **幂等**：`idempotency_key` 在 `mail_actions` 里是 UNIQUE。首次执行记录写入后（无论 `sent` 还是 `failed`），同一个键再次 `execute` 一律返回 `ALREADY_EXECUTED`，绝不重发。发送失败后要重试，调用方需要提供**新的** `idempotencyKey`，并在界面上明确这是另一次发送尝试。
