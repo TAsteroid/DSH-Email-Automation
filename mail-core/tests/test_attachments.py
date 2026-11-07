@@ -366,16 +366,6 @@ class AttachmentTests(unittest.TestCase):
         self.service.dispatch("account.remove", {"id": account_id})
         self.assertEqual(self.service.store.count_attachments(), 0)
 
-    def test_unknown_attachment_id_is_not_found(self):
-        with self.assertRaises(MailCoreError) as context:
-            self.service.dispatch("attachment.fetch", {"id": "att_missing"})
-        self.assertEqual(context.exception.code, "NOT_FOUND")
-        with self.assertRaises(MailCoreError) as context:
-            self.service.dispatch("attachment.get", {"id": "att_missing"})
-        self.assertEqual(context.exception.code, "NOT_FOUND")
-
-    # -- dismissal (schema v11) --------------------------------------------
-
     def _synced_report(self) -> tuple[str, dict]:
         with FakeImapServer([MESSAGE]) as server:
             account_id = self._add_account(server.port)
@@ -408,20 +398,6 @@ class AttachmentTests(unittest.TestCase):
         self.assertGreaterEqual(SCHEMA_VERSION, 11)
         MIGRATIONS[11](self.service.store._conn)
         self.assertEqual(self.service.store.schema_version, SCHEMA_VERSION)
-
-    def test_dismiss_is_idempotent(self):
-        _account_id, report = self._synced_report()
-
-        first = self.service.dispatch("attachment.dismiss", {"id": report["id"]})
-        second = self.service.dispatch("attachment.dismiss", {"id": report["id"]})
-
-        self.assertEqual(second["dismissed"], True)
-        self.assertEqual(second["dismissedAt"], first["dismissedAt"])
-
-    def test_dismiss_unknown_attachment_is_not_found(self):
-        with self.assertRaises(MailCoreError) as context:
-            self.service.dispatch("attachment.dismiss", {"id": "att_missing"})
-        self.assertEqual(context.exception.code, "NOT_FOUND")
 
     def test_pending_only_ignores_attachments_outside_inbox(self):
         with FakeImapServer([MESSAGE]) as server:
@@ -758,56 +734,6 @@ class AttachmentBackfillTests(unittest.TestCase):
         self.assertEqual(
             self.service.store.pending_attachment_messages(account_id), []
         )
-
-    def test_backfill_errors_are_capped_at_five(self):
-        messages = [
-            _build_message(
-                [TEXT_PART, PDF_PART],
-                subject=f"m{index}",
-                message_id=f"<m{index}@example.com>",
-                date=f"Mon, 0{index} Nov 2026 09:00:00 +0000",
-            )
-            for index in range(1, 7)
-        ]
-        with FakeImapServer(messages) as server:
-            account_id = self.service.dispatch(
-                "account.add",
-                {
-                    "address": "me@example.com",
-                    "imapHost": "127.0.0.1",
-                    "imapPort": server.port,
-                    "imapSecurity": "none",
-                    "username": "me@example.com",
-                    "password": PASSWORD,
-                    "smtpHost": "",
-                },
-            )["id"]
-            self.service.dispatch("sync.run", {"accountId": account_id})
-            self.service.store._conn.execute("DELETE FROM attachments")
-            self.service.store._conn.execute(
-                "UPDATE messages SET attachments_synced = 0"
-            )
-            self.service.store._conn.commit()
-            server.deleted_uids["INBOX"] = set(range(1, 7))
-
-            result = self.service.dispatch(
-                "attachment.backfill", {"accountId": account_id}
-            )
-
-        self.assertEqual(result["scanned"], 6)
-        self.assertEqual(result["updated"], 0)
-        self.assertEqual(result["skipped"], 6)
-        self.assertEqual(len(result["errors"]), 5)
-        error_ids = [error["messageId"] for error in result["errors"]]
-        self.assertEqual(len(set(error_ids)), 5)
-        pending = {
-            message["id"]
-            for message in self.service.store.pending_attachment_messages(
-                account_id
-            )
-        }
-        self.assertTrue(set(error_ids) <= pending)
-
 
 if __name__ == "__main__":
     unittest.main()

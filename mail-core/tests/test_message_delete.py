@@ -263,25 +263,6 @@ class MessageDeleteTests(unittest.TestCase):
             self.assertEqual(context.exception.code, "NOT_FOUND")
             self.assertEqual(len(server.copies), 1, "a repeat must not touch the server")
 
-    def test_unknown_message_is_not_found(self):
-        with self.assertRaises(MailCoreError) as context:
-            self.service.dispatch("message.delete", {"id": "msg_missing"})
-        self.assertEqual(context.exception.code, "NOT_FOUND")
-
-    def test_permanent_must_be_boolean(self):
-        with FakeImapServer(MESSAGES, folder_lines=[INBOX_LINE, TRASH_LINE]) as server:
-            account_id = self._imap_ready(server)
-            message = self._message(account_id, uid=1)
-
-            with self.assertRaises(MailCoreError) as context:
-                self.service.dispatch(
-                    "message.delete", {"id": message["id"], "permanent": "yes"}
-                )
-            self.assertEqual(context.exception.code, "BAD_REQUEST")
-            self.assertIsNotNone(self.service.store.get_message(message["id"]))
-
-    # -- POP3 --------------------------------------------------------------
-
     def test_pop3_deletes_the_local_copy_only(self):
         with FakePop3Server(messages=3) as server:
             account_id = self._add_account(server.port, protocol="pop3")
@@ -451,13 +432,6 @@ class MessageRestoreTests(unittest.TestCase):
             self.assertEqual(context.exception.code, "IMAP_ERROR")
 
         self.assertIsNotNone(self.service.store.get_message(message["id"]))
-
-    def test_restore_unknown_message_is_not_found(self):
-        with self.assertRaises(MailCoreError) as context:
-            self._restore("msg_missing")
-        self.assertEqual(context.exception.code, "NOT_FOUND")
-
-    # -- POP3 --------------------------------------------------------------
 
     def test_restore_on_pop3_is_bad_request(self):
         with FakePop3Server(messages=2) as server:

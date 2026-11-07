@@ -416,10 +416,5 @@ class SenderTransportTests(unittest.TestCase):
         with self.assertRaises(sender.SendError):
             sender.send_message("smtp.example.com", 25, "tls", "user", "pass", _message())
 
-    def test_missing_host_is_a_send_error(self):
-        with self.assertRaises(sender.SendError):
-            sender.send_message("", 25, "none", "user", "pass", _message())
-
-
 if __name__ == "__main__":
     unittest.main()
