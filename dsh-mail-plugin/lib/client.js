@@ -160,6 +160,9 @@ window.__ModuleLoader__.load({
         composeSubject: '主题',
         composeBody: '正文',
         composeLink: '链接',
+        composeLinkText: '显示文字（可留空）',
+        composeLinkUrl: '链接地址',
+        composeLinkApply: '插入链接',
         composeLinkPrompt: '输入链接地址',
         composeClearFormat: '清除格式',
         composeInsertSignature: '插入签名',
@@ -464,6 +467,9 @@ window.__ModuleLoader__.load({
         composeSubject: 'Subject',
         composeBody: 'Body',
         composeLink: 'Link',
+        composeLinkText: 'Text (optional)',
+        composeLinkUrl: 'URL',
+        composeLinkApply: 'Insert link',
         composeLinkPrompt: 'Enter the link URL',
         composeClearFormat: 'Clear formatting',
         composeInsertSignature: 'Insert signature',
@@ -1310,6 +1316,16 @@ window.__ModuleLoader__.load({
         flexWrap: 'wrap',
         marginBottom: 6,
       },
+      composeLinkPanel: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        marginBottom: 6,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background: 'var(--dsw-alias-bg-l2)',
+      },
       composeEditor: {
         minHeight: 220,
         maxHeight: 420,
@@ -1966,6 +1982,10 @@ window.__ModuleLoader__.load({
       const [sourceMode, setSourceMode] = React.useState(false)
       const [savedDraftId, setSavedDraftId] = React.useState('')
       const [signatureHtml, setSignatureHtml] = React.useState('')
+      const [linkOpen, setLinkOpen] = React.useState(false)
+      const [linkUrl, setLinkUrl] = React.useState('https://')
+      const [linkText, setLinkText] = React.useState('')
+      const linkRangeRef = React.useRef(null)
       const editorRef = React.useRef(null)
       const sourceRef = React.useRef(null)
       const readyRef = React.useRef(false)
@@ -2014,10 +2034,61 @@ window.__ModuleLoader__.load({
         exec('insertHTML', cidToDisplay(signatureHtml))
       }
 
+      /** 打开内联链接面板；记住当前选区，确认时恢复。 */
       const insertLink = () => {
-        if (typeof window === 'undefined') return
-        const url = window.prompt(t('composeLinkPrompt'), 'https://')
-        if (url) exec('createLink', url)
+        if (sourceMode) return
+        try {
+          const selection = window.getSelection()
+          const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null
+          linkRangeRef.current = range
+          setLinkText(range && !range.collapsed ? range.toString() : '')
+        } catch {
+          linkRangeRef.current = null
+          setLinkText('')
+        }
+        setLinkUrl('https://')
+        setLinkOpen(true)
+      }
+
+      const applyLink = () => {
+        const url = String(linkUrl || '').trim()
+        if (!url || !editorRef.current) return
+        const label = String(linkText || '').trim() || url
+        const href = url
+          .replace(/&/g, '&amp;')
+          .replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+        const anchor = `<a href="${href}">${escapeHtmlText(label)}</a>`
+        const editor = editorRef.current
+        editor.focus()
+        try {
+          const selection = window.getSelection()
+          const range = linkRangeRef.current
+          if (selection && range) {
+            selection.removeAllRanges()
+            selection.addRange(range)
+          }
+        } catch {
+          // 恢复选区失败就插入到光标处
+        }
+        try {
+          document.execCommand('insertHTML', false, anchor)
+        } catch {
+          // 极端情况下退回到追加 HTML
+          editor.innerHTML += anchor
+        }
+        linkRangeRef.current = null
+        setLinkOpen(false)
+        setLinkUrl('https://')
+        setLinkText('')
+      }
+
+      const cancelLink = () => {
+        linkRangeRef.current = null
+        setLinkOpen(false)
+        setLinkUrl('https://')
+        setLinkText('')
       }
 
       const currentHtml = () => {
@@ -2180,6 +2251,33 @@ window.__ModuleLoader__.load({
               toolbarButton('signature', t('composeInsertSignature'), insertSignature),
               toolbarButton('source', sourceMode ? t('composeSourceOff') : t('composeSourceOn'), toggleSource),
             ),
+            linkOpen
+              ? h(
+                  'div',
+                  { style: styles.composeLinkPanel },
+                  h('input', {
+                    style: { ...styles.textInput, flex: 1, minWidth: 120 },
+                    value: linkText,
+                    placeholder: t('composeLinkText'),
+                    onChange: (event) => setLinkText(event.target.value),
+                  }),
+                  h('input', {
+                    style: { ...styles.textInput, flex: 2, minWidth: 160 },
+                    value: linkUrl,
+                    placeholder: t('composeLinkUrl'),
+                    onChange: (event) => setLinkUrl(event.target.value),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        applyLink()
+                      }
+                      if (event.key === 'Escape') cancelLink()
+                    },
+                  }),
+                  h('button', { type: 'button', style: styles.btnSmall, onClick: applyLink }, t('composeLinkApply')),
+                  h('button', { type: 'button', style: styles.btnSmall, onClick: cancelLink }, t('cancel')),
+                )
+              : null,
             sourceMode
               ? h('textarea', {
                   ref: sourceRef,
