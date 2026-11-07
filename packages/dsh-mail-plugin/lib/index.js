@@ -12,7 +12,7 @@
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createCoreClient } from './core-client.js'
 
@@ -52,17 +52,22 @@ const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = dirname(here)
 const workspaceRoot = dirname(packageRoot)
 
+/** 仓库布局：`<repo>/packages/<plugin>` 或 `<repo>/<plugin>`。 */
+const repoRoot = ['packages', 'plugins', 'apps'].includes(basename(workspaceRoot))
+  ? dirname(workspaceRoot)
+  : workspaceRoot
+
 /**
- * 打包安装时 Python Core 在包内（`<包>/mail-core`）；开发布局时在仓库同级目录。
+ * 打包安装时 Python Core 在包内（`<包>/mail-core`）；开发布局时在仓库根目录。
  * 两种情况都要能自动找到，否则从 npm/tgz 装进来的插件起不来。
  */
 const DEFAULT_CORE_DIR = existsSync(join(packageRoot, 'mail-core', 'mail_core', '__main__.py'))
   ? join(packageRoot, 'mail-core')
-  : join(workspaceRoot, 'mail-core')
+  : join(repoRoot, 'mail-core')
 
 /** 数据目录：开发布局沿用仓库的 data/mail；打包安装放到 DSH 家目录下。 */
-const DEFAULT_DATA_DIR = existsSync(join(workspaceRoot, 'data', 'mail'))
-  ? join(workspaceRoot, 'data', 'mail')
+const DEFAULT_DATA_DIR = existsSync(join(repoRoot, 'data', 'mail'))
+  ? join(repoRoot, 'data', 'mail')
   : join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-mail', 'data')
 
 // ---------------------------------------------------------------------------

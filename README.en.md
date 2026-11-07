@@ -4,7 +4,7 @@ English | [中文](README.md)
 
 Brings a real mailbox into DeepSeek Harness: real-time mail push, automatic follow-up items, one-click hand-off of a mail (and its attachments) to an Agent for summarization, and human-approved sending.
 
-The plugin has two halves: a DSH host plugin (`dsh-mail-plugin/`) and a pure-stdlib Python Core (`mail-core/`, spawned and supervised by the plugin — you never run it yourself). All data lives in a local SQLite database; mailbox passwords are encrypted with Windows DPAPI.
+The plugin has two halves: a DSH host plugin (`packages/dsh-mail-plugin/`) and a pure-stdlib Python Core (`mail-core/`, spawned and supervised by the plugin — you never run it yourself). All data lives in a local SQLite database; mailbox passwords are encrypted with Windows DPAPI.
 
 Current version: **v0.3.0** (database schema v15)
 

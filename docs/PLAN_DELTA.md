@@ -5,7 +5,7 @@
 
 对照对象：`docs/PLAN.md`（v1.0，不再更新）
 更新时间：2026-11-07
-代码：`mail-core/`（Python）+ `dsh-mail-plugin/`（Cordis 插件），**schema v15**，插件版本 **v0.3.0**，真实账号已接入
+代码：`mail-core/`（Python）+ `packages/dsh-mail-plugin/`（Cordis 插件），**schema v15**，插件版本 **v0.3.0**，真实账号已接入
 
 ---
 

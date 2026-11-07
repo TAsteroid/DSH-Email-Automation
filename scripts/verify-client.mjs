@@ -16,7 +16,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const clientPath = join(here, '..', 'dsh-mail-plugin', 'lib', 'client.js')
+const clientPath = join(here, '..', 'packages', 'dsh-mail-plugin', 'lib', 'client.js')
 const source = readFileSync(clientPath, 'utf8')
 
 const failures = []

@@ -114,7 +114,7 @@ window.__ModuleLoader__.load({ id: '<包名>', factory(require) {
 
 ## 4. 最小可运行示例插件
 
-`dsh-mail-plugin/`（已安装到 `desktop` profile 并验证通过）：
+`packages/dsh-mail-plugin/`（已安装到 `desktop` profile 并验证通过）：
 
 | 能力 | 落点 | 验证结果 |
 |---|---|---|

@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
-const pluginDir = join(repoRoot, 'dsh-mail-plugin')
+const pluginDir = join(repoRoot, 'packages', 'dsh-mail-plugin')
 const coreDir = join(repoRoot, 'mail-core')
 const stageRoot = join(repoRoot, '.tmp', 'package-stage')
 const stagePkg = join(stageRoot, 'dsh-mail-plugin')

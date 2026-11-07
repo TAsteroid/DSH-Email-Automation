@@ -15,7 +15,7 @@ mail-core/mail_core/
 mail-core/tests/
   fake_servers.py   FakeImapServer、扩展的 FakePop3Server（UIDL/RETR/LIST）
   test_sync.py      同步、幂等、UIDVALIDITY 重置、正文读取、计数
-dsh-mail-plugin/lib/
+packages/dsh-mail-plugin/lib/
   index.js          新增 mail_sync / mail_messages / mail_message 工具；/sync /messages /message 路由；心跳兜底同步
   client.js         收件箱中间栏渲染邮件列表，右栏渲染正文，列表头加「立即同步」按钮
 scripts/

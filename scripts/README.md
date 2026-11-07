@@ -36,17 +36,17 @@
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `-Profile` | string | `desktop` | profile 名称或完整路径 |
-| `-RepoPath` | string | 脚本上一级目录 | 仓库根目录（必须包含 `dsh-mail-plugin\lib\index.js`） |
+| `-RepoPath` | string | 脚本上一级目录 | 仓库根目录（必须包含 `packages\dsh-mail-plugin\lib\index.js`） |
 | `-DataDir` | string | `<RepoPath>\data\mail` | 数据目录。**显式传入**才覆盖 patch 里的已有值 |
 | `-WorkspaceDir` | string | `<RepoPath>\data\mail\workspace` | 邮件工作区目录。规则同上 |
 | `-Force` | switch | 关 | junction 或依赖已指向别处时，强制改为本仓库 |
 
 ### 做了什么
 
-1. 校验 profile、仓库、插件入口（`dsh-mail-plugin\lib\index.js`）；
+1. 校验 profile、仓库、插件入口（`packages\dsh-mail-plugin\lib\index.js`）；
 2. 创建/修复 `<profile>\node_modules\dsh-mail-plugin` junction（Windows Junction，不需要管理员权限）；
 3. 在 `package.json` 里确保：
-   - `dependencies["dsh-mail-plugin"] = "link:<RepoPath>/dsh-mail-plugin"`；
+   - `dependencies["dsh-mail-plugin"] = "link:<RepoPath>/packages/dsh-mail-plugin"`；
    - `dsh.profile.bundles` 数组包含 `dsh-mail-plugin`（自动去重）；
 4. 在 `cordis.patch.yml` 里确保 `- id: dsh-mail-plugin` 条目存在，并写入
    `syncIntervalMs` / `dataDir` / `mailWorkspace` / `mailWorkspaceId`，`disabled: false`；

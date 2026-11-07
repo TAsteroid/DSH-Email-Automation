@@ -4,7 +4,7 @@
 
 把邮箱接进 DeepSeek Harness：收信实时推送、邮件自动进待办、把邮件和附件交给 Agent 总结归档、发信必须人工审批。
 
-插件由两部分组成：一个 DSH 宿主插件（`dsh-mail-plugin/`）+ 一个纯标准库的 Python Core（`mail-core/`，由插件自动拉起，无需单独运行）。数据全部落本地 SQLite，邮箱密码用 Windows DPAPI 加密。
+插件由两部分组成：一个 DSH 宿主插件（`packages/dsh-mail-plugin/`）+ 一个纯标准库的 Python Core（`mail-core/`，由插件自动拉起，无需单独运行）。数据全部落本地 SQLite，邮箱密码用 Windows DPAPI 加密。
 
 当前版本：**v0.3.0**（数据库 schema v15）
 

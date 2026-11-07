@@ -104,7 +104,7 @@ function Resolve-RepoDirectory([string]$RepoValue, [string]$ScriptRoot, [bool]$R
     }
     $repoDir = Get-FullPath $RepoValue
     if ($RequirePlugin) {
-        $entry = Join-Path (Join-Path $repoDir 'dsh-mail-plugin') 'lib\index.js'
+        $entry = Join-Path (Join-Path $repoDir 'packages\dsh-mail-plugin') 'lib\index.js'
         if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) {
             Fail "未找到插件入口：$entry（请确认 -RepoPath 指向仓库根目录）"
         }

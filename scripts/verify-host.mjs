@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const hostPath = join(here, '..', 'dsh-mail-plugin', 'lib', 'index.js')
+const hostPath = join(here, '..', 'packages', 'dsh-mail-plugin', 'lib', 'index.js')
 const { apply, inject, name } = await import(`file://${hostPath.replace(/\\/g, '/')}`)
 
 const failures = []

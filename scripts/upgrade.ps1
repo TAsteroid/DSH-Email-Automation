@@ -40,7 +40,7 @@ try {
 
     $repoDir = Resolve-RepoDirectory -RepoValue $null -ScriptRoot $PSScriptRoot -RequirePlugin $true
     $profileDir = Resolve-ProfileDirectory $Profile
-    $pluginDir = Join-Path $repoDir 'dsh-mail-plugin'
+    $pluginDir = Join-Path $repoDir 'packages\dsh-mail-plugin'
     $patchPath = Join-Path $profileDir 'cordis.patch.yml'
     $packagePath = Join-Path $profileDir 'package.json'
     $linkPath = Join-Path (Join-Path $profileDir 'node_modules') $script:PluginId

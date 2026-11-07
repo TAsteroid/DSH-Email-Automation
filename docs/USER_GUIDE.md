@@ -17,7 +17,7 @@
 - **附件**：只存元数据，你点了才下载；下载后可作为文件直接传给 Agent
 - 所有数据在本地 SQLite，密码用 Windows DPAPI 加密
 
-插件由两部分组成：一个 DSH 宿主插件（`dsh-mail-plugin/`）+ 一个 Python Core（`mail-core/`，由插件自动拉起，**不需要你单独运行**）。
+插件由两部分组成：一个 DSH 宿主插件（`packages/dsh-mail-plugin/`）+ 一个 Python Core（`mail-core/`，由插件自动拉起，**不需要你单独运行**）。
 
 ---
 
